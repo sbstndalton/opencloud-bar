@@ -181,3 +181,56 @@ func TestBisyncUsesBwLimit(t *testing.T) {
 		t.Errorf("calls: %s", fr.calls())
 	}
 }
+
+// Two Keeps of the same file within one second share the backup stamp folder: the second
+// backup must not replace the first (the original would be lost).
+func TestKeepTwiceSameSecondKeepsBothBackups(t *testing.T) {
+	local, state := t.TempDir(), t.TempDir()
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	writeFile(t, filepath.Join(local, "a.txt"), "original", now)
+	writeFile(t, filepath.Join(local, "a.txt.conflict1"), "c1", now)
+	writeFile(t, filepath.Join(local, "a.txt.conflict2"), "c2", now)
+	list := scanConflicts(local, nil)
+	for _, c := range []string{"a.txt.conflict1", "a.txt.conflict2"} {
+		if err := keepConflictVersion(local, state, "st", c, list, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dir := localBackupDir(state, "st", backupStamp(now))
+	for file, want := range map[string]string{"a.txt": "original", "a (2).txt": "c1"} {
+		if b, err := os.ReadFile(filepath.Join(dir, file)); err != nil || string(b) != want {
+			t.Errorf("backup %s = %q, %v", file, b, err)
+		}
+	}
+	if b, _ := os.ReadFile(filepath.Join(local, "a.txt")); string(b) != "c2" {
+		t.Errorf("file = %q", b)
+	}
+}
+
+// A merge's second pass uses its own backup folder, and pruning still reads its date.
+func TestMergeSecondPassOwnBackupDir(t *testing.T) {
+	e, fr, f := syncRig(t, true)
+	fr.bisync(driftOut, 1) // both passes drift
+	e.syncFolder(f, modeNormal)
+	c := fr.calls()
+	if !strings.Contains(c, "Z-2 --backup-dir2") && !strings.Contains(c, "Z-2 ") {
+		t.Errorf("second pass shares the first pass's backup folder: %s", c)
+	}
+	root := filepath.Join(expand(e.cfg.StateDir), "backups", f.StateName)
+	old := filepath.Join(root, backupStamp(time.Now().Add(-40*24*time.Hour))+"-2")
+	_ = os.MkdirAll(old, 0o700)
+	pruneBackups(e.cfg.StateDir, f.StateName, time.Now())
+	if exists(old) {
+		t.Error("old second-pass backup not pruned")
+	}
+}
+
+func TestBwLimitLowercase(t *testing.T) {
+	if bwLimitProblem("x", "512k") != nil || normBwLimit(" 2m ") != "2M" {
+		t.Error("lower-case units")
+	}
+	e := pausedRig(t, `,"bwLimitUp":"512k"`)
+	if e.cfg.BwLimitUp != "512K" || e.cfgErr != nil {
+		t.Errorf("loaded %q %v", e.cfg.BwLimitUp, e.cfgErr)
+	}
+}

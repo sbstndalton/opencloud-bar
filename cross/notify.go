@@ -156,7 +156,11 @@ func conflictNote(bs []conflictBatch) *note {
 	if len(names) > 1 {
 		title = conflictsText(n) + " in " + fmt.Sprint(len(names)) + " folders"
 	}
-	return &note{title, "A file changed on both sides. The newer copy kept the name; the other is saved next to it as ….conflict1. Open Settings ▸ Conflicts to keep one.", "conflicts"}
+	saved := "as “" + bs[0].example + "”"
+	if n > 1 {
+		saved = "with .conflict1 (or a higher number) added to its name, like “" + bs[0].example + "”"
+	}
+	return &note{title, "A file changed on both sides. The newer copy kept the name; the other is saved next to it " + saved + ". Open Settings ▸ Conflicts to keep one.", "conflicts"}
 }
 
 func plural(names []string, one, many string) string {

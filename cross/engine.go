@@ -81,6 +81,12 @@ type Engine struct {
 	mountRetryAt   time.Time
 	mountBackoff   time.Duration
 	unmountRequest bool
+	// Restarting the drive for new settings (a bandwidth limit): remountRequest marks the
+	// unmount as ours, so the mount's exit isn't taken for an eject; remountPending retries
+	// while the drive is busy.
+	remountRequest bool
+	remountPending bool
+	remountRetryAt time.Time
 
 	currentSync *exec.Cmd
 	nextSyncAt  time.Time
@@ -290,6 +296,10 @@ func (e *Engine) tick() {
 		}
 		up = e.tunnelOurs() && open
 	}
+	if e.remountPending && e.mount != nil && !e.remountRequest && time.Now().After(e.remountRetryAt) {
+		e.remountRetryAt = time.Now().Add(time.Minute)
+		go e.restartDrive()
+	}
 	if e.cfg.Mounting() && e.mountWanted && up && e.mount == nil && time.Now().After(e.mountRetryAt) {
 		e.startMountLocked()
 	}
@@ -477,6 +487,12 @@ func (e *Engine) startMountLocked() {
 		if e.quitting {
 			return
 		}
+		if e.remountRequest {
+			e.remountRequest = false
+			e.mountRetryAt = time.Time{}
+			e.logLine("drive restarting for new settings")
+			return // mountWanted stays: the next tick starts it again
+		}
 		if e.unmountRequest {
 			e.logLine("drive ejected from the menu")
 			return
@@ -499,6 +515,40 @@ func (e *Engine) startMountLocked() {
 			go forceUnmount(target)
 		}
 	}()
+}
+
+const driveBusyText = "The drive is in use, so the new bandwidth limit applies once it can restart (close files on the drive)"
+
+// restartDrive stops the drive so the next tick starts it with new settings. If the drive is
+// busy it keeps running with the old ones, says so, and tries again every minute.
+func (e *Engine) restartDrive() {
+	e.mu.Lock()
+	m := e.mount
+	if m == nil || e.remountRequest {
+		e.remountPending = e.remountPending && m != nil
+		e.mu.Unlock()
+		return
+	}
+	e.remountRequest = true
+	target := e.mountTargetLocked()
+	e.mu.Unlock()
+	err := e.unmount(m)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err != nil && isMounted(target) {
+		// Still mounted (busy): it wasn't stopped, so its exit later is not ours.
+		e.remountRequest, e.remountPending = false, true
+		e.remountRetryAt = time.Now().Add(time.Minute)
+		if e.message != driveBusyText {
+			e.logLine("drive: couldn't restart for new settings: %v", err)
+		}
+		e.message = driveBusyText
+		return
+	}
+	e.remountPending = false
+	if e.message == driveBusyText {
+		e.message = ""
+	}
 }
 
 // unmount stops the drive: the OS unmount where there is one, else rclone's own quit,
@@ -1032,9 +1082,15 @@ func (e *Engine) merge(r folderRun, kind, driftNote string) (bool, syncOutcome) 
 	}
 	now := time.Now()
 	pruneBackups(r.cfg.StateDir, r.f.StateName, now)
-	backups := backupArgs(r.cfg, r.f, backupStamp(now))
+	stamp := backupStamp(now)
 	for pass := 1; pass <= 2; pass++ {
-		out, err := e.bisync(r, kind, append([]string{"--resync", "--resync-mode", "newer"}, backups...)...)
+		// Each pass gets its own backup folder: a file the second pass replaces again must not
+		// overwrite the first pass's backup of it.
+		passStamp := stamp
+		if pass > 1 {
+			passStamp = fmt.Sprintf("%s-%d", stamp, pass)
+		}
+		out, err := e.bisync(r, kind, append([]string{"--resync", "--resync-mode", "newer"}, backupArgs(r.cfg, r.f, passStamp)...)...)
 		if err == nil {
 			e.syncSucceeded(r)
 			return true, outcomeOK
@@ -1488,10 +1544,7 @@ func (e *Engine) Reload() error {
 	m, t := e.mount, e.tunnel
 	e.mu.Unlock()
 	if remount && !reconnect && m != nil {
-		e.mu.Lock()
-		e.unmountRequest = true // it starts again on the next tick, with the new limit
-		e.mu.Unlock()
-		_ = e.unmount(m)
+		e.restartDrive()
 	}
 	if reconnect {
 		if m != nil {

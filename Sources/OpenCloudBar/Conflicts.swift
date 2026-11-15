@@ -93,11 +93,27 @@ enum Conflicts {
         let fm = FileManager.default
         guard fm.fileExists(atPath: loser.path) else { throw AuthError.message("The conflict copy is gone (synced or removed meanwhile).") }
         if fm.fileExists(atPath: winner.path) {
-            let dest = backupDir.appendingPathComponent(item.original)
+            let dest = freeURL(backupDir.appendingPathComponent(item.original))
             try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
             try fm.moveItem(at: winner, to: dest)
         }
         try fm.moveItem(at: loser, to: winner)
+    }
+}
+
+extension Conflicts {
+    /// `url`, or "name (2).ext", "name (3).ext"… if it exists: a backup never replaces another
+    /// (two Keeps of the same file within one second share the stamp folder).
+    static func freeURL(_ url: URL) -> URL {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return url }
+        let ext = url.pathExtension, stem = url.deletingPathExtension().lastPathComponent, dir = url.deletingLastPathComponent()
+        for i in 2... {
+            let name = ext.isEmpty ? "\(stem) (\(i))" : "\(stem) (\(i)).\(ext)"
+            let q = dir.appendingPathComponent(name)
+            if !fm.fileExists(atPath: q.path) { return q }
+        }
+        return url
     }
 }
 
@@ -121,7 +137,7 @@ struct ConflictsPage: View {
             if rows.isEmpty {
                 Section { Text("No conflicts.").foregroundStyle(.secondary) }
             } else {
-                Section("\(rows.count) conflict copies") {
+                Section(rows.count == 1 ? "1 conflict copy" : "\(rows.count) conflict copies") {
                     ForEach(rows, id: \.1.file) { f, c in
                         VStack(alignment: .leading, spacing: 4) {
                             Text(c.file).font(.body.monospaced()).textSelection(.enabled)

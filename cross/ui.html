@@ -296,9 +296,13 @@ async function stopKeeping(f) {
 
 // ---- Conflicts
 
+function trashWhere() {
+  return navigator.userAgent.includes("Windows") ? "the \"Removed by OpenCloud Bar\" folder in your user folder" : "the trash";
+}
+
 function conflicts(main) {
   header(main, "Conflicts");
-  main.append(h("p", { class: "hint", text: "When a file changed on both sides, the newer copy keeps its name and the other is saved next to it as name.conflict1. Keep This Version makes the conflict copy the file (the current one goes to the backups in the sync state folder); Discard moves the conflict copy to " + (navigator.userAgent.includes("Windows") ? "the \"Removed by OpenCloud Bar\" folder in your user folder" : "the trash") + ". The next sync applies either to OpenCloud." }),
+  main.append(h("p", { class: "hint", text: "When a file changed on both sides, the newer copy keeps its name and the other is saved next to it as name.conflict1. Keep This Version makes the conflict copy the file (the current one goes to the backups in the sync state folder); Discard moves the conflict copy to " + trashWhere() + ". The next sync applies either to OpenCloud." }),
     h("div", { id: "conflicts-body" }));
   drawConflicts();
   timers.push(setInterval(refreshState, 3000));
@@ -316,8 +320,8 @@ function drawConflicts() {
       h("td", { class: "path", text: c.file }), h("td", { text: f.name }), h("td", { text: new Date(c.modified).toLocaleString() }),
       h("td", {},
         h("button", { class: "btn", onclick: () => conflictAct(f, c, "reveal") }, "Show in Folder"),
-        h("button", { class: "btn", disabled: busy, onclick: () => { if (confirm("Keep this version of " + c.original + "?\n\nThe conflict copy replaces the current file; the current file is kept in the backups.")) conflictAct(f, c, "keep", "Kept; the next sync sends it to OpenCloud"); } }, "Keep This Version"),
-        h("button", { class: "btn danger", disabled: busy, onclick: () => { if (confirm("Discard " + c.file + "?")) conflictAct(f, c, "discard", "Discarded"); } }, "Discard")))))),
+        h("button", { class: "btn", disabled: busy, onclick: () => { if (confirm("Keep this version of " + c.original + "?\n\nThe conflict copy replaces the current file. The current file is kept in the backups (in the app's sync state folder, for 30 days). The next sync sends the change to OpenCloud.")) conflictAct(f, c, "keep", "Kept; the next sync sends it to OpenCloud"); } }, "Keep This Version"),
+        h("button", { class: "btn danger", disabled: busy, onclick: () => { if (confirm("Discard " + c.file + "?\n\nIt moves to " + trashWhere() + ". The next sync removes it from OpenCloud too.")) conflictAct(f, c, "discard", "Discarded"); } }, "Discard")))))),
     busy ? h("p", { class: "hint", text: "A sync is running; the actions wait until it finishes." }) : null);
 }
 

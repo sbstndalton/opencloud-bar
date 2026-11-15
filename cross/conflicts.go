@@ -133,15 +133,16 @@ func (e *Engine) updateConflicts(cfg Config, f KeptFolder) []Conflict {
 		s.Conflicts = list
 	}
 	if len(fresh) > 0 {
-		e.newConflicts = append(e.newConflicts, conflictBatch{f.DisplayName(), len(fresh)})
+		e.newConflicts = append(e.newConflicts, conflictBatch{f.DisplayName(), len(fresh), pathpkg.Base(fresh[0].File)})
 	}
 	e.mu.Unlock()
 	return fresh
 }
 
 type conflictBatch struct {
-	folder string
-	n      int
+	folder  string
+	n       int
+	example string // one conflict copy's file name, for the notification
 }
 
 // conflictTarget checks a conflict action's file: it must be listed, be a conflict copy, and
@@ -176,7 +177,7 @@ func keepConflictVersion(local, stateDir, stateName, rel string, list []Conflict
 		return fmt.Errorf("the conflict copy is gone (synced or removed meanwhile)")
 	}
 	if _, err := os.Stat(winner); err == nil {
-		dest := filepath.Join(localBackupDir(stateDir, stateName, backupStamp(now)), filepath.FromSlash(origRel))
+		dest := freePath(filepath.Join(localBackupDir(stateDir, stateName, backupStamp(now)), filepath.FromSlash(origRel)))
 		if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
 			return err
 		}
@@ -187,6 +188,22 @@ func keepConflictVersion(local, stateDir, stateName, rel string, list []Conflict
 		return err
 	}
 	return os.Rename(loser, winner)
+}
+
+// freePath is p, or "name (2).ext", "name (3).ext"… if p exists: a backup never replaces
+// another (two Keeps of the same file within one second share the stamp folder).
+func freePath(p string) string {
+	if _, err := os.Lstat(p); errors.Is(err, os.ErrNotExist) {
+		return p
+	}
+	ext := filepath.Ext(p)
+	stem := strings.TrimSuffix(p, ext)
+	for i := 2; ; i++ {
+		q := fmt.Sprintf("%s (%d)%s", stem, i, ext)
+		if _, err := os.Lstat(q); errors.Is(err, os.ErrNotExist) {
+			return q
+		}
+	}
 }
 
 // moveFile renames, or copies and removes when the backups are on another disk.

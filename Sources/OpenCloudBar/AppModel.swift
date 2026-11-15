@@ -52,7 +52,9 @@ final class AppModel: ObservableObject {
     /// Conflict copies per kept folder (keyed by KeptFolder.path); see Conflicts.swift.
     @Published private(set) var conflicts: [String: [ConflictItem]] = [:]
     /// Conflict copies found since the last notification check: (folder name, count).
-    private var newConflicts: [(String, Int)] = []
+    private var newConflicts: [(String, Int, String)] = []
+    /// Per folder: the newest scan started. An older scan finishing later doesn't overwrite it.
+    private var conflictScanGen: [String: Int] = [:]
     /// A failed update check is retried after a growing wait (it isn't the daily check).
     private var updateRetryAt = Date.distantPast
     private var updateFailures = 0
@@ -681,8 +683,11 @@ final class AppModel: ObservableObject {
         -> (ok: Bool, outcome: BisyncResult.Outcome?) {
         var kind = kind
         Backups.prune(config.stateURL, run.f.stateName)
-        let backups = Backups.args(config.stateURL, config.remoteSpec, run.f.stateName, Backups.stamp())
+        let stamp = Backups.stamp()
         for pass in 1...2 {
+            // Each pass gets its own backup folder: a file the second pass replaces again must
+            // not overwrite the first pass's backup of it.
+            let backups = Backups.args(config.stateURL, config.remoteSpec, run.f.stateName, pass == 1 ? stamp : "\(stamp)-\(pass)")
             let r = await bisync(run, kind: kind, extra: ["--resync", "--resync-mode", "newer"] + backups)
             if r.status == 0 { succeeded(run); return (true, nil) }
             let res = BisyncResult.classify(r.output, timedOut: r.status == 124)
@@ -735,20 +740,40 @@ final class AppModel: ObservableObject {
         let local = config.localRootURL.appendingPathComponent(f.path)
         let filters = f.extraFilters + config.commonFilters
         let file = stateFile(f, ".conflicts.json")
+        let gen = (conflictScanGen[f.path] ?? 0) + 1
+        conflictScanGen[f.path] = gen
         Task {
             let list = await Task.detached { Conflicts.scan(local, filters: filters) }.value
-            guard self.config.kept.contains(where: { $0.path == f.path }) else { return }
+            guard self.conflictScanGen[f.path] == gen,
+                  self.config.kept.contains(where: { $0.path == f.path }) else { return }
             let old = Set(Conflicts.load(file).map(\.file))
-            let fresh = list.filter { !old.contains($0.file) }.count
+            let fresh = list.filter { !old.contains($0.file) }
             Conflicts.save(list, to: file)
             self.conflicts[f.path] = list
-            if fresh > 0 { self.newConflicts.append((f.displayName, fresh)) }
+            if let first = fresh.first { self.newConflicts.append((f.displayName, fresh.count, (first.file as NSString).lastPathComponent)) }
         }
     }
 
     private func conflictActionAllowed() -> Bool {
         guard !syncing else { alert("A sync is running", "Try again when it finishes."); return false }
         return true
+    }
+
+    /// Runs a conflict action as the only sync activity (like Stop Keeping), checked again after
+    /// the confirmation: the dialog's run loop can start a scheduled sync, and moving files
+    /// under a running bisync could reach OpenCloud as a deletion. Syncs wait until it is done.
+    private func conflictAction(_ f: KeptFolder, failure: String,
+                                _ work: @escaping @Sendable () throws -> Void, done: @escaping @MainActor () -> Void) {
+        _ = exclusive { [self] in
+            do {
+                // Off the main thread: a move to another disk copies the whole file.
+                try await Task.detached { try work() }.value
+                done()
+            } catch {
+                self.alert(failure, error.localizedDescription)
+            }
+            self.rescanConflicts(f)
+        }
     }
 
     /// Keep This Version: the conflict copy becomes the file; the current file goes to the backups.
@@ -758,13 +783,10 @@ final class AppModel: ObservableObject {
                       "The conflict copy replaces the current file. The current file is kept in the backups (in the app's state folder, for 30 days). The next sync sends the change to OpenCloud.",
                       button: "Keep This Version") else { return }
         let local = config.localRootURL.appendingPathComponent(f.path)
-        do {
-            try Conflicts.keep(c, local: local, backupDir: Backups.localDir(config.stateURL, f.stateName, Backups.stamp()))
-            Log.line("\(f.path): conflict kept: \(c.file)")
-        } catch {
-            alert("Couldn't keep that version", error.localizedDescription)
-        }
-        rescanConflicts(f)
+        let backupDir = Backups.localDir(config.stateURL, f.stateName, Backups.stamp())
+        conflictAction(f, failure: "Couldn't keep that version", {
+            try Conflicts.keep(c, local: local, backupDir: backupDir)
+        }, done: { Log.line("\(f.path): conflict kept: \(c.file)") })
     }
 
     /// Discard: the conflict copy goes to the Trash.
@@ -772,13 +794,9 @@ final class AppModel: ObservableObject {
         guard conflictActionAllowed(),
               let (loser, _) = Conflicts.target(config.localRootURL.appendingPathComponent(f.path), c),
               confirm("Discard “\(c.file)”?", "It moves to the Trash. The next sync removes it from OpenCloud too.", button: "Discard") else { return }
-        do {
+        conflictAction(f, failure: "Couldn't move it to the Trash", {
             try FileManager.default.trashItem(at: loser, resultingItemURL: nil)
-            Log.line("\(f.path): conflict discarded: \(c.file)")
-        } catch {
-            alert("Couldn't move it to the Trash", error.localizedDescription)
-        }
-        rescanConflicts(f)
+        }, done: { Log.line("\(f.path): conflict discarded: \(c.file)") })
     }
 
     func revealConflict(_ f: KeptFolder, _ c: ConflictItem) {
@@ -1101,7 +1119,8 @@ final class AppModel: ObservableObject {
         if !found.isEmpty {
             let n = found.reduce(0) { $0 + $1.1 }
             let title = found.count == 1 ? "\(Self.conflictsText(n)) in “\(found[0].0)”" : "\(Self.conflictsText(n)) in \(found.count) folders"
-            notes.append(Note(title: title, body: "A file changed on both sides. The newer copy kept the name; the other is saved next to it as ….conflict1. Open Settings ▸ Conflicts to keep one.", page: .conflicts))
+            let saved = n == 1 ? "as “\(found[0].2)”" : "with .conflict1 (or a higher number) added to its name, like “\(found[0].2)”"
+            notes.append(Note(title: title, body: "A file changed on both sides. The newer copy kept the name; the other is saved next to it \(saved). Open Settings ▸ Conflicts to keep one.", page: .conflicts))
         }
         // Only marked as shown when it is: with notifications off, the notice waits.
         if updateState.available, let v = updateState.latest,

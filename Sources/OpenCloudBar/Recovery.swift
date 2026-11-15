@@ -139,7 +139,8 @@ enum Backups {
         let fm = FileManager.default
         let f = formatter()
         for name in (try? fm.contentsOfDirectory(atPath: dir.path)) ?? [] {
-            if let t = f.date(from: name), now.timeIntervalSince(t) > keep {
+            // "<stamp>-2" is a merge's second pass.
+            if let t = f.date(from: String(name.split(separator: "-").first ?? "")), now.timeIntervalSince(t) > keep {
                 try? fm.removeItem(at: dir.appendingPathComponent(name))
             }
         }

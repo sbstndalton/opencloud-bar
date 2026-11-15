@@ -11,8 +11,11 @@ The release workflow copies the section for a tag into that tag's GitHub release
   - **Reveal in Finder** / **Show in Folder**;
   - **Keep This Version**: the conflict copy replaces the file, and the replaced file goes to the local backups (like a merge's);
   - **Discard**: the conflict copy goes to the Trash (Windows: the "Removed by OpenCloud Bar" folder).
-  The next sync applies the change to OpenCloud. Actions wait while a sync runs. The menu shows "N conflicts", and a notification announces each new batch (if notifications are on).
-- **Bandwidth limits:** optional upload and download limits in **Settings ▸ Sync** (for example `512K` or `2M`; empty means no limit). They apply to syncs and to the drive (rclone `--bwlimit UP:DOWN`). Settings keys `bwLimitUp` and `bwLimitDown`.
+  The next sync applies the change to OpenCloud. An action runs only while no sync does, and syncs wait until it is done. A backup never replaces an earlier one (a second backup of the same file gets "(2)" added). The menu shows "N conflicts", and a notification announces each new batch (if notifications are on).
+- **Bandwidth limits:** optional upload and download limits in **Settings ▸ Sync** (for example `512K` or `2M`, either case; empty means no limit). They apply to syncs and to the drive (rclone `--bwlimit UP:DOWN`). Settings keys `bwLimitUp` and `bwLimitDown`. The drive restarts to apply a change; while it is in use it keeps the old limit, says so, and tries again every minute.
+
+### Fixed
+- A merge's second pass (when files changed during the first) now keeps its backups in their own folder (`<date and time>-2`), so it can't replace the first pass's backup of the same file.
 
 ## [1.0.2] - 2026-11-15
 

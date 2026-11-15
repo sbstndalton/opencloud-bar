@@ -139,8 +139,9 @@ struct Config: Codable {
         paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? def.paused
         checkForUpdates = try c.decodeIfPresent(Bool.self, forKey: .checkForUpdates) ?? def.checkForUpdates
         notifications = try c.decodeIfPresent(Bool.self, forKey: .notifications) ?? def.notifications
-        bwLimitUp = try c.decodeIfPresent(String.self, forKey: .bwLimitUp)
-        bwLimitDown = try c.decodeIfPresent(String.self, forKey: .bwLimitDown)
+        // Either case, as rclone takes it ("512k" is "512K").
+        bwLimitUp = try c.decodeIfPresent(String.self, forKey: .bwLimitUp)?.trimmingCharacters(in: .whitespaces).uppercased()
+        bwLimitDown = try c.decodeIfPresent(String.self, forKey: .bwLimitDown)?.trimmingCharacters(in: .whitespaces).uppercased()
     }
 
     /// Why a bandwidth limit isn't valid (nil if fine; empty is no limit).

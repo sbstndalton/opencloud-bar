@@ -79,7 +79,11 @@ type Config struct {
 	BwLimitDown string `json:"bwLimitDown,omitempty"`
 }
 
-var bwRe = regexp.MustCompile(`^([0-9]+(\.[0-9]+)?)([KMG])?$`)
+// Units as rclone takes them, either case ("512k" is "512K").
+var bwRe = regexp.MustCompile(`^([0-9]+(\.[0-9]+)?)([KMGkmg])?$`)
+
+// normBwLimit is how a limit is stored: trimmed, upper-case unit.
+func normBwLimit(v string) string { return strings.ToUpper(strings.TrimSpace(v)) }
 
 // bwLimitProblem checks one limit ("" is no limit).
 func bwLimitProblem(name, v string) error {
@@ -518,6 +522,7 @@ func loadConfig() (Config, error) {
 	if err := json.Unmarshal(data, &c); err != nil {
 		return defaultConfig(), fmt.Errorf("couldn't read %s: %w", configFile(), err)
 	}
+	c.BwLimitUp, c.BwLimitDown = normBwLimit(c.BwLimitUp), normBwLimit(c.BwLimitDown) // a hand edit may say "512k"
 	if err := c.Validate(); err != nil {
 		return defaultConfig(), fmt.Errorf("settings problem: %w", err)
 	}

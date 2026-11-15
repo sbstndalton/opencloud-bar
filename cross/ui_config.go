@@ -253,7 +253,7 @@ func applyConfigPatch(p configPatch) (restartPort bool, err error) {
 		if v == nil {
 			continue
 		}
-		limit := strings.ToUpper(strings.TrimSpace(*v))
+		limit := normBwLimit(*v)
 		if err := bwLimitProblem(map[string]string{"bwLimitUp": "Upload limit", "bwLimitDown": "Download limit"}[key], limit); err != nil {
 			return false, err
 		}

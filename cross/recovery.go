@@ -191,7 +191,8 @@ func pruneBackups(stateDir, stateName string, now time.Time) {
 		return
 	}
 	for _, en := range entries {
-		t, err := time.Parse(backupStampFmt, en.Name())
+		stamp, _, _ := strings.Cut(en.Name(), "-") // "<stamp>-2": a merge's second pass
+		t, err := time.Parse(backupStampFmt, stamp)
 		if err == nil && en.IsDir() && now.Sub(t) > backupKeep {
 			_ = os.RemoveAll(filepath.Join(dir, en.Name()))
 		}
