@@ -228,3 +228,17 @@ func TestUISetupAddressAndAbout(t *testing.T) {
 		t.Error("embedded icon missing")
 	}
 }
+
+func TestOpenWindowSwitchesSection(t *testing.T) {
+	r := newUIRig(t)
+	r.login()
+	r.ui.requestSection("about")
+	r.ui.requestSection("not-a-section") // ignored
+	_, body := r.do("GET", "/ui/api/goto", "", "", nil)
+	if !strings.Contains(body, `"about"`) {
+		t.Fatalf("goto: %s", body)
+	}
+	if _, body = r.do("GET", "/ui/api/goto", "", "", nil); strings.Contains(body, "about") {
+		t.Error("a request is used once")
+	}
+}

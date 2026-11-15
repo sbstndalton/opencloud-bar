@@ -2,8 +2,12 @@
 # Builds build/OpenCloud-Bar.dmg with rclone inside the app: drag the app to Applications.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# rclone ships one build per architecture; join them so the app runs on Apple silicon and Intel.
 RCLONE_DIR="$(mktemp -d)"
-./scripts/fetch-rclone.sh osx arm64 "$RCLONE_DIR"
+./scripts/fetch-rclone.sh osx arm64 "$RCLONE_DIR/arm64"
+./scripts/fetch-rclone.sh osx amd64 "$RCLONE_DIR/amd64"
+lipo -create "$RCLONE_DIR/arm64/rclone" "$RCLONE_DIR/amd64/rclone" -output "$RCLONE_DIR/rclone"
+cp "$RCLONE_DIR/arm64/rclone-LICENSE.txt" "$RCLONE_DIR/rclone-LICENSE.txt"
 RCLONE_DIR="$RCLONE_DIR" ./scripts/build-app.sh
 STAGE="$(mktemp -d)"
 cp -R "build/OpenCloud Bar.app" "$STAGE/"

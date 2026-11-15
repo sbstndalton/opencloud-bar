@@ -563,6 +563,11 @@ window.addEventListener("hashchange", () => { const id = location.hash.slice(1);
   try { S = await get("state"); } catch (e) { banner(e.message); return; }
   const id = location.hash.slice(1);
   go(SECTIONS.some(s => s[0] === id) ? id : "folders");
+  // The tray asks an open window to switch pages (for example About OpenCloud Bar).
+  setInterval(async () => {
+    if (document.hidden) return;
+    try { const g = await get("goto"); if (g.section && SECTIONS.some(s => s[0] === g.section)) go(g.section); } catch (e) { /* ignore */ }
+  }, 2000);
 })();
 </script>
 </body>

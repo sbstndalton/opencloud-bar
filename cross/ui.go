@@ -51,6 +51,25 @@ type webUI struct {
 	now      func() time.Time
 	codes    map[string]time.Time // code -> expiry
 	sessions map[string]time.Time // session -> expiry
+	gotoPage string               // a section the open page should switch to (tray ▸ About…)
+}
+
+// requestSection asks an already open settings page to show section (it checks every 2 s).
+func (u *webUI) requestSection(s string) {
+	if validSection(s) {
+		u.mu.Lock()
+		u.gotoPage = s
+		u.mu.Unlock()
+	}
+}
+
+// takeSection returns and clears the requested section.
+func (u *webUI) takeSection() string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	s := u.gotoPage
+	u.gotoPage = ""
+	return s
 }
 
 // settingsUI is the one instance the running app uses.
@@ -220,6 +239,9 @@ func (u *webUI) handler(e *Engine) http.Handler {
 	mux.HandleFunc("GET /ui/api/drive", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, e.driveStats()) })
 	mux.HandleFunc("GET /ui/api/unsynced", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]int{"unsynced": e.UnsyncedCount(r.URL.Query().Get("path"))})
+	})
+	mux.HandleFunc("GET /ui/api/goto", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]string{"section": u.takeSection()})
 	})
 	mux.HandleFunc("GET /ui/api/about", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, e.about()) })
 	mux.HandleFunc("GET /ui/api/logs", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, e.logSources()) })

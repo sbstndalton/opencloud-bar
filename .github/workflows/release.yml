@@ -1,5 +1,5 @@
 # Builds installers for macOS, Windows and Linux and attaches them to the release for a v* tag.
-#   macOS:   OpenCloud-Bar-macOS.dmg        (rclone inside the app)
+#   macOS:   OpenCloud-Bar-macOS.dmg        (universal: Apple silicon + Intel; rclone inside the app)
 #   Windows: OpenCloud-Bar-Setup-<v>.exe    (rclone, WinFsp, Start menu, start at sign-in, CLI on PATH)
 #   Linux:   .deb / .rpm (rclone included, depends on fuse3 + ssh) and a .tar.gz
 #
@@ -161,11 +161,35 @@ jobs:
     needs: [windows, linux, macos]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           pattern: release-*
           merge-multiple: true
           path: dist
+      # The release text: this version's section of CHANGELOG.md (from its "## [X.Y.Z]" heading
+      # to the next one), then GitHub's generated notes. A tag with a "-" (v1.1.0-beta.1) is a
+      # pre-release; a plain vX.Y.Z becomes the latest release.
+      - name: Release notes
+        id: notes
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          awk -v v="$v" '
+            index($0, "## [" v "]") == 1 { on = 1; next }
+            on && /^(## \[|\[[0-9])/ { exit }
+            on { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          if [ ! -s "$RUNNER_TEMP/notes.md" ]; then echo "See CHANGELOG.md." > "$RUNNER_TEMP/notes.md"; fi
+          cat "$RUNNER_TEMP/notes.md"
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"; echo "latest=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"; echo "latest=true" >> "$GITHUB_OUTPUT"
+          fi
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          body_path: ${{ runner.temp }}/notes.md
+          generate_release_notes: true
+          prerelease: ${{ steps.notes.outputs.prerelease }}
+          make_latest: ${{ steps.notes.outputs.latest }}

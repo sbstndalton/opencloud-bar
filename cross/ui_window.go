@@ -92,6 +92,7 @@ func openSettings(section string) {
 		return
 	}
 	if settingsWindowOpen() {
+		settingsUI.requestSection(section) // the open window switches to it
 		return
 	}
 	u := settingsUI.loginURL(section)

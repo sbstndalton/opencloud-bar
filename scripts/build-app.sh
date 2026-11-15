@@ -10,16 +10,23 @@ if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
   exit 1
 fi
 cd "$(dirname "$0")/.."
-# --build-system native avoids a plist parsing bug in newer toolchains; older ones lack the flag.
-if swift build --help 2>&1 | grep -q -- "--build-system"; then
-  swift build -c release --build-system native
-else
-  swift build -c release
-fi
+# ARCHS="arm64 x86_64" (the default) makes a universal app: Apple silicon and Intel Macs.
+# Each architecture is built on its own and joined with lipo: `swift build --arch a --arch b`
+# needs the newer build system, which has a plist parsing bug in current toolchains.
+ARCHS="${ARCHS:-arm64 x86_64}"
+# --build-system native avoids that bug; older toolchains lack the flag.
+native=()
+if swift build --help 2>&1 | grep -q -- "--build-system"; then native=(--build-system native); fi
+slices=()
+for arch in $ARCHS; do
+  triple="$arch-apple-macosx14.0"
+  swift build -c release "${native[@]}" --triple "$triple"
+  slices+=("$(swift build -c release "${native[@]}" --triple "$triple" --show-bin-path)/OpenCloudBar")
+done
 APP="build/OpenCloud Bar.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp .build/release/OpenCloudBar "$APP/Contents/MacOS/OpenCloudBar"
+lipo -create "${slices[@]}" -output "$APP/Contents/MacOS/OpenCloudBar"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 # The source plist stays as it is; only the built app gets the version. CFBundleVersion must be
 # numbers and dots, so it drops any pre-release part.
