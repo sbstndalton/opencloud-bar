@@ -290,10 +290,16 @@ final class StatsFilter: @unchecked Sendable {
     private var partial = Data()
     private var inStats = false
     private let out: OutputBuffer
+    private let log: LogStream?
+    private let onLine: (@Sendable (String) -> Void)?
     private let onFiles: @Sendable (Int) -> Void
 
-    init(into out: OutputBuffer, onFiles: @escaping @Sendable (Int) -> Void) {
+    /// Every line but the progress blocks goes to `out`, `log` and `onLine` (Recent Changes).
+    init(into out: OutputBuffer, log: LogStream? = nil, onLine: (@Sendable (String) -> Void)? = nil,
+         onFiles: @escaping @Sendable (Int) -> Void) {
         self.out = out
+        self.log = log
+        self.onLine = onLine
         self.onFiles = onFiles
     }
 
@@ -330,6 +336,8 @@ final class StatsFilter: @unchecked Sendable {
             return
         }
         out.append(line)
+        log?.write(line)
+        onLine?(text)
     }
 }
 

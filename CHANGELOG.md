@@ -7,19 +7,19 @@ The release workflow copies the section for a tag into that tag's GitHub release
 ## [1.4.0] - 2026-11-15
 
 ### Added
-- **Recent Changes.** Each sync records what it uploaded, downloaded, deleted on either side and moved, for the last 500 changes (`activity.json` in the sync state folder). Mac: a **Recent Changes** submenu with the last 10 (click to show in Finder) and a searchable **Activity** page in Settings. Windows and Linux: a tray submenu with the last 5 and an **Activity** section in the settings window. A merge (first sync, Repair, automatic merge) is one summary line; conflict copies and backups aren't listed.
-- **Share links.** **Copy Share Link…** makes a public, read-only link to a file or folder in a kept folder and copies it (Mac: **Share a File…** in the menu and the folder's Actions; Windows and Linux: the folder's detail in the settings window). Optional expiry (1, 7 or 30 days) and an optional password, which is never stored. Made with OpenCloud's libre-graph `createLink`.
+- **Recent Changes.** Each sync records what it uploaded, downloaded and deleted on either side, for the last 500 changes (`activity.json` in the sync state folder, written atomically; a damaged file is kept aside as `activity.json.bad`). Mac: a **Recent Changes** submenu with the last 10 (click to show in Finder) and a searchable **Activity** page in Settings. Windows and Linux: a tray submenu with the last 5 and an **Activity** section in the settings window. A merge (first sync, Repair, automatic merge), and a sync that changed more than 200 files, is one summary line; conflict copies and backups aren't listed. Renames aren't guessed: they show as a new file and a deleted one.
+- **Public links.** **Copy Public Link…** makes a public, read-only link to a file or folder in a kept folder and copies it (Mac: in the menu and the folder's Actions; Windows and Linux: the folder's detail in the settings window). It stays active until deleted in OpenCloud, unless an expiry (1, 7 or 30 days) is picked; an optional password is never stored. Made with OpenCloud's libre-graph `createLink`; only https links are accepted.
 
 ### Changed
-- Syncs log at rclone's INFO level, so the sync logs list every file a sync copies or deletes.
+- Syncs log at rclone's INFO level, so the sync logs list every file a sync copies or deletes. Each folder's sync log starts a new file at 5 MB, also during a sync, and only the start and end of a sync's output is kept in memory (Recent Changes is read as the output arrives).
 
 ### Fixed
 - Windows and Linux: a notification about conflicts opened the settings window on its first section instead of Conflicts.
 
 ### Not included
-- A file renamed in the same folder shows as a new file and a deleted one (bisync doesn't report renames).
-- **Open in Browser** opens OpenCloud's web interface, not the file itself.
-- Share links can't be listed, changed or removed here; use OpenCloud's web interface. The Windows/Linux tray has no Share item (the settings window does).
+- Renamed or moved files show as a new file and a deleted one (bisync doesn't report renames).
+- **Open OpenCloud** opens OpenCloud's web interface, not the file itself.
+- Public links can't be listed, changed or removed here; use OpenCloud's web interface. The Windows/Linux tray has no Share item (the settings window does).
 
 ## [1.3.1] - 2026-11-15
 

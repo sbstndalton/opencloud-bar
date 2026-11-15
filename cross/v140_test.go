@@ -41,17 +41,19 @@ func TestParseChanges(t *testing.T) {
 		if c.Folder != "Docs" || c.Name != "Docs" || !c.Time.Equal(now) {
 			t.Errorf("change %+v", c)
 		}
-		lines = append(lines, c.Action+": "+c.From+">"+c.Path)
+		lines = append(lines, c.Action+": "+c.Path)
 	}
+	// No rename guessing: a delete stays a delete (Docs/b/moved.pdf could be another file).
 	want := []string{
-		"uploaded: >keep.txt",
-		"uploaded: >new file.txt",
-		"deleted here: >old.txt",
-		"uploaded: >sub/renamed.txt",
-		"deleted here: >sub/s.txt",
-		"renamed here: b/moved.pdf>a/moved.pdf",
-		"deleted in OpenCloud: >del.txt",
-		"downloaded: >fromb.txt",
+		"uploaded: keep.txt",
+		"uploaded: new file.txt",
+		"deleted here: old.txt",
+		"uploaded: sub/renamed.txt",
+		"deleted here: sub/s.txt",
+		"uploaded: a/moved.pdf",
+		"deleted here: b/moved.pdf",
+		"deleted in OpenCloud: del.txt",
+		"downloaded: fromb.txt",
 	}
 	if strings.Join(lines, "\n") != strings.Join(want, "\n") {
 		t.Errorf("got:\n%s\nwant:\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
@@ -203,5 +205,70 @@ func TestShareLinkChecks(t *testing.T) {
 	legacy := pausedRig(t, `,"kept":[{"path":"Docs","stateName":"d"}]`)
 	if _, err := legacy.ShareLink("Docs", "a.txt", ShareOptions{}); err == nil || !strings.Contains(err.Error(), "browser sign-in") {
 		t.Errorf("legacy: %v", err)
+	}
+}
+
+// A sync that changes many files is one line, and the collector keeps only what it needs.
+func TestBulkSyncIsOneSummary(t *testing.T) {
+	f := KeptFolder{Path: "Photos", StateName: "p"}
+	c := newChangeCollector()
+	c.line("INFO  : Synching Path1 \"/x/Photos/\" with Path2 \":webdav{a}:Photos/\"")
+	for i := 0; i < 5000; i++ {
+		c.line(fmt.Sprintf("INFO  : - Path1    Queue copy to Path2       - :webdav{a}:Photos/img%d.jpg", i))
+	}
+	c.line("INFO  : - Path1    Queue delete              - /x/Photos/gone.jpg")
+	if len(c.events) > bulkChanges+1 {
+		t.Errorf("kept %d events", len(c.events))
+	}
+	got := c.result("sync", f, time.Now())
+	if len(got) != 1 || got[0].Text != "Sync of Photos: 5000 uploaded, 1 deleted in OpenCloud (also removed here)" {
+		t.Errorf("bulk: %+v", got)
+	}
+}
+
+// Windows: rclone writes this computer's paths with backslashes.
+func TestChangesWindowsPaths(t *testing.T) {
+	out := "INFO  : Synching Path1 \"C:\\Users\\sam\\OpenCloud\\Docs\\\" with Path2 \":webdav{a}:Docs/\"\n" +
+		"INFO  : - Path2    Queue copy to Path1       - C:\\Users\\sam\\OpenCloud\\Docs\\sub\\a.txt\n" +
+		"INFO  : - Path2    Queue copy to Path1       - C:\\Users\\sam\\OpenCloud\\Docs\\.opencloud-bar-backups\\x\n"
+	got := parseChanges(out, "sync", KeptFolder{Path: "Docs"}, time.Now())
+	if len(got) != 1 || got[0].Path != "sub/a.txt" || got[0].Action != actDownloaded {
+		t.Errorf("windows: %+v", got)
+	}
+	if l := ChangeLabel(Change{Name: "Docs", Path: "x", Action: actDeletedHere}); l != "Docs: x deleted on this computer (also removed from OpenCloud)" {
+		t.Errorf("label %q", l)
+	}
+}
+
+func TestChangesFileDamaged(t *testing.T) {
+	testEnv(t)
+	cfg := defaultConfig()
+	cfg.StateDir = t.TempDir()
+	_ = os.WriteFile(changesFile(cfg), []byte("{not json"), 0o600)
+	changesMu.Lock()
+	changesCache, changesKey = nil, ""
+	changesMu.Unlock()
+	addChanges(cfg, []Change{{Folder: "Docs", Path: "a", Action: actUploaded}})
+	if b, err := os.ReadFile(changesFile(cfg) + ".bad"); err != nil || string(b) != "{not json" {
+		t.Errorf("not kept aside: %q %v", b, err)
+	}
+	if list := loadChanges(cfg); len(list) != 1 {
+		t.Errorf("list %+v", list)
+	}
+	if _, err := os.Stat(changesFile(cfg) + ".tmp"); err == nil {
+		t.Error("temporary file left")
+	}
+}
+
+func TestHeadTailBuffer(t *testing.T) {
+	var h headTail
+	big := strings.Repeat("x", 100)
+	for i := 0; i < 20000; i++ {
+		fmt.Fprintf(&h, "line %d %s\n", i, big)
+	}
+	_, _ = h.Write([]byte("ERROR : Bisync critical error: too many deletes\n"))
+	s := h.String()
+	if len(s) > headMax+tailMax+16 || !strings.HasPrefix(s, "line 0 ") || !strings.HasSuffix(s, "too many deletes\n") {
+		t.Errorf("len %d", len(s))
 	}
 }

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -13,9 +12,10 @@ import (
 	"time"
 )
 
-// Recent Changes: what each successful sync did, read from rclone bisync's INFO output, kept
-// in activity.json in the sync state folder (the last maxChanges). The macOS app does the same
-// (Changes.swift). The lines bisync v1.76 writes (checked with a local bisync):
+// Recent Changes: what each successful sync did, read from rclone bisync's INFO output as it
+// arrives (changeCollector; nothing is buffered beyond what is recorded), kept in activity.json
+// in the sync state folder (the last maxChanges). The macOS app does the same (Changes.swift).
+// The lines bisync v1.76 writes (checked with a local bisync):
 //
 //	INFO  : Synching Path1 "/home/sam/OpenCloud/Docs/" with Path2 ":webdav{1sYgV}:Docs/"
 //	INFO  : - Path1    Queue copy to Path2       - :webdav{1sYgV}:Docs/new file.txt
@@ -24,13 +24,15 @@ import (
 //	INFO  : - Path1    Queue delete              - /home/sam/OpenCloud/Docs/del.txt
 //
 // A copy names its destination; a delete names the side it removes from. Path1 is this
-// computer, Path2 OpenCloud. bisync doesn't report renames or moves: a delete and a copy in the
-// same direction of a file with the same name in another folder (and no other such pair) are
-// shown as one move. A file renamed in place shows as a new file and a deleted one: bisync
-// gives nothing to tell that apart from two separate changes. A merge (first sync, Repair, automatic merge) copies in bulk: it is
-// one summary line instead.
+// computer, Path2 OpenCloud. bisync doesn't report renames or moves, and guessing them hides
+// real deletions, so a rename shows as what bisync did: a new file and a deleted one. A merge
+// (first sync, Repair, automatic merge) copies in bulk: it is one summary line instead, and so
+// is a sync that changed more than bulkChanges files.
 
-const maxChanges = 500
+const (
+	maxChanges  = 500
+	bulkChanges = 200
+)
 
 // Change is one line of Recent Changes.
 type Change struct {
@@ -38,9 +40,8 @@ type Change struct {
 	Folder string    `json:"folder"` // KeptFolder.Key()
 	Name   string    `json:"name"`   // the folder's display name
 	Path   string    `json:"path"`   // relative to the kept folder ("" for a summary)
-	From   string    `json:"from,omitempty"`
 	// Action: uploaded, downloaded, deleted here (so removed from OpenCloud), deleted in
-	// OpenCloud (so removed here), renamed here, renamed in OpenCloud, or summary.
+	// OpenCloud (so removed here), or summary.
 	Action string `json:"action"`
 	Text   string `json:"text,omitempty"` // a summary's words
 }
@@ -50,8 +51,6 @@ const (
 	actDownloaded     = "downloaded"
 	actDeletedHere    = "deleted here"
 	actDeletedRemote  = "deleted in OpenCloud"
-	actRenamedHere    = "renamed here"
-	actRenamedRemote  = "renamed in OpenCloud"
 	actSummary        = "summary"
 	changesFileName   = "activity.json"
 	conflictCopyRegex = `\.conflict[0-9]+(\.[^/]*)?$`
@@ -75,118 +74,139 @@ func skipChange(p string) bool {
 	return p == "" || reConflict.MatchString(p) || p == backupFolderName || strings.HasPrefix(p, backupFolderName+"/")
 }
 
-// parseChanges reads one successful bisync run's output into changes.
-func parseChanges(out, kind string, f KeptFolder, now time.Time) []Change {
-	out = reANSI.ReplaceAllString(out, "")
-	if kind != "sync" {
-		return mergeSummary(out, kind, f, now)
-	}
-	var root1, root2 string
-	type ev struct{ action, path string }
-	var evs []ev
-	for _, l := range strings.Split(out, "\n") {
-		l = strings.TrimRight(l, "\r")
-		if m := reSynching.FindStringSubmatch(l); m != nil {
-			root1, root2 = m[1], m[2]
-			continue
-		}
-		strip := func(side, p string) string {
-			root := root1
-			if side == "Path2" {
-				root = root2
-			}
-			if root != "" && strings.HasPrefix(p, root) {
-				return strings.TrimPrefix(p, root)
-			}
-			return ""
-		}
-		if m := reQueueCopy.FindStringSubmatch(l); m != nil {
-			act := actUploaded
-			if m[1] == "Path1" {
-				act = actDownloaded
-			}
-			if p := strip(m[1], m[2]); !skipChange(p) {
-				evs = append(evs, ev{act, p})
-			}
-			continue
-		}
-		if m := reQueueDel.FindStringSubmatch(l); m != nil {
-			act := actDeletedHere // removed from OpenCloud: it was deleted here
-			if m[1] == "Path1" {
-				act = actDeletedRemote
-			}
-			if p := strip(m[1], m[2]); !skipChange(p) {
-				evs = append(evs, ev{act, p})
-			}
-		}
-	}
-	// Renames: a delete and a copy going the same way.
-	used := map[int]bool{}
-	pair := func(del, cp string) map[int]int {
-		out := map[int]int{}
-		for i, d := range evs {
-			if d.action != del || used[i] {
-				continue
-			}
-			var match []int
-			for j, c := range evs {
-				if c.action == cp && !used[j] && path.Base(c.path) == path.Base(d.path) && c.path != d.path {
-					match = append(match, j)
-				}
-			}
-			if len(match) == 1 {
-				out[i] = match[0]
-				used[i], used[match[0]] = true, true
-			}
-		}
-		return out
-	}
-	here := pair(actDeletedHere, actUploaded)
-	remote := pair(actDeletedRemote, actDownloaded)
-	var res []Change
-	for i, e := range evs {
-		if j, ok := here[i]; ok {
-			res = append(res, Change{Time: now, Folder: f.Key(), Name: f.DisplayName(), Path: evs[j].path, From: e.path, Action: actRenamedHere})
-			continue
-		}
-		if j, ok := remote[i]; ok {
-			res = append(res, Change{Time: now, Folder: f.Key(), Name: f.DisplayName(), Path: evs[j].path, From: e.path, Action: actRenamedRemote})
-			continue
-		}
-		if used[i] {
-			continue // the copy half of a rename
-		}
-		res = append(res, Change{Time: now, Folder: f.Key(), Name: f.DisplayName(), Path: e.path, Action: e.action})
-	}
-	return res
+// changeCollector reads bisync's output line by line (statsFilter.onLine) and keeps only what
+// Recent Changes records: at most bulkChanges events, and counts.
+type changeCollector struct {
+	mu           sync.Mutex
+	root1, root2 string
+	events       []Change
+	counts       map[string]int
+	copied       int
+	compared     int
 }
 
-// mergeSummary is a merge's one line: "Repair of Docs: 512 files compared, 2 updated".
-func mergeSummary(out, kind string, f KeptFolder, now time.Time) []Change {
-	copied := 0
-	for _, l := range strings.Split(out, "\n") {
-		if m := reCopied.FindStringSubmatch(l); m != nil && !skipChange(m[1]) {
-			copied++
+func newChangeCollector() *changeCollector {
+	return &changeCollector{counts: map[string]int{}, compared: -1}
+}
+
+// slash: rclone writes this computer's paths with \ on Windows; Recent Changes uses /.
+func slash(p string) string { return strings.ReplaceAll(p, "\\", "/") }
+
+func (c *changeCollector) line(l string) {
+	l = strings.TrimRight(reANSI.ReplaceAllString(l, ""), "\r\n")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if m := reSynching.FindStringSubmatch(l); m != nil {
+		c.root1, c.root2 = slash(m[1]), m[2]
+		return
+	}
+	if m := reChecks.FindStringSubmatch(l); m != nil {
+		c.compared, _ = strconv.Atoi(m[2])
+		return
+	}
+	if m := reCopied.FindStringSubmatch(l); m != nil {
+		if !skipChange(slash(m[1])) {
+			c.copied++
+		}
+		return
+	}
+	add := func(side, p, act string) {
+		root := c.root1
+		if side == "Path2" {
+			root = c.root2
+		} else {
+			p = slash(p)
+		}
+		if root == "" || !strings.HasPrefix(p, root) {
+			return
+		}
+		p = strings.TrimPrefix(p, root)
+		if skipChange(p) {
+			return
+		}
+		c.counts[act]++
+		if len(c.events) < bulkChanges+1 {
+			c.events = append(c.events, Change{Path: p, Action: act})
 		}
 	}
-	compared := -1
-	for _, m := range reChecks.FindAllStringSubmatch(out, -1) {
-		compared, _ = strconv.Atoi(m[2])
+	if m := reQueueCopy.FindStringSubmatch(l); m != nil {
+		act := actUploaded
+		if m[1] == "Path1" {
+			act = actDownloaded
+		}
+		add(m[1], m[2], act)
+		return
 	}
-	what := "Merge"
-	switch {
-	case strings.Contains(kind, "repair"):
-		what = "Repair"
-	case strings.Contains(kind, "first sync"):
-		what = "First sync"
-	case strings.Contains(kind, "excludes"):
-		what = "Sync after the excludes changed"
+	if m := reQueueDel.FindStringSubmatch(l); m != nil {
+		act := actDeletedHere // removed from OpenCloud: it was deleted here
+		if m[1] == "Path1" {
+			act = actDeletedRemote
+		}
+		add(m[1], m[2], act)
 	}
-	text := fmt.Sprintf("%s of %s: %d updated", what, f.DisplayName(), copied)
-	if compared >= 0 {
-		text = fmt.Sprintf("%s of %s: %d files compared, %d updated", what, f.DisplayName(), compared, copied)
+}
+
+// result is what the run changed: one line per file, or one summary line for a merge or a
+// sync that changed more than bulkChanges files.
+func (c *changeCollector) result(kind string, f KeptFolder, now time.Time) []Change {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if kind != "sync" {
+		what := "Merge"
+		switch {
+		case strings.Contains(kind, "repair"):
+			what = "Repair"
+		case strings.Contains(kind, "first sync"):
+			what = "First sync"
+		case strings.Contains(kind, "excludes"):
+			what = "Sync after the excludes changed"
+		}
+		text := fmt.Sprintf("%s of %s: %d updated", what, f.DisplayName(), c.copied)
+		if c.compared >= 0 {
+			text = fmt.Sprintf("%s of %s: %d files compared, %d updated", what, f.DisplayName(), c.compared, c.copied)
+		}
+		return []Change{{Time: now, Folder: f.Key(), Name: f.DisplayName(), Action: actSummary, Text: text}}
 	}
-	return []Change{{Time: now, Folder: f.Key(), Name: f.DisplayName(), Action: actSummary, Text: text}}
+	total := 0
+	for _, n := range c.counts {
+		total += n
+	}
+	if total > bulkChanges {
+		var parts []string
+		for _, a := range []string{actUploaded, actDownloaded, actDeletedHere, actDeletedRemote} {
+			if n := c.counts[a]; n > 0 {
+				parts = append(parts, fmt.Sprintf("%d %s", n, actionText(a)))
+			}
+		}
+		return []Change{{Time: now, Folder: f.Key(), Name: f.DisplayName(), Action: actSummary,
+			Text: fmt.Sprintf("Sync of %s: %s", f.DisplayName(), strings.Join(parts, ", "))}}
+	}
+	out := make([]Change, 0, len(c.events))
+	for _, e := range c.events {
+		e.Time, e.Folder, e.Name = now, f.Key(), f.DisplayName()
+		out = append(out, e)
+	}
+	return out
+}
+
+// parseChanges reads a whole run's output (tests; the engine streams it).
+func parseChanges(out, kind string, f KeptFolder, now time.Time) []Change {
+	c := newChangeCollector()
+	for _, l := range strings.Split(out, "\n") {
+		c.line(l)
+	}
+	return c.result(kind, f, now)
+}
+
+// actionText is an action in words, for people.
+func actionText(a string) string {
+	switch a {
+	case actDeletedHere:
+		return "deleted on this computer (also removed from OpenCloud)"
+	case actDeletedRemote:
+		return "deleted in OpenCloud (also removed here)"
+	}
+	return a
 }
 
 func changesFile(cfg Config) string { return filepath.Join(expand(cfg.StateDir), changesFileName) }
@@ -205,7 +225,11 @@ func loadChangesLocked(cfg Config) []Change {
 	}
 	var list []Change
 	if b, err := os.ReadFile(file); err == nil {
-		_ = json.Unmarshal(b, &list)
+		if json.Unmarshal(b, &list) != nil {
+			// Damaged (or written by something else): keep it aside, start a new list.
+			_ = os.Rename(file, file+".bad")
+			list = nil
+		}
 	}
 	if len(list) > maxChanges {
 		list = list[len(list)-maxChanges:]
@@ -229,28 +253,35 @@ func addChanges(cfg Config, add []Change) {
 		list = list[len(list)-maxChanges:]
 	}
 	changesCache = list
-	if b, err := json.Marshal(list); err == nil {
-		_ = os.MkdirAll(expand(cfg.StateDir), 0o700)
-		tmp := changesFile(cfg) + ".tmp"
-		if os.WriteFile(tmp, b, 0o600) == nil {
-			_ = os.Rename(tmp, changesFile(cfg))
-		}
-	}
+	writeChangesLocked(cfg)
 }
 
 // forgetChanges drops a folder's changes (Stop Keeping).
 func forgetChanges(cfg Config, key string) {
 	changesMu.Lock()
 	defer changesMu.Unlock()
-	var keep []Change
+	keep := []Change{}
 	for _, c := range loadChangesLocked(cfg) {
 		if c.Folder != key {
 			keep = append(keep, c)
 		}
 	}
-	changesCache = append([]Change{}, keep...)
-	if b, err := json.Marshal(changesCache); err == nil {
-		_ = os.WriteFile(changesFile(cfg), b, 0o600)
+	changesCache = keep
+	writeChangesLocked(cfg)
+}
+
+// writeChangesLocked writes the list atomically (a temporary file, then a rename).
+func writeChangesLocked(cfg Config) {
+	b, err := json.Marshal(changesCache)
+	if err != nil {
+		return
+	}
+	_ = os.MkdirAll(expand(cfg.StateDir), 0o700)
+	tmp := changesFile(cfg) + ".tmp"
+	if os.WriteFile(tmp, b, 0o600) == nil {
+		if os.Rename(tmp, changesFile(cfg)) != nil {
+			_ = os.Remove(tmp)
+		}
 	}
 }
 
@@ -269,13 +300,10 @@ func (e *Engine) RecentChanges(n int) []Change {
 
 // ChangeLabel is a change in a few words, for the tray and the page.
 func ChangeLabel(c Change) string {
-	switch c.Action {
-	case actSummary:
+	if c.Action == actSummary {
 		return c.Text
-	case actRenamedHere, actRenamedRemote:
-		return fmt.Sprintf("%s: %s → %s (%s)", c.Name, c.From, c.Path, c.Action)
 	}
-	return fmt.Sprintf("%s: %s %s", c.Name, c.Path, c.Action)
+	return fmt.Sprintf("%s: %s %s", c.Name, c.Path, actionText(c.Action))
 }
 
 // pageChange is a change for the settings page: with its words and whether it is still there.
@@ -310,7 +338,7 @@ func (e *Engine) itemLocal(key, rel string) (string, error) {
 		if part == "" {
 			continue
 		}
-		if part == "." || part == ".." || hasControl(part) || strings.ContainsAny(part, `\`) {
+		if part == "." || part == ".." || hasControl(part) || strings.ContainsAny(part, `\:`) {
 			return "", fmt.Errorf("not a path in the folder")
 		}
 		p = filepath.Join(p, part)

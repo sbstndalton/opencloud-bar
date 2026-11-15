@@ -611,7 +611,11 @@ func (e *Engine) serveOpen(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, http.StatusNotFound, err)
 			return
 		}
-		openPath(filepath.Dir(p))
+		if strings.Trim(b.Path, "/") == "" {
+			openPath(p) // the kept folder itself, never its parent
+		} else {
+			openPath(filepath.Dir(p))
+		}
 	case "folder":
 		f, ok := e.find(b.Path)
 		if !ok {

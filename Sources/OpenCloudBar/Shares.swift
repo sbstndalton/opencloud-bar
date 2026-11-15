@@ -16,7 +16,7 @@ enum SharesAPI {
         var u = f.space.map { Config.origin(base) + $0.davPath } ?? base + c.davPath
         let allowed = CharacterSet.urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#"))
         for part in (f.path + "/" + rel).split(separator: "/") {
-            if part == "." || part == ".." { return nil }
+            if part == "." || part == ".." || part.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) { return nil }
             u += "/" + (String(part).addingPercentEncoding(withAllowedCharacters: allowed) ?? "")
         }
         return URL(string: u)
@@ -80,9 +80,10 @@ enum SharesAPI {
             }
             throw AuthError.message("OpenCloud didn't make the link (it answered \(code)).")
         }
+        // A public link must be https (OpenCloud may give it its own public host name).
         guard let link = (obj?["link"] as? [String: Any])?["webUrl"] as? String,
-              let u = URL(string: link), u.scheme == "https" || u.scheme == "http" else {
-            throw AuthError.message("The server's answer had no link.")
+              let u = URL(string: link), u.scheme == "https", u.host?.isEmpty == false else {
+            throw AuthError.message("The server's answer had no https link.")
         }
         return link
     }
@@ -91,9 +92,9 @@ enum SharesAPI {
     @MainActor
     static func askOptions(for name: String) -> Options? {
         let a = NSAlert()
-        a.messageText = "Copy a share link to “\(name)”?"
-        a.informativeText = "Anyone with the link can view and download it, without signing in. The password, if you set one, isn't stored on this Mac."
-        a.addButton(withTitle: "Create and Copy Link")
+        a.messageText = "Copy a public link to “\(name)”?"
+        a.informativeText = "Anyone with the link can view and download it, without signing in. It stays active until you delete it in OpenCloud (in the browser: the file's sharing panel), unless you pick an expiry. The password, if you set one, isn't stored on this Mac."
+        a.addButton(withTitle: "Create and Copy Public Link")
         a.addButton(withTitle: "Cancel")
         let expiry = NSPopUpButton(frame: .zero, pullsDown: false)
         expiry.addItems(withTitles: ["Never expires", "Expires after 1 day", "Expires after 7 days", "Expires after 30 days"])

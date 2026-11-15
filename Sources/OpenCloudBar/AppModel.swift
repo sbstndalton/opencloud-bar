@@ -752,8 +752,9 @@ final class AppModel: ObservableObject {
                     "--stats", "2s", "--stats-log-level", "NOTICE"] + config.bwLimitArgs + extra   // progress for the menu (StatsFilter)
         let log = Log.url("sync-\(run.f.stateName).log")
         Log.append("\n=== \(Date()) \(kind) of \(run.f.path)\n", to: log)
-        let r = await runTracked(config.rclone, args, log: log)
-        if r.status == 0 { addChanges(Changes.parse(r.output, kind: kind, folder: run.f)) }
+        let changes = ChangeCollector()   // fed off the main thread, line by line
+        let r = await runTracked(config.rclone, args, log: log, onLine: { changes.line($0) })
+        if r.status == 0 { addChanges(changes.result(kind: kind, folder: run.f, now: Date())) }
         return r
     }
 
@@ -787,10 +788,10 @@ final class AppModel: ObservableObject {
 
     // MARK: - Share links
 
-    /// The menu's Share a File…: choose a file or folder in a kept folder.
+    /// The menu's Copy Public Link…: choose a file or folder in a kept folder.
     func shareFile() { share(startingAt: config.localRootURL) }
 
-    /// Kept Folders ▸ Copy Share Link…: choose in this folder (or the folder itself).
+    /// Kept Folders ▸ Copy Public Link…: choose in this folder (or the folder itself).
     func shareFrom(_ f: KeptFolder) { share(startingAt: config.localURL(f)) }
 
     private func share(startingAt dir: URL) {
@@ -800,8 +801,8 @@ final class AppModel: ObservableObject {
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
         panel.directoryURL = dir
-        panel.prompt = "Share"
-        panel.message = "Choose a file or folder in a kept folder to share with a public, read-only link."
+        panel.prompt = "Copy Public Link"
+        panel.message = "Choose a file or folder in a kept folder. Anyone with its link can view and download it."
         NSApp.activate(ignoringOtherApps: true)
         guard panel.runModal() == .OK, let url = panel.url?.standardizedFileURL.resolvingSymlinksInPath() else { return }
         // The kept folder it is in, and its path in there.
@@ -833,7 +834,7 @@ final class AppModel: ObservableObject {
                 NSPasteboard.general.setString(link, forType: .string)
                 Log.line("share link made for \(f.displayName)\(rel.isEmpty ? "" : "/" + rel)")   // never the password
                 lastMessage = "Link to “\(name)” copied"
-                notifier.show(Note(title: "Link copied", body: "A read-only link to “\(name)” is on the clipboard.", page: .folders))
+                notifier.show(Note(title: "Link copied", body: "A public, read-only link to “\(name)” is on the clipboard.", page: .folders))
             } catch {
                 alert("Couldn't make the link", error.localizedDescription)
             }
@@ -993,7 +994,7 @@ final class AppModel: ObservableObject {
     /// Runs rclone, remembering the process so Quit can stop it cleanly. After syncTimeout it is
     /// interrupted (bisync finishes the current file and saves its state); if it is still
     /// running a minute later it is terminated.
-    private func runTracked(_ exe: String, _ args: [String], log: URL) async -> Shell.Result {
+    private func runTracked(_ exe: String, _ args: [String], log: URL, onLine: (@Sendable (String) -> Void)? = nil) async -> Shell.Result {
         let timedOut = Flag()
         let timeout = syncTimeout
         let result: Shell.Result = await withCheckedContinuation { cont in
@@ -1004,8 +1005,9 @@ final class AppModel: ObservableObject {
             let pipe = Pipe()
             p.standardOutput = pipe
             p.standardError = pipe
-            let buffer = OutputBuffer()
-            let stats = StatsFilter(into: buffer) { n in
+            let buffer = OutputBuffer(headMax: 64 << 10, tailMax: 512 << 10)
+            let logStream = LogStream(log)
+            let stats = StatsFilter(into: buffer, log: logStream, onLine: onLine) { n in
                 Task { @MainActor in
                     if self.activeFiles != n { self.activeFiles = n }
                 }
@@ -1018,7 +1020,7 @@ final class AppModel: ObservableObject {
                 pipe.fileHandleForReading.readabilityHandler = nil
                 stats.feed(pipe.fileHandleForReading.readDataToEndOfFile())
                 stats.flush()
-                Log.append(buffer.string, to: log)
+                logStream.close()
                 cont.resume(returning: Shell.Result(status: timedOut.value ? 124 : proc.terminationStatus,
                                                     output: buffer.string))
             }

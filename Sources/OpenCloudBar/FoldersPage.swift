@@ -251,7 +251,7 @@ struct FoldersPage: View {
         }
         Button("Choose Subfolders…") { choosingSubfolders = f }.accessibilityLabel("Choose Subfolders…")
             .disabled(model.needsSignIn || model.folderBusy(f))
-        Button("Copy Share Link…") { model.shareFrom(f) }.accessibilityLabel("Copy Share Link…")
+        Button("Copy Public Link…") { model.shareFrom(f) }.accessibilityLabel("Copy Public Link…")
             .disabled(model.needsSignIn || !model.config.isOIDC)
         Divider()
         Button("Stop Keeping on This Mac…") { model.stopKeeping(f) }.disabled(model.syncing).accessibilityLabel("Stop Keeping on This Mac…")

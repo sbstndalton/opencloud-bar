@@ -432,7 +432,7 @@ function keepBox(busy) {
   return box;
 }
 
-// Copy Share Link: a public, read-only link to a file or folder in this kept folder.
+// Copy Public Link: a public, read-only link to a file or folder in this kept folder.
 let sharePick = null; // { folder, sub, items, chosen, days, pw, url }; pw only in memory, until the link is made
 async function loadItems(f, sub) {
   try {
@@ -443,10 +443,10 @@ async function loadItems(f, sub) {
   drawFolders();
 }
 function shareBox(f) {
-  const box = h("div", {}, h("h3", { text: "Share" }));
+  const box = h("div", {}, h("h3", { text: "Public link" }));
   if (!sharePick || sharePick.folder !== f.path) {
     box.append(h("p", { class: "hint", text: "Make a public, read-only link to a file or folder in " + f.name + " and copy it." }),
-      h("div", { class: "row" }, h("button", { class: "btn", onclick: () => { sharePick = { folder: f.path, sub: "", items: null, chosen: "" }; loadItems(f, ""); } }, "Copy Share Link…")));
+      h("div", { class: "row" }, h("button", { class: "btn", onclick: () => { sharePick = { folder: f.path, sub: "", items: null, chosen: "" }; loadItems(f, ""); } }, "Copy Public Link…")));
     return box;
   }
   if (!sharePick.items) return box;
@@ -471,7 +471,7 @@ function shareBox(f) {
   pw.addEventListener("input", () => { sharePick.pw = pw.value; });
   const out = h("input", { type: "text", id: "share-url", readonly: true, "aria-label": "Share link", placeholder: "The link appears here" });
   out.value = sharePick.url;
-  box.append(h("p", { class: "hint", text: "Anyone with the link can view and download it, without signing in. The password, if you set one, isn't stored here." }),
+  box.append(h("p", { class: "hint", text: "Anyone with the link can view and download it, without signing in. It stays active until you delete it in OpenCloud (in the browser: the file's sharing panel), unless you pick an expiry. The password, if you set one, isn't stored here." }),
     list,
     h("div", { class: "row" }, h("label", { text: "Link expires" }), days),
     h("div", { class: "row" }, h("label", { text: "Password" }), pw),
@@ -486,7 +486,7 @@ function shareBox(f) {
           try { await navigator.clipboard.writeText(r.url); toast("Link copied"); } catch (e) { const o = document.getElementById("share-url"); if (o) o.select(); toast("Link made; copy it from the field below"); }
         } catch (e) { toast(e.message, true); }
         btn.disabled = false;
-      } }, "Create and Copy Link"),
+      } }, "Create and Copy Public Link"),
       h("button", { class: "btn", onclick: () => { sharePick = null; drawFolders(); } }, "Close")),
     h("div", { class: "row" }, out));
   return box;
@@ -497,7 +497,7 @@ function shareBox(f) {
 let activityFilter = "";
 async function activity(main, r) {
   header(main, "Activity");
-  main.append(h("p", { class: "hint", text: "What the last syncs changed, newest first (the last 500 changes). A merge, such as a first sync or a Repair, is one line." }));
+  main.append(h("p", { class: "hint", text: "What the last syncs changed, newest first (the last 500 changes). A merge, such as a first sync or a Repair, and a sync that changed more than 200 files are one line each." }));
   const q = h("input", { type: "search", id: "activity-q", placeholder: "Search", "aria-label": "Search recent changes", value: activityFilter });
   const body = h("div", { id: "activity-body" });
   main.append(h("div", { class: "row" }, q), body);
@@ -513,7 +513,7 @@ async function activity(main, r) {
         h("td", { class: c.path ? "path" : "", text: c.label }),
         h("td", {},
           c.exists ? h("button", { class: "btn", "aria-label": "Show " + c.path + " in its folder", onclick: () => act(() => post("open", { kind: "item", folder: c.folder, path: c.path })) }, "Show in Folder") : null,
-          c.exists && S.config.serverURL ? h("button", { class: "btn", "aria-label": "Open OpenCloud in the browser", onclick: () => act(() => post("open", { kind: "web" })) }, "Open in Browser") : null)))))));
+          c.exists && S.config.serverURL ? h("button", { class: "btn", "aria-label": "Open OpenCloud in the browser", onclick: () => act(() => post("open", { kind: "web" })) }, "Open OpenCloud") : null)))))));
   };
   q.addEventListener("input", () => { activityFilter = q.value; draw(); });
   const load = async () => {

@@ -128,8 +128,9 @@ func createShareLink(ctx context.Context, davURL, graphBase, tok string, o Share
 	if err := json.Unmarshal(data, &perm); err != nil || perm.Link.WebURL == "" {
 		return "", errors.New("the server's answer had no link")
 	}
-	if pu, err := url.Parse(perm.Link.WebURL); err != nil || (pu.Scheme != "https" && pu.Scheme != "http") {
-		return "", errors.New("the server's answer had no usable link")
+	// A public link must be https (OpenCloud may give it its own public host name).
+	if pu, err := url.Parse(perm.Link.WebURL); err != nil || pu.Scheme != "https" || pu.Host == "" {
+		return "", errors.New("the server's answer had no https link")
 	}
 	return perm.Link.WebURL, nil
 }
@@ -163,7 +164,7 @@ func itemDavURL(cfg Config, f KeptFolder, rel string) (string, error) {
 		if part == "" {
 			continue
 		}
-		if part == "." || part == ".." || hasControl(part) {
+		if part == "." || part == ".." || hasControl(part) || strings.Contains(part, `\`) {
 			return "", errors.New("not a path in the folder")
 		}
 		u += "/" + url.PathEscape(part)
@@ -235,7 +236,8 @@ func (e *Engine) ListItems(key, sub string) ([]Item, error) {
 	}
 	sub = strings.Trim(sub, "/")
 	for _, p := range strings.Split(sub, "/") {
-		if p == ".." || p == "." || hasControl(p) {
+		// "\" too: a separator on Windows.
+		if p == ".." || p == "." || hasControl(p) || strings.ContainsAny(p, `\:`) {
 			return nil, errors.New("not a path in the folder")
 		}
 	}

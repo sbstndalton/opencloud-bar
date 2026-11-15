@@ -120,23 +120,23 @@ The list comes from OpenCloud: the folder's subfolders, and with **Show Subfolde
 
 ## Recent changes
 
-Every sync remembers what it changed: files uploaded, downloaded, deleted here (so also in OpenCloud), deleted in OpenCloud (so also here), and files moved to another folder. The last 500 changes are kept, in `activity.json` in the sync state folder.
+Every sync remembers what it changed: files uploaded, downloaded, deleted on this computer (also removed from OpenCloud) and deleted in OpenCloud (also removed here). The last 500 changes are kept, in `activity.json` in the sync state folder (written safely; a damaged file is kept aside as `activity.json.bad`).
 
-- **Mac:** the menu's **Recent Changes** lists the last 10; click one to show it in Finder. Settings ▸ **Activity** lists them all, with a search field, **Show in Finder** and **Open in Browser**.
+- **Mac:** the menu's **Recent Changes** lists the last 10; click one to show it in Finder. Settings ▸ **Activity** lists them all, with a search field, **Show in Finder** and **Open OpenCloud**.
 - **Windows, Linux:** the tray's **Recent Changes** lists the last 5; the settings window's **Activity** section lists them all.
-- A merge (a first sync, a Repair, the automatic merge) is one line, like "Repair of Notes: 512 files compared, 2 updated", not one line per file. Conflict copies and the backup folder aren't listed.
-- bisync doesn't report renames: a file renamed in the same folder shows as a new file and a deleted one. A file moved to another folder under the same name shows as moved.
-- Syncs now log at rclone's INFO level (every file copied or deleted), so the per-folder sync logs grow faster than before.
+- A merge (a first sync, a Repair, the automatic merge) is one line, like "Repair of Notes: 512 files compared, 2 updated", and so is a sync that changed more than 200 files ("Sync of Photos: 5000 uploaded"). Conflict copies and the backup folder aren't listed.
+- bisync doesn't report renames or moves: a renamed or moved file shows as a new file and a deleted one.
+- Syncs now log at rclone's INFO level (every file copied or deleted). Each folder's sync log starts a new file at 5 MB (the previous one is kept as `.1`), also during a long sync, and the app keeps only the start and end of a sync's output in memory.
 
 ## Share links
 
-**Copy Share Link…** makes a public, read-only link to a file or folder in a kept folder and copies it, so you can paste it anywhere. Anyone with the link can view and download it without signing in.
+**Copy Public Link…** makes a public, read-only link to a file or folder in a kept folder and copies it, so you can paste it anywhere. Anyone with the link can view and download it, without signing in. It stays active until you delete it in OpenCloud (in the browser: the file's sharing panel), unless you pick an expiry.
 
-- **Mac:** the menu's **Share a File…** (choose any file or folder in your kept folders), or a kept folder's **Copy Share Link…** in Settings ▸ Kept Folders.
-- **Windows, Linux:** select the folder in the settings window, Folders, then **Copy Share Link…** and choose the file or folder.
+- **Mac:** the menu's **Copy Public Link…** (choose any file or folder in your kept folders), or a kept folder's **Copy Public Link…** in Settings ▸ Kept Folders.
+- **Windows, Linux:** select the folder in the settings window, Folders, then **Copy Public Link…** and choose the file or folder.
 - Choose when the link expires (never, 1, 7 or 30 days) and, if you like, type a password for it. The password goes to OpenCloud with the request and isn't stored or logged by OpenCloud Bar.
 - Only for kept folders that have synced, and only for files that are in OpenCloud already; with the browser sign-in only. If the server requires a password for links, it says so.
-- The link is made with OpenCloud's libre-graph API (`createLink`, type `view`). Manage or delete links in OpenCloud's web interface.
+- The link is made with OpenCloud's libre-graph API (`createLink`, type `view`); only an https link is accepted. Manage or delete links in OpenCloud's web interface.
 
 ## Keeping a folder while a sync runs
 

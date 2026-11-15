@@ -116,9 +116,72 @@ enum Shell {
 /// Thread-safe byte buffer for collecting process output.
 final class OutputBuffer: @unchecked Sendable {
     private var data = Data()
+    private var tail = Data()
+    private var dropped = false
     private let lock = NSLock()
-    func append(_ d: Data) { lock.lock(); data.append(d); lock.unlock() }
-    var string: String { lock.lock(); defer { lock.unlock() }; return String(decoding: data, as: UTF8.self) }
+    /// nil: keep everything. Else keep the first `headMax` bytes and the last `tailMax` (a
+    /// bisync at INFO level writes a line per file; how it ended is at the end).
+    private let headMax: Int?
+    private let tailMax: Int
+    init(headMax: Int? = nil, tailMax: Int = 0) { self.headMax = headMax; self.tailMax = tailMax }
+
+    func append(_ d: Data) {
+        lock.lock(); defer { lock.unlock() }
+        guard let headMax else { data.append(d); return }
+        var rest = d
+        if data.count < headMax {
+            let k = min(headMax - data.count, rest.count)
+            data.append(rest.prefix(k))
+            rest = rest.dropFirst(k)
+        }
+        guard !rest.isEmpty else { return }
+        tail.append(rest)
+        if tail.count > tailMax { tail = Data(tail.suffix(tailMax)); dropped = true }
+    }
+    var string: String {
+        lock.lock(); defer { lock.unlock() }
+        return String(decoding: data, as: UTF8.self) + (dropped ? "\n[…]\n" : "") + String(decoding: tail, as: UTF8.self)
+    }
+}
+
+/// Appends to a log file as output arrives, and starts a new file (the old one becomes .1)
+/// when it passes 5 MB, also in the middle of a long sync.
+final class LogStream: @unchecked Sendable {
+    private let url: URL
+    private var handle: FileHandle?
+    private var size = 0
+    private let lock = NSLock()
+    static let max = 5_000_000
+
+    init(_ url: URL) {
+        self.url = url
+        open()
+    }
+
+    private func open() {
+        let fm = FileManager.default
+        if let s = (try? fm.attributesOfItem(atPath: url.path))?[.size] as? Int, s > Self.max { rotate() }
+        if !fm.fileExists(atPath: url.path) { fm.createFile(atPath: url.path, contents: nil) }
+        handle = try? FileHandle(forWritingTo: url)
+        size = Int((try? handle?.seekToEnd()) ?? 0)
+    }
+
+    private func rotate() {
+        try? handle?.close()
+        handle = nil
+        let old = url.appendingPathExtension("1")
+        try? FileManager.default.removeItem(at: old)
+        try? FileManager.default.moveItem(at: url, to: old)
+    }
+
+    func write(_ d: Data) {
+        lock.lock(); defer { lock.unlock() }
+        if size + d.count > Self.max { rotate(); open() }
+        try? handle?.write(contentsOf: d)
+        size += d.count
+    }
+
+    func close() { lock.lock(); try? handle?.close(); handle = nil; lock.unlock() }
 }
 
 /// Thread-safe one-way boolean.

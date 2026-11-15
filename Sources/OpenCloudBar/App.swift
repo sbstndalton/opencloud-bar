@@ -106,7 +106,7 @@ struct MenuContent: View {
 
         keptFoldersMenu
         recentChangesMenu
-        Button("Share a File…") { model.shareFile() }
+        Button("Copy Public Link…") { model.shareFile() }
             .disabled(model.needsSignIn || !model.config.isOIDC || model.config.kept.isEmpty)
         if model.conflictCount > 0 {
             Button("\(AppModel.conflictsText(model.conflictCount).prefix(1).uppercased() + AppModel.conflictsText(model.conflictCount).dropFirst())…") { model.openSettings(.conflicts) }

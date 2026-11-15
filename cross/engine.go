@@ -1160,7 +1160,8 @@ func (e *Engine) bisync(r folderRun, kind string, extra ...string) (string, erro
 		"--stats", "2s", "--stats-log-level", "NOTICE"} // progress for the menu (activity.go)
 	args = append(args, bwLimitArgs(r.cfg.BwLimitUp, r.cfg.BwLimitDown)...)
 	args = append(args, extra...)
-	sf := &statsFilter{onFiles: func(n int) {
+	changes := newChangeCollector()
+	sf := &statsFilter{onLine: changes.line, onFiles: func(n int) {
 		e.mu.Lock()
 		changed := e.activeFiles != n
 		e.activeFiles = n
@@ -1169,7 +1170,7 @@ func (e *Engine) bisync(r folderRun, kind string, extra ...string) (string, erro
 			e.notify()
 		}
 	}}
-	if lf := e.logFile("sync-" + r.f.StateName + ".log"); lf != nil {
+	if lf := newRotatingLog("sync-" + r.f.StateName + ".log"); lf != nil {
 		fmt.Fprintf(lf, "\n=== %s %s of %s\n", time.Now().Format(time.RFC3339), kind, r.f.Path)
 		defer lf.Close()
 		sf.w = lf
@@ -1180,7 +1181,8 @@ func (e *Engine) bisync(r folderRun, kind string, extra ...string) (string, erro
 	e.mu.Unlock()
 	out, err := e.run(syncTimeout, sf, r.cfg.Rclone(), args...)
 	if err == nil {
-		addChanges(r.cfg, parseChanges(out, kind, r.f, time.Now()))
+		sf.Flush()
+		addChanges(r.cfg, changes.result(kind, r.f, time.Now()))
 	}
 	return out, err
 }
@@ -1274,10 +1276,18 @@ func (e *Engine) run(timeout time.Duration, logTo io.Writer, name string, args .
 	cmd := exec.Command(name, args...)
 	cmd.Env = envFor(cfg)
 	hideWindow(cmd)
-	var buf bytes.Buffer
-	var w io.Writer = &buf
+	tracked := name == cfg.Rclone() && len(args) > 0 && args[0] == "bisync"
+	// A bisync's output is kept only in part (headTail): at INFO it has a line per file.
+	var buf interface {
+		io.Writer
+		String() string
+	} = &bytes.Buffer{}
+	if tracked {
+		buf = &headTail{}
+	}
+	var w io.Writer = buf
 	if logTo != nil {
-		w = io.MultiWriter(&buf, logTo)
+		w = io.MultiWriter(buf, logTo)
 	}
 	cmd.Stdout, cmd.Stderr = w, w
 	// Don't wait forever for output pipes that a finished process left open (seen with ssh on Windows).
@@ -1285,7 +1295,6 @@ func (e *Engine) run(timeout time.Duration, logTo io.Writer, name string, args .
 	if err := cmd.Start(); err != nil {
 		return "", err
 	}
-	tracked := name == cfg.Rclone() && len(args) > 0 && args[0] == "bisync"
 	if tracked {
 		e.mu.Lock()
 		e.currentSync = cmd
