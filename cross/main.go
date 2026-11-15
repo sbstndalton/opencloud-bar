@@ -8,13 +8,16 @@
 //	opencloud-bar [run [--no-tray]]   start (tray icon if a desktop is available)
 //	opencloud-bar status              show what's going on
 //	opencloud-bar sync                sync kept folders now
+//	opencloud-bar pause | resume      stop or restart syncing kept folders (the drive keeps working)
+//	opencloud-bar check-updates       look for a newer release
+//	opencloud-bar version             print the version
 //	opencloud-bar keep PATH [--local DIR]
 //	opencloud-bar unkeep PATH         final sync, then move the local copy out of the way
 //	opencloud-bar repair PATH         merge both sides after "needs repair"
 //	opencloud-bar allow-delete PATH   apply a blocked large deletion
 //	opencloud-bar connect | eject     the on-demand drive
 //	opencloud-bar settings            open the settings page in the browser
-//	opencloud-bar reload | quit
+//	opencloud-bar reload | quit [--force]
 package main
 
 import (
@@ -39,8 +42,9 @@ import (
 )
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `usage: opencloud-bar setup [URL] | logout | token | run [--no-tray] | status | sync | keep PATH [--local DIR] |
-       unkeep PATH | repair PATH | allow-delete PATH | connect | eject | settings | reload | quit`)
+	fmt.Fprintln(os.Stderr, `usage: opencloud-bar setup [URL] | logout [--force] | token | run [--no-tray] | status | sync | pause | resume |
+       keep PATH [--local DIR] | unkeep PATH | repair PATH | allow-delete PATH | connect | eject | settings |
+       check-updates | version | reload | quit [--force]`)
 	os.Exit(2)
 }
 
@@ -51,6 +55,31 @@ func main() {
 		return
 	}
 	switch os.Args[1] {
+	case "version", "--version", "-v":
+		fmt.Println("opencloud-bar " + version)
+	case "check-updates":
+		var u UpdateState
+		if err := call("POST", "/check-updates", nil, &u); err != nil {
+			fail(err)
+		}
+		printUpdate(u)
+	case "pause", "resume":
+		if err := call("POST", "/"+os.Args[1], nil, nil); err != nil {
+			fail(err)
+		}
+		if os.Args[1] == "pause" {
+			fmt.Println("syncing paused (the drive keeps working); `opencloud-bar resume` restarts it")
+		} else {
+			fmt.Println("syncing resumed")
+		}
+	case "quit":
+		q := url.Values{}
+		if len(os.Args) > 2 && os.Args[2] == "--force" {
+			q.Set("force", "1")
+		}
+		if err := call("POST", "/quit", q, nil); err != nil {
+			fail(err)
+		}
 	case "run":
 		fs := flag.NewFlagSet("run", flag.ExitOnError)
 		noTray := fs.Bool("no-tray", false, "run headless (servers)")
@@ -62,7 +91,7 @@ func main() {
 			fail(err)
 		}
 		printStatus(st)
-	case "sync", "connect", "eject", "reload", "quit":
+	case "sync", "connect", "eject", "reload":
 		if err := call("POST", "/"+os.Args[1], nil, nil); err != nil {
 			fail(err)
 		}
@@ -164,6 +193,12 @@ func printStatus(st Status) {
 	if st.Message != "" {
 		fmt.Println("  " + st.Message)
 	}
+	if st.Paused {
+		fmt.Println("  syncing is paused (opencloud-bar resume)")
+	}
+	if st.Update.Available {
+		fmt.Printf("  update available: %s (%s)\n", st.Update.Latest, st.Update.URL)
+	}
 	if st.UseTunnel {
 		fmt.Printf("  tunnel: %v   drive: mounted=%v wanted=%v\n", st.TunnelUp, st.DriveMounted, st.DriveWanted)
 	} else {
@@ -178,6 +213,19 @@ func printStatus(st Status) {
 			line += ", synced " + ago(f.LastSuccess)
 		}
 		fmt.Println(line)
+	}
+}
+
+func printUpdate(u UpdateState) {
+	switch {
+	case u.Error != "":
+		fmt.Println("couldn't check for updates: " + u.Error)
+	case u.Available:
+		fmt.Printf("update available: %s (running %s)\n%s\n", u.Latest, u.Running, u.URL)
+	case u.DevBuild:
+		fmt.Printf("development build %s; latest release is %s\n", u.Running, u.Latest)
+	default:
+		fmt.Printf("up to date (%s; latest release %s)\n", u.Running, u.Latest)
 	}
 }
 
@@ -278,7 +326,25 @@ func apiHandler(e *Engine, stop func(), tok string, ui *webUI) http.Handler {
 	mux.HandleFunc("POST /allow-delete", func(w http.ResponseWriter, r *http.Request) {
 		reply(w, e.AllowBigDeletion(r.URL.Query().Get("path")))
 	})
-	mux.HandleFunc("POST /quit", func(w http.ResponseWriter, r *http.Request) { reply(w, nil); go stop() })
+	mux.HandleFunc("POST /quit", func(w http.ResponseWriter, r *http.Request) {
+		// Fail closed: files written to the drive may still be uploading.
+		if r.URL.Query().Get("force") == "" {
+			if err := e.uploadsBlock(); err != nil {
+				reply(w, fmt.Errorf("%v; quit with --force to stop anyway (they upload next time)", err))
+				return
+			}
+		}
+		reply(w, nil)
+		go stop()
+	})
+	mux.HandleFunc("GET /pending", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]int{"pending": e.PendingUploads()})
+	})
+	mux.HandleFunc("POST /pause", func(w http.ResponseWriter, r *http.Request) { reply(w, e.SetPaused(true)) })
+	mux.HandleFunc("POST /resume", func(w http.ResponseWriter, r *http.Request) { reply(w, e.SetPaused(false)) })
+	mux.HandleFunc("POST /check-updates", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(e.CheckForUpdates(r.Context()))
+	})
 	// A one-time link to the settings page, for `opencloud-bar settings`.
 	mux.HandleFunc("POST /settings-link", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"url": ui.loginURL(r.URL.Query().Get("section"))})

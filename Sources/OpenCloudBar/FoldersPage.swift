@@ -158,9 +158,21 @@ struct FoldersPage: View {
             .frame(minHeight: 150)
 
             Divider()
+            if model.config.paused {
+                HStack {
+                    Image(systemName: "pause.circle.fill").foregroundStyle(.orange)
+                    Text("Syncing is paused. Kept folders don't sync until you resume; the drive keeps working.")
+                    Spacer()
+                    Button("Resume Syncing") { model.setPaused(false) }
+                }
+                .padding(10)
+                .background(Color.orange.opacity(0.12))
+            }
             HStack {
                 Button("Keep a Folder…") { model.keepFolder() }
                     .disabled(model.syncing || model.needsSignIn)
+                Button(model.config.paused ? "Resume Syncing" : "Pause Syncing") { model.setPaused(!model.config.paused) }
+                    .disabled(model.configError != nil || !model.config.isConfigured)
                 Spacer()
                 if let f = selected {
                     Menu("Actions for “\(f.displayName)”") { actions(f) }.fixedSize()
@@ -182,7 +194,7 @@ struct FoldersPage: View {
         Button("Open in Browser") { if let u = browserURL { NSWorkspace.shared.open(u) } }
             .disabled(browserURL == nil)
         Button("Sync Now") { model.syncNow(f) }
-            .disabled(model.syncing || model.needsSignIn)
+            .disabled(model.syncing || model.needsSignIn || model.config.paused)
         switch state(f) {
         case .needsRepair:
             Button("Repair (Merge Both Sides)…") { model.repair(f) }.disabled(model.syncing)
@@ -210,6 +222,10 @@ struct FoldersPage: View {
                     GridRow {
                         Text("Status").foregroundStyle(.secondary)
                         Text(state(f).text).textSelection(.enabled)
+                    }
+                    GridRow {
+                        Text("Last synced").foregroundStyle(.secondary)
+                        Text(model.status[f.path]?.lastSuccess.map { agoText($0) } ?? "Never")
                     }
                 }
                 Text("Excludes for this folder").font(.headline)

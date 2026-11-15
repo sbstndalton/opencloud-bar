@@ -63,7 +63,14 @@ type Config struct {
 	// chunked uploads, which pass proxies like Cloudflare (owncloud's single PUT gets 413 over 100 MB).
 	// Ignored for legacy remotes (named rclone remote), which keep their own settings.
 	WebdavVendor string `json:"webdavVendor,omitempty"`
+
+	// Paused stops kept-folder syncing (the drive keeps working). Same key as the macOS app.
+	Paused bool `json:"paused,omitempty"`
+	// CheckForUpdates: look for a new release once a day (default on).
+	CheckForUpdates *bool `json:"checkForUpdates,omitempty"`
 }
+
+func (c Config) UpdateChecks() bool { return c.CheckForUpdates == nil || *c.CheckForUpdates }
 
 func (c Config) Vendor() string {
 	if c.WebdavVendor != "" {
@@ -278,6 +285,9 @@ func (c Config) Validate() error {
 				return fmt.Errorf("kept folders %q and %q overlap", f.Path, g.Path)
 			}
 		}
+		if err := c.localPathProblem(f, i); err != nil {
+			return err
+		}
 	}
 	if strings.Contains(c.DavPath, "'") {
 		return errors.New("davPath can't contain a single quote")
@@ -295,6 +305,65 @@ func (c Config) Validate() error {
 		return errors.New("useTunnel needs sshHost")
 	}
 	return nil
+}
+
+// localPathProblem checks a kept folder's own local folder (localPath). Syncing makes the local
+// folder look like the server folder, deletions included, so it must never be the home folder,
+// a drive root, the folder that holds all kept folders, or another kept folder's local copy,
+// nor contain any of them.
+func (c Config) localPathProblem(f KeptFolder, index int) error {
+	if f.LocalPath == "" {
+		return nil
+	}
+	p := filepath.Clean(expand(f.LocalPath))
+	if !filepath.IsAbs(p) {
+		return fmt.Errorf("kept folder %q: localPath must be a full path", f.Path)
+	}
+	if p == filepath.Dir(p) || (runtime.GOOS == "windows" && len(p) <= 3) {
+		return fmt.Errorf("kept folder %q: localPath can't be a drive root", f.Path)
+	}
+	guarded := []struct{ what, path string }{
+		{"your home folder", home()},
+		{"the local folder (localRoot)", expand(c.LocalRoot)},
+	}
+	for j, g := range c.Kept {
+		if j != index {
+			guarded = append(guarded, struct{ what, path string }{fmt.Sprintf("the local copy of %q", g.Path), c.Local(g)})
+		}
+	}
+	for _, g := range guarded {
+		if g.path == "" {
+			continue
+		}
+		gp := filepath.Clean(g.path)
+		if samePath(p, gp) || within(gp, p) {
+			return fmt.Errorf("kept folder %q: localPath can't be or contain %s", f.Path, g.what)
+		}
+		if strings.HasPrefix(g.what, "the local copy") && within(p, gp) {
+			return fmt.Errorf("kept folder %q: localPath is inside %s", f.Path, g.what)
+		}
+	}
+	return nil
+}
+
+// samePath and within compare paths the way the disk does (case-insensitive on Windows and macOS).
+func samePath(a, b string) bool {
+	if runtime.GOOS == "linux" {
+		return a == b
+	}
+	return foldKey(a) == foldKey(b)
+}
+
+// within reports whether p is strictly inside dir (both cleaned, absolute).
+func within(p, dir string) bool {
+	if dir == filepath.Dir(dir) { // a root: everything else is inside it
+		return p != dir
+	}
+	prefix := strings.TrimSuffix(dir, string(filepath.Separator)) + string(filepath.Separator)
+	if runtime.GOOS == "linux" {
+		return strings.HasPrefix(p, prefix)
+	}
+	return strings.HasPrefix(foldKey(p), foldKey(prefix))
 }
 
 // loadConfig never overwrites a file it couldn't read.
@@ -324,21 +393,26 @@ func saveConfig(c Config) error {
 		return err
 	}
 	var data []byte
-	if old, rerr := os.ReadFile(configFile()); rerr == nil {
+	old, rerr := os.ReadFile(configFile())
+	if rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+		return fmt.Errorf("couldn't read %s: %w", configFile(), rerr)
+	}
+	if rerr == nil {
 		raw := map[string]json.RawMessage{}
-		if json.Unmarshal(old, &raw) == nil {
-			for k := range knownConfigKeys() {
-				delete(raw, k)
-			}
-			var mine map[string]json.RawMessage
-			_ = json.Unmarshal(fresh, &mine)
-			for k, v := range mine {
-				raw[k] = v
-			}
-			data, err = json.MarshalIndent(raw, "", "  ")
-			if err != nil {
-				return err
-			}
+		if err := json.Unmarshal(old, &raw); err != nil {
+			// Never replace a file someone is editing (or that got damaged) with our copy.
+			return fmt.Errorf("the settings file can't be read (%v); fix it, then reload the settings", err)
+		}
+		for k := range knownConfigKeys() {
+			delete(raw, k)
+		}
+		var mine map[string]json.RawMessage
+		_ = json.Unmarshal(fresh, &mine)
+		for k, v := range mine {
+			raw[k] = v
+		}
+		if data, err = json.MarshalIndent(raw, "", "  "); err != nil {
+			return err
 		}
 	}
 	if data == nil {

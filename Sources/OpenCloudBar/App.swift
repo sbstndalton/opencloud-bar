@@ -19,7 +19,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 enum Launcher {
     static func main() {
         if CommandLine.arguments.contains("--token") { Auth.runTokenMode() }
+        guard SingleInstance.claim() else {
+            // A second copy would start a second drive and a second sync of the same folders.
+            NSApplication.shared.setActivationPolicy(.accessory)
+            let a = NSAlert()
+            a.messageText = "OpenCloud Bar is already running"
+            a.informativeText = "Look for its cloud icon in the menu bar."
+            NSApp.activate(ignoringOtherApps: true)
+            a.runModal()
+            exit(0)
+        }
         OpenCloudBarApp.main()
+    }
+}
+
+/// One copy per user: an exclusive lock on a file, held until the process exits (the system
+/// drops it even after a crash, so there is no stale lock to clean up).
+enum SingleInstance {
+    nonisolated(unsafe) private static var fd: Int32 = -1
+
+    static func claim() -> Bool {
+        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("OpenCloudBar")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let path = dir.appendingPathComponent("instance.lock").path
+        let f = open(path, O_RDWR | O_CREAT, 0o600)
+        guard f >= 0 else { return true }   // can't tell: don't refuse to start
+        if flock(f, LOCK_EX | LOCK_NB) != 0 {
+            close(f)
+            return errno != EWOULDBLOCK
+        }
+        fd = f
+        return true
     }
 }
 
@@ -50,6 +81,9 @@ struct MenuContent: View {
         if model.needsSignIn {
             Button("Set Up / Sign In…") { model.showSetup() }
         }
+        if model.updateState.available, let v = model.updateState.latest {
+            Button("Update Available: v\(v)…") { model.openRelease() }
+        }
         Divider()
 
         Section("OpenCloud Drive") {
@@ -68,10 +102,14 @@ struct MenuContent: View {
         Divider()
 
         Button("Sync Now") { model.syncNow() }
-            .disabled(model.syncing || model.needsSignIn)
+            .disabled(model.syncing || model.needsSignIn || model.config.paused)
             .keyboardShortcut("s")
+        Button(model.config.paused ? "Resume Syncing" : "Pause Syncing") { model.setPaused(!model.config.paused) }
+            .disabled(!model.config.isConfigured || model.configError != nil)
         Button("Settings…") { model.openSettings() }
             .keyboardShortcut(",")
+        Button("Check for Updates…") { Task { await model.checkForUpdates(manual: true) } }
+            .disabled(model.updateState.checking)
         Divider()
         Button("Quit OpenCloud Bar") { NSApp.terminate(nil) }
             .keyboardShortcut("q")
@@ -93,11 +131,32 @@ struct MenuContent: View {
         let names = Dictionary(grouping: all, by: \.displayName).mapValues(\.count)
         return Menu("Kept Folders (\(all.count))") {
             ForEach(shown) { f in
-                Button {
-                    model.openLocal(f)
-                } label: {
-                    Label((names[f.displayName] ?? 0) > 1 ? f.path : f.displayName,
-                          systemImage: (model.status[f.path]?.state ?? .idle).symbol)
+                let name = (names[f.displayName] ?? 0) > 1 ? f.path : f.displayName
+                let symbol = (model.status[f.path]?.state ?? .idle).symbol
+                if let why = model.attentionReason(f) {
+                    // A folder that needs the user: say why, and offer the fix right here.
+                    Menu {
+                        Text(why.prefix(1).uppercased() + why.dropFirst())
+                        Divider()
+                        switch model.status[f.path]?.state {
+                        case .needsRepair:
+                            Button("Repair (Merge Both Sides)…") { model.repair(f) }.disabled(model.syncing)
+                        case .bigDeletion:
+                            Button("Allow Large Deletion…") { model.allowBigDeletion(f) }.disabled(model.syncing)
+                        default:
+                            Button("Sync Now") { model.syncNow(f) }.disabled(model.syncing || model.needsSignIn)
+                        }
+                        Button("Open in Finder") { model.openLocal(f) }
+                        Button("Show in Settings…") { model.openSettings(.folders) }
+                    } label: {
+                        Label("\(name) — \(model.menuDetail(f))", systemImage: symbol)
+                    }
+                } else {
+                    Button {
+                        model.openLocal(f)
+                    } label: {
+                        Label("\(name) — \(model.menuDetail(f))", systemImage: symbol)
+                    }
                 }
             }
             if all.count > Self.menuLimit {

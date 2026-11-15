@@ -685,6 +685,16 @@ func cmdSetup(args []string) {
 }
 
 func cmdLogout() {
+	// Fail closed while the app runs and files may still be uploading.
+	force := len(os.Args) > 2 && os.Args[2] == "--force"
+	var p struct{ Pending int }
+	if err := call("GET", "/pending", nil, &p); err == nil && !force {
+		if p.Pending > 0 {
+			fail(fmt.Errorf("%d file(s) written to the drive haven't finished uploading; try again later or use logout --force", p.Pending))
+		} else if p.Pending < 0 {
+			fail(fmt.Errorf("couldn't check whether files are still uploading; try again or use logout --force"))
+		}
+	}
 	logout()
 	_ = call("POST", "/reload", nil, nil)
 	fmt.Println("Signed out.")

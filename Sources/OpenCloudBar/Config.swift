@@ -68,6 +68,10 @@ struct Config: Codable {
     var auth: String?          // "oidc" or "rclone"; default oidc if serverURL is set
     var useTunnel: Bool?       // default: true if sshHost is set
     var webdavVendor: String?  // OIDC remote's rclone vendor; default "infinitescale" (tus chunked uploads)
+    /// Kept folders don't sync while paused; the drive keeps working. Same key as the Go app.
+    var paused = false
+    /// Look for a new release once a day.
+    var checkForUpdates = true
     var commonFilters: [String] = [
         "- *.tmp", "- .*.bundle.tmp", "- *~", "- .DS_Store", "- ._*", "- Thumbs.db",
         "- .sync_*.db", "- .sync_*.db-*", "- .OpenCloudSync.log", "- .owncloudsync.log",
@@ -101,6 +105,8 @@ struct Config: Codable {
         auth = try c.decodeIfPresent(String.self, forKey: .auth)
         useTunnel = try c.decodeIfPresent(Bool.self, forKey: .useTunnel)
         webdavVendor = try c.decodeIfPresent(String.self, forKey: .webdavVendor)
+        paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? def.paused
+        checkForUpdates = try c.decodeIfPresent(Bool.self, forKey: .checkForUpdates) ?? def.checkForUpdates
     }
 
     /// "oidc" (browser sign-in) or "rclone" (the named rclone remote holds the credentials).
@@ -247,7 +253,12 @@ struct Config: Codable {
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         var data = try enc.encode(self)
-        if let existing = try? Data(contentsOf: Config.fileURL),
+        let existing = try? Data(contentsOf: Config.fileURL)
+        // Never replace a settings file that can't be read (a hand edit in progress, or damage).
+        if let existing, (try? JSONSerialization.jsonObject(with: existing)) as? [String: Any] == nil {
+            throw AuthError.message("The settings file can't be read. Fix it, then choose Reload Settings.")
+        }
+        if let existing,
            let old = try? JSONSerialization.jsonObject(with: existing) as? [String: Any],
            var new = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             var merged = old

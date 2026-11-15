@@ -50,6 +50,10 @@ pre.log .err { color:#ff8b8b; } pre.log .warn { color:#f0c36a; }
 #banner { display:none; background:var(--bad); color:#fff; padding:10px 28px; }
 details { margin:14px 0; } summary { cursor:pointer; font-weight:600; }
 .inline-err { color:var(--bad); }
+.notice { display:flex; gap:12px; align-items:center; flex-wrap:wrap; background:color-mix(in srgb, var(--accent) 10%, var(--panel)); border:1px solid color-mix(in srgb, var(--accent) 40%, var(--line)); border-radius:8px; padding:10px 14px; margin:0 0 14px; }
+.notice.paused { background:color-mix(in srgb, var(--warn) 10%, var(--panel)); border-color:color-mix(in srgb, var(--warn) 45%, var(--line)); }
+.notice span { flex:1; min-width:200px; }
+td .why { display:block; color:var(--muted); font-size:12.5px; }
 @media (max-width: 640px) { .app { flex-direction:column; } nav { width:auto; display:flex; flex-wrap:wrap; gap:4px; border-right:0; border-bottom:1px solid var(--line); } nav h1 { width:100%; } nav button { width:auto; } .row > label { width:100%; } }
 </style>
 </head>
@@ -140,16 +144,17 @@ function ago(iso) {
   if (m < 48 * 60) return Math.round(m / 60) + " h ago";
   return Math.round(m / 1440) + " days ago";
 }
+// stateLook: dot colour, short status, and (for problems) why, in plain words.
 function stateLook(f) {
   switch (f.state) {
-    case "syncing": return ["busy", "Syncing…"];
-    case "ok": return ["ok", "Up to date"];
-    case "skipped": return ["warn", "Skipped" + (f.detail ? " (" + f.detail + ")" : "")];
-    case "failed": return ["bad", "Failed" + (f.detail ? ": " + f.detail : "")];
-    case "needs-repair": return ["bad", "Needs repair" + (f.detail ? " (" + f.detail + ")" : "")];
-    case "large-deletion": return ["warn", "Large deletion blocked"];
+    case "syncing": return ["busy", "Syncing…", ""];
+    case "ok": return ["ok", "Up to date", ""];
+    case "skipped": return ["warn", "Skipped", f.detail || ""];
+    case "failed": return ["bad", "Sync failed", f.detail || ""];
+    case "needs-repair": return ["bad", "Needs repair", f.detail || ""];
+    case "large-deletion": return ["warn", "Large deletion blocked", "More than half of the files were deleted on one side. Check, then allow it or restore the files."];
   }
-  return ["", "Waiting"];
+  return ["", "Waiting", ""];
 }
 
 // ---- shell
@@ -174,11 +179,30 @@ async function refreshState() {
   try { S = await get("state"); } catch (e) { return; }
   const sum = document.getElementById("summary");
   if (sum) sum.textContent = S.status.summary + (S.status.message ? " — " + S.status.message : "");
+  drawNotices();
   if (section === "folders") drawFolders();
   if (section === "drive") drawDriveButtons();
 }
 function header(main, title) {
-  main.append(h("h2", { text: title }), h("p", { class: "summary", id: "summary", text: S ? S.status.summary : "" }));
+  main.append(h("h2", { text: title }), h("p", { class: "summary", id: "summary", text: S ? S.status.summary : "" }), h("div", { id: "notices" }));
+  drawNotices();
+}
+// Paused and update-available notices, at the top of every section.
+function drawNotices() {
+  const box = document.getElementById("notices");
+  if (!box || !S) return;
+  const out = [];
+  if (S.status.paused) out.push(h("div", { class: "notice paused" },
+    h("span", { text: "Syncing is paused. Kept folders don't sync until you resume; the drive keeps working." }),
+    h("button", { class: "btn primary", onclick: () => setPaused(false) }, "Resume Syncing")));
+  const u = S.status.update;
+  if (u && u.available) out.push(h("div", { class: "notice" },
+    h("span", { text: "OpenCloud Bar " + u.latest + " is available (you have " + u.running + ")." }),
+    h("button", { class: "btn primary", onclick: () => act(() => post("open", { kind: "release" })) }, "Open Release Page")));
+  box.replaceChildren(...out);
+}
+function setPaused(p) {
+  return act(() => post("pause", { paused: p }), p ? "Syncing paused" : "Syncing resumed");
 }
 
 // ---- Folders
@@ -196,14 +220,16 @@ function drawFolders() {
   const list = S.folders;
   const bar = h("div", { class: "row" },
     h("button", { class: "btn primary", disabled: busy || !S.config.configured || S.status.signedOut, onclick: keepFolder }, "Keep a Folder…"),
-    h("button", { class: "btn", disabled: busy || !S.config.configured, onclick: () => act(() => post("sync"), "Sync started") }, "Sync Now"),
+    h("button", { class: "btn", disabled: busy || !S.config.configured || S.status.paused, onclick: () => act(() => post("sync"), "Sync started") }, "Sync Now"),
+    h("button", { class: "btn", disabled: !S.config.configured, onclick: () => setPaused(!S.status.paused) }, S.status.paused ? "Resume Syncing" : "Pause Syncing"),
     h("button", { class: "btn", disabled: !S.config.serverURL, onclick: () => act(() => post("open", { kind: "web" })) }, "Open OpenCloud in Browser"));
   const tbl = h("table", {}, h("thead", {}, h("tr", {}, h("th", { text: "Name" }), h("th", { text: "On this computer" }), h("th", { text: "Status" }), h("th", { text: "Last synced" }))),
     h("tbody", {}, list.map(f => {
-      const [cls, text] = stateLook(f);
+      const [cls, text, why] = stateLook(f);
       return h("tr", { class: f.path === selected ? "sel" : "", onclick: () => { selected = f.path; drawFolders(); } },
         h("td", { text: f.name }), h("td", { class: "path", text: f.local }),
-        h("td", {}, h("span", { class: "dot " + cls }), text), h("td", { text: ago(f.lastSuccess) }));
+        h("td", {}, h("span", { class: "dot " + cls }), text, why ? h("span", { class: "why", text: why }) : null),
+        h("td", { text: ago(f.lastSuccess) }));
     })));
   const parts = [bar];
   parts.push(list.length ? tbl : h("div", { class: "card" }, "Nothing is kept on this computer yet. Choose Keep a Folder… to start."));
@@ -241,7 +267,8 @@ function folderDetail(f, busy) {
     h("h3", { text: f.name }),
     h("div", { class: "row" }, h("label", { text: "On this computer" }), h("span", { class: "path", text: f.local })),
     h("div", { class: "row" }, h("label", { text: "In OpenCloud" }), h("span", { class: "path", text: "/" + f.remote })),
-    f.detail ? h("div", { class: "row" }, h("label", { text: "Last message" }), h("span", { text: f.detail })) : null,
+    h("div", { class: "row" }, h("label", { text: "Status" }), h("span", { text: stateLook(f)[1] + (stateLook(f)[2] ? ": " + stateLook(f)[2] : "") })),
+    h("div", { class: "row" }, h("label", { text: "Last synced" }), h("span", { text: ago(f.lastSuccess) })),
     h("div", { class: "row" }, acts),
     h("h3", { text: "Excludes for this folder only" }),
     h("p", { class: "hint", text: "One rule per line, like - *.iso (exclude) or + keep.txt (include). They apply on top of the common excludes in Sync." }),
@@ -281,11 +308,24 @@ async function account(main, r) {
     h("button", { class: "btn", disabled: !a.server || a.mode === "none", onclick: () => act(() => post("open", { kind: "web" })) }, "Open OpenCloud in Browser"),
     h("button", { class: "btn", onclick: () => go("account") }, "Refresh"));
   if (a.mode === "none" || a.signedOut) btns.append(h("button", { class: "btn primary", onclick: () => act(() => post("setup"), "Continue in the dialog and browser") }, "Sign In…"));
-  else if (a.mode === "oidc") btns.append(h("button", { class: "btn danger", onclick: () => {
-    if (confirm("Sign out of OpenCloud?\n\nThe drive is disconnected and syncing stops. Your kept folders stay on this computer. Sign in again to resume.")) act(() => post("signout"), "Signed out").then(() => go("account"));
-  } }, "Sign Out"));
+  else if (a.mode === "oidc") btns.append(h("button", { class: "btn danger", onclick: signOut }, "Sign Out"));
   card.append(btns);
   box.replaceWith(card);
+}
+
+// Sign out, but ask again (fail closed) while files written to the drive may still be uploading.
+async function signOut() {
+  if (!confirm("Sign out of OpenCloud?\n\nThe drive is disconnected and syncing stops. Your kept folders stay on this computer. Sign in again to resume.")) return;
+  try {
+    await post("signout", { force: false });
+  } catch (e) {
+    if (!e.data || !e.data.uploads) { toast(e.message, true); return; }
+    if (!confirm("Sign out anyway?\n\n" + e.message + ". They upload after you sign in again.")) return;
+    try { await post("signout", { force: true }); } catch (e2) { toast(e2.message, true); return; }
+  }
+  toast("Signed out");
+  await refreshState();
+  go("account");
 }
 
 // ---- field helpers for the settings pages
@@ -322,7 +362,11 @@ async function syncPage(main, r) {
   await refreshState();
   if (r !== render) return;
   const kept = S.folders.length > 0;
+  const pausedBox = h("input", { type: "checkbox" }); pausedBox.checked = !!S.status.paused;
+  pausedBox.addEventListener("change", () => setPaused(pausedBox.checked));
   main.append(h("div", { class: "card" },
+    h("div", { class: "row" }, h("label", { text: "Pause syncing" }), pausedBox,
+      h("span", { class: "hint", text: "Kept folders stop syncing until you resume. The drive keeps working." })),
     selectField("Sync every", "syncIntervalSeconds", [[60,"1 minute"],[300,"5 minutes"],[900,"15 minutes"],[1800,"30 minutes"],[3600,"1 hour"]]),
     textField("Local folder", "localRoot", kept ? "Can't change while folders are kept here. Stop keeping them first." : "New kept folders are placed inside this folder.", { disabled: kept }),
     numField("Parallel transfers", "transfers", "How many files copy at once (1 to 32).", 1, 32),
@@ -393,6 +437,20 @@ function general(main, r) {
   refreshState().then(() => {
     if (r !== render) return;
     const c = S.config;
+    const u = S.status.update || {};
+    const upLine = h("p", { class: "hint", id: "update-line", text: updateText(u) });
+    main.append(h("div", { class: "card" }, h("h3", { text: "OpenCloud Bar" }),
+      h("div", { class: "row" }, h("label", { text: "Version" }), h("span", { text: S.version })),
+      checkField("Check for updates automatically", "checkForUpdates", "Once a day, from GitHub. Nothing about you is sent."),
+      upLine,
+      h("div", { class: "row" },
+        h("button", { class: "btn", onclick: async (ev) => {
+          ev.target.disabled = true; upLine.textContent = "Checking…";
+          try { const r = await post("check-updates"); upLine.textContent = updateText(r); if (r.error) toast(r.error, true); }
+          catch (e) { upLine.textContent = e.message; }
+          ev.target.disabled = false; await refreshState();
+        } }, "Check for Updates"),
+        u.available ? h("button", { class: "btn primary", onclick: () => act(() => post("open", { kind: "release" })) }, "Open Release Page") : null)));
     if (c.useTunnel) main.append(h("div", { class: "card" }, numField("Keep this much server memory free (MiB)", "minServerAvailableMiB", "Sync is skipped when the server has less memory available. 0 turns the check off.", 0, 4194304)));
     main.append(h("div", { class: "card" }, h("h3", { text: "Settings file" }),
       h("p", { class: "hint", text: "Everything here is saved to a settings file. You never need to edit it by hand." }),
@@ -412,6 +470,16 @@ function general(main, r) {
         textField("rclone path", "rclonePath", "Leave empty to use the rclone that comes with the app.")));
     main.append(adv);
   });
+}
+
+function updateText(u) {
+  if (!u || !u.running) return "";
+  if (u.error) return "Last check failed: " + u.error;
+  if (!u.checkedAt || Date.parse(u.checkedAt) < 86400000) return "Not checked yet.";
+  const when = "Checked " + ago(u.checkedAt) + ". ";
+  if (u.available) return when + "Version " + u.latest + " is available.";
+  if (u.devBuild) return when + "This is a development build; the latest release is " + (u.latest || "unknown") + ".";
+  return when + "You have the latest version.";
 }
 
 // ---- Logs

@@ -222,7 +222,30 @@ func (u *webUI) handler(e *Engine) http.Handler {
 	mux.HandleFunc("POST /ui/api/eject", func(w http.ResponseWriter, r *http.Request) { jsonOK(w, e.Eject()) })
 	mux.HandleFunc("POST /ui/api/reload", func(w http.ResponseWriter, r *http.Request) { jsonOK(w, e.Reload()) })
 	mux.HandleFunc("POST /ui/api/setup", func(w http.ResponseWriter, r *http.Request) { go setUpAndSignIn(e); jsonOK(w, nil) })
-	mux.HandleFunc("POST /ui/api/signout", func(w http.ResponseWriter, r *http.Request) { e.SignOut(); jsonOK(w, nil) })
+	mux.HandleFunc("POST /ui/api/signout", func(w http.ResponseWriter, r *http.Request) {
+		var b struct {
+			Force bool `json:"force"`
+		}
+		if !readJSON(w, r, &b) {
+			return
+		}
+		if err := e.SignOut(b.Force); err != nil {
+			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "uploads": true})
+			return
+		}
+		jsonOK(w, nil)
+	})
+	mux.HandleFunc("POST /ui/api/pause", func(w http.ResponseWriter, r *http.Request) {
+		var b struct {
+			Paused bool `json:"paused"`
+		}
+		if readJSON(w, r, &b) {
+			jsonOK(w, e.SetPaused(b.Paused))
+		}
+	})
+	mux.HandleFunc("POST /ui/api/check-updates", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, e.CheckForUpdates(r.Context()))
+	})
 	mux.HandleFunc("POST /ui/api/keep", func(w http.ResponseWriter, r *http.Request) { e.serveKeep(w, r) })
 	mux.HandleFunc("POST /ui/api/unkeep", func(w http.ResponseWriter, r *http.Request) {
 		var b struct{ Path string }
@@ -372,6 +395,7 @@ func (e *Engine) uiState() map[string]any {
 		"configFile": configFile(),
 		"logDir":     logDir(),
 		"apiPort":    settingsUI.getPort(),
+		"version":    version,
 		"config": map[string]any{
 			"syncIntervalSeconds":   cfg.SyncIntervalSeconds,
 			"commonFilters":         nonNil(cfg.CommonFilters),
@@ -392,6 +416,8 @@ func (e *Engine) uiState() map[string]any {
 			"serverURL":             cfg.ServerURL,
 			"oidc":                  cfg.OIDC(),
 			"configured":            cfg.Configured(),
+			"paused":                cfg.Paused,
+			"checkForUpdates":       cfg.UpdateChecks(),
 		},
 		"defaults": map[string]any{
 			"syncIntervalSeconds": def.SyncIntervalSeconds,
@@ -484,6 +510,16 @@ func (e *Engine) serveOpen(w http.ResponseWriter, r *http.Request) {
 		openPath(configFile())
 	case "logs":
 		openPath(logDir())
+	case "release":
+		// Only this project's release page, as GitHub reported it (checked in fetchLatestRelease).
+		u := e.Status().Update.URL
+		if u == "" {
+			u = releasesPagePrefix + "latest"
+		}
+		if err := openURL(u); err != nil {
+			jsonErr(w, http.StatusConflict, err)
+			return
+		}
 	default:
 		jsonErr(w, http.StatusBadRequest, fmt.Errorf("unknown kind %q", b.Kind))
 		return
@@ -495,12 +531,11 @@ func (e *Engine) serveOpen(w http.ResponseWriter, r *http.Request) {
 func (e *Engine) driveStats() map[string]any {
 	e.mu.Lock()
 	running := e.mount != nil
-	cfg := e.cfg
 	e.mu.Unlock()
 	if !running {
 		return map[string]any{"mounted": false}
 	}
-	out, err := e.run(10*time.Second, nil, cfg.Rclone(), "rc", "vfs/stats", "--url", fmt.Sprintf("http://127.0.0.1:%d/", cfg.RcPort()))
+	out, err := e.rc("vfs/stats", 10*time.Second)
 	if err != nil {
 		return map[string]any{"mounted": true, "error": "rclone didn't answer"}
 	}
@@ -511,7 +546,7 @@ func (e *Engine) driveStats() map[string]any {
 			UploadsQueued     int   `json:"uploadsQueued"`
 		} `json:"diskCache"`
 	}
-	if json.Unmarshal([]byte(out), &v) != nil {
+	if json.Unmarshal(out, &v) != nil {
 		return map[string]any{"mounted": true, "error": "couldn't read rclone's answer"}
 	}
 	return map[string]any{"mounted": true, "cacheBytes": v.DiskCache.BytesUsed,

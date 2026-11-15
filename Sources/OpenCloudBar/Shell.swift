@@ -56,12 +56,13 @@ enum Shell {
     }
 
     /// Starts a long-running tool and returns the process; `onExit` runs on the main actor.
-    static func launch(_ exe: String, _ args: [String], log: URL,
+    /// `extraEnv` is added for this process only (the drive's rc login, kept off the command line).
+    static func launch(_ exe: String, _ args: [String], log: URL, extraEnv: [String: String] = [:],
                        onExit: @escaping @MainActor (Int32) -> Void) throws -> Process {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: exe)
         p.arguments = args
-        p.environment = environment()
+        p.environment = environment().merging(extraEnv) { _, new in new }
         if !FileManager.default.fileExists(atPath: log.path) {
             FileManager.default.createFile(atPath: log.path, contents: nil)
         }

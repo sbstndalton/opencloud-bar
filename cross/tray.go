@@ -36,6 +36,8 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 	message.Hide()
 	setup := systray.AddMenuItem("Set Up / Sign In…", "")
 	setup.Hide()
+	update := systray.AddMenuItem("Update Available…", "Open the release page")
+	update.Hide()
 	systray.AddSeparator()
 	openDrive := systray.AddMenuItem("Open OpenCloud Drive", "")
 	toggleDrive := systray.AddMenuItem("Connect Drive", "")
@@ -50,7 +52,9 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 	keep := systray.AddMenuItem("Keep a Folder Here…", "")
 	systray.AddSeparator()
 	syncNow := systray.AddMenuItem("Sync Now", "")
+	pause := systray.AddMenuItem("Pause Syncing", "Stop syncing kept folders; the drive keeps working")
 	settings := systray.AddMenuItem("Settings…", "")
+	checkUpdates := systray.AddMenuItem("Check for Updates…", "")
 	systray.AddSeparator()
 	quitItem := systray.AddMenuItem("Quit OpenCloud Bar", "")
 
@@ -71,6 +75,18 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 		configured := e.cfg.Configured()
 		needSignIn := !configured || st.SignedOut
 		show(setup, needSignIn)
+		if st.Update.Available {
+			update.SetTitle("Update Available: v" + st.Update.Latest + "…")
+			update.Show()
+		} else {
+			update.Hide()
+		}
+		if st.Paused {
+			pause.SetTitle("Resume Syncing")
+		} else {
+			pause.SetTitle("Pause Syncing")
+		}
+		enable(pause, configured && st.ConfigError == "")
 		if !e.cfg.Mounting() {
 			openDrive.Hide()
 			toggleDrive.Hide()
@@ -95,6 +111,11 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 				continue
 			}
 			s.SetTitle(folderLabel(order[i]))
+			if needsAttention(order[i].State) {
+				s.SetTooltip(attentionReason(order[i]) + " — click to fix it in Settings")
+			} else {
+				s.SetTooltip("Open the folder")
+			}
 			s.Show()
 		}
 		if len(order) > len(slots) {
@@ -103,7 +124,7 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 			manage.SetTitle("Manage Folders…")
 		}
 		enable(keep, !needSignIn && !st.Syncing)
-		enable(syncNow, !st.Syncing)
+		enable(syncNow, !st.Syncing && !st.Paused && !needSignIn)
 	}
 	refresh()
 	// First launch (nothing set up yet): start the set-up right away.
@@ -141,7 +162,11 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 						f = shown[i]
 					}
 					unlockShown()
-					if ok {
+					switch {
+					case !ok:
+					case needsAttention(f.State):
+						openSettings("folders") // where Repair and the other fixes are
+					default:
 						openPath(f.Local)
 					}
 				}
@@ -173,13 +198,18 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 				pickAndKeep(e)
 			case <-syncNow.ClickedCh:
 				e.SyncNow()
+			case <-pause.ClickedCh:
+				alertErr(e.SetPaused(!e.Status().Paused))
+			case <-update.ClickedCh:
+				openRelease(e.Status().Update)
+			case <-checkUpdates.ClickedCh:
+				go checkUpdatesNow(e) // a network call: don't block the menu
 			case <-settings.ClickedCh:
 				openSettings("")
 			case <-manage.ClickedCh:
 				openSettings("folders")
 			case <-quitItem.ClickedCh:
-				if n := e.PendingUploads(); n > 0 && !dialogConfirm("Files are still uploading",
-					fmt.Sprintf("%d file(s) written to the OpenCloud drive haven't finished uploading. They upload next time OpenCloud Bar runs.", n), "Quit Anyway") {
+				if !confirmUploads(e, "Quit Anyway") {
 					continue
 				}
 				summary.SetTitle("Finishing sync…")
@@ -205,25 +235,6 @@ func enable(m *systray.MenuItem, on bool) {
 	} else {
 		m.Disable()
 	}
-}
-
-func folderLabel(f FolderStatus) string {
-	switch f.State {
-	case StSyncing:
-		return f.Name + " — syncing…"
-	case StFailed:
-		return f.Name + " — " + f.Detail
-	case StNeedsRepair:
-		return f.Name + " — needs repair (" + f.Detail + ")"
-	case StBigDeletion:
-		return f.Name + " — large deletion blocked"
-	case StSkipped:
-		return f.Name + " — skipped (" + f.Detail + ")"
-	}
-	if !f.LastSuccess.IsZero() {
-		return f.Name + " — " + ago(f.LastSuccess)
-	}
-	return f.Name + " — waiting"
 }
 
 // trayIcon draws a small cloud; Windows wants ICO, others PNG.

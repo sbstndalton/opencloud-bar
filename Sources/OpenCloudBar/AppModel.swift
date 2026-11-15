@@ -33,6 +33,11 @@ final class AppModel: ObservableObject {
     /// OIDC only: no usable sign-in; nothing runs until the user signs in.
     @Published private(set) var signedOut = false
     @Published private(set) var opensAtLogin = SMAppService.mainApp.status == .enabled
+    @Published private(set) var updateState = Updates.load()
+
+    /// The drive's remote-control port only answers with this login (random each launch).
+    private let rcUser = "ocb-" + UUID().uuidString.prefix(8).lowercased()
+    private let rcPass = (0..<2).map { _ in UUID().uuidString.replacingOccurrences(of: "-", with: "") }.joined()
 
     private var authBusy = false
     private var authRetryAt = Date.distantPast
@@ -146,6 +151,9 @@ final class AppModel: ObservableObject {
     // MARK: - Supervisor
 
     private func tick() {
+        if !quitting, configError == nil, config.checkForUpdates, Updates.due(updateState) {
+            Task { await self.checkForUpdates(manual: false) }
+        }
         guard !quitting, config.isConfigured, configError == nil else { return }
         if config.isOIDC {
             if signedOut { return }
@@ -169,7 +177,7 @@ final class AppModel: ObservableObject {
             tunnelUp = true   // no tunnel: the server is reached directly
         }
         if driveWanted, tunnelUp, mount == nil, Date() >= mountRestartAt { startMount() }
-        if !syncing, tunnelUp, Date() >= nextSyncAt, !config.kept.isEmpty { syncNow() }
+        if !syncing, !config.paused, tunnelUp, Date() >= nextSyncAt, !config.kept.isEmpty { startSyncAll(manual: false) }
     }
 
     // The tunnel runs as a launchd agent rather than a child of this app: macOS Local Network
@@ -256,12 +264,14 @@ final class AppModel: ObservableObject {
                     "--dir-cache-time", "30s", "--vfs-read-chunk-size", "16M", "--buffer-size", "16M",
                     "--transfers", "4", "--checkers", "8", "--low-level-retries", "10",
                     "--exclude", ".DS_Store", "--exclude", "._*",
-                    "--rc", "--rc-addr", "127.0.0.1:\(config.rcPort)", "--rc-no-auth",
+                    "--rc", "--rc-addr", "127.0.0.1:\(config.rcPort)",
                     "--log-level", "NOTICE"]
         unmountRequested = false
         mountStartedAt = Date()
         do {
-            mount = try Shell.launch(config.rclone, args, log: Log.url("drive.log")) { [weak self] code in
+            // The rc login goes in the environment, not the command line.
+            mount = try Shell.launch(config.rclone, args, log: Log.url("drive.log"),
+                                     extraEnv: ["RCLONE_RC_USER": rcUser, "RCLONE_RC_PASS": rcPass]) { [weak self] code in
                 self?.mountExited(code)
             }
             Log.line("drive mount started")
@@ -306,11 +316,22 @@ final class AppModel: ObservableObject {
     /// Files written to the drive that rclone hasn't uploaded yet (nil if unknown).
     private func pendingUploads() async -> Int? {
         guard mount?.isRunning == true else { return 0 }
-        let r = await Shell.run(config.rclone, ["rc", "vfs/stats", "--url", "http://127.0.0.1:\(config.rcPort)/"], timeout: 10)
-        guard r.status == 0, let data = r.output.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let disk = json["diskCache"] as? [String: Any] else { return nil }
-        return ((disk["uploadsInProgress"] as? Int) ?? 0) + ((disk["uploadsQueued"] as? Int) ?? 0)
+        guard let s = await driveStats() else { return nil }
+        return s.uploading + s.queued
+    }
+
+    /// Calls the drive's rclone remote control (127.0.0.1 only, with this launch's login).
+    private func rc(_ method: String, timeout: TimeInterval) async -> [String: Any]? {
+        guard let url = URL(string: "http://127.0.0.1:\(config.rcPort)/\(method)") else { return nil }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = timeout
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Basic " + Data("\(rcUser):\(rcPass)".utf8).base64EncodedString(), forHTTPHeaderField: "Authorization")
+        req.httpBody = Data("{}".utf8)
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 
     func connectDrive() {
@@ -365,7 +386,16 @@ final class AppModel: ObservableObject {
         Log.line("\(f.path): needs repair: \(reason)")
     }
 
+    /// The menu's Sync Now: every kept folder, now (not while paused).
     func syncNow() {
+        guard !config.paused else { return }
+        startSyncAll(manual: true)
+    }
+
+    /// Syncs all kept folders. Each folder's repair state is read from disk, so a folder that
+    /// was repaired isn't skipped because of what the app remembered. A manual sync also tries
+    /// a blocked large deletion again (it is blocked again if nothing changed).
+    private func startSyncAll(manual: Bool) {
         guard !syncing, config.isConfigured, configError == nil, !signedOut else { return }
         nextSyncAt = Date().addingTimeInterval(TimeInterval(max(60, config.syncIntervalSeconds)))
         syncing = true
@@ -378,8 +408,10 @@ final class AppModel: ObservableObject {
                 for f in folders where !Task.isCancelled && !self.quitting {
                     // skip folders removed while this run was waiting
                     guard self.config.kept.contains(where: { $0.path == f.path }) else { continue }
-                    if case .needsRepair = self.status[f.path]?.state { continue }
-                    if case .bigDeletion = self.status[f.path]?.state { continue }
+                    if let reason = self.needsRepairReason(f) {
+                        self.status[f.path]?.state = .needsRepair(reason); continue
+                    }
+                    if case .bigDeletion = self.status[f.path]?.state, !manual { continue }
                     _ = await self.syncFolder(f, mode: .normal)
                 }
             }
@@ -418,8 +450,15 @@ final class AppModel: ObservableObject {
 
     enum SyncMode { case normal, repair, allowBigDeletion }
 
+    /// One kept folder's paths for a run.
+    private struct FolderRun {
+        let f: KeptFolder
+        let local: URL, work: URL, filters: URL, serverFile: URL, marker: URL
+    }
+
     /// Runs one bisync for a folder. Returns true on success. Never creates, recreates or
-    /// resyncs a folder unless this is its first sync or the user chose Repair.
+    /// resyncs a folder unless this is its first sync, the user chose Repair, or the two sides'
+    /// listings drifted apart (one automatic merge per folder per 24 hours; then the user decides).
     @discardableResult
     private func syncFolder(_ f: KeptFolder, mode: SyncMode) async -> Bool {
         let fm = FileManager.default
@@ -461,47 +500,137 @@ final class AppModel: ObservableObject {
         if (try? String(contentsOf: filters, encoding: .utf8)) != filterText {
             try? filterText.write(to: filters, atomically: true, encoding: .utf8)
         }
+        let run = FolderRun(f: f, local: local, work: work, filters: filters, serverFile: serverFile, marker: marker)
 
-        var args = ["bisync", local.path, config.remoteSpec + f.path,
-                    "--workdir", work.path, "--filters-file", filters.path,
-                    "--create-empty-src-dirs", "--compare", "size,modtime",
-                    "--resilient", "--recover", "--max-lock", "10m",
-                    "--conflict-resolve", "newer", "--conflict-loser", "num",
-                    "--transfers", "4", "--checkers", "6", "--log-level", "NOTICE"]
-        if first { args += ["--resync-mode", "newer", "--check-sync=false"] }
-        if mode == .allowBigDeletion { args += ["--force"] }
-
-        let log = Log.url("sync-\(f.stateName).log")
-        Log.append("\n=== \(Date()) \(first ? "merge (resync)" : "sync") of \(f.path)\n", to: log)
-        let r = await runTracked(config.rclone, args, log: log)
-
-        if r.status == 0 {
-            fm.createFile(atPath: marker.path, contents: nil)
-            try? fm.removeItem(at: stateFile(f, ".needs-repair"))
-            try? config.serverIdentity.write(to: serverFile, atomically: true, encoding: .utf8)
-            status[f.path]?.state = .ok
-            status[f.path]?.lastSuccess = Date()
-            saveLastSuccess()
-            return true
+        if first {
+            return await merge(run, kind: mode == .repair ? "merge (repair)" : "merge (first sync)")
         }
-        if config.isOIDC && r.output.contains(Auth.signedOutText) {
-            // The token command said the sign-in is gone; don't show rclone's raw error.
-            markSignedOut()
-            status[f.path]?.state = .failed("signed out")
-        } else if r.output.contains("Must run --resync") && !r.output.contains("retryable without --resync") {
-            markNeedsRepair(f, "sync history is out of date")
-        } else if r.output.contains("Safety abort") || r.output.contains("too many deletes") {
-            status[f.path]?.state = .bigDeletion
-        } else {
-            let reason = r.status == 124 ? "timed out" : "rclone exit \(r.status); will retry"
-            status[f.path]?.state = .failed(reason)
+        let r = await bisync(run, kind: "sync", extra: mode == .allowBigDeletion ? ["--force"] : [])
+        if r.status == 0 { succeeded(run); return true }
+        let res = BisyncResult.classify(r.output, timedOut: r.status == 124)
+        guard res.outcome == .drift else { await failed(run, res, r.output); return false }
+
+        // The two sides' listings disagree. bisync won't continue (and --recover only falls back
+        // to listings that disagree the same way); a newer-wins merge brings both sides together.
+        let auto = stateFile(f, ".auto-merge")
+        guard AutoMerge.allowed(auto) else {
+            markNeedsRepair(f, AutoMerge.driftReason(res.path, "already merged automatically today; choose Repair"))
+            return false
+        }
+        AutoMerge.record(auto)
+        Log.line("\(f.path): out of sync (\(res.path ?? "listings differ")); merging automatically, newer copy wins")
+        guard await merge(run, kind: "automatic merge (out of sync)",
+                          driftNote: "the automatic merge didn't settle it; choose Repair") else { return false }
+        lastMessage = "“\(f.displayName)” was out of sync and was merged automatically (the newer copy of each file was kept)"
+        return true
+    }
+
+    /// `bisync --resync --resync-mode newer`: for each file the newer copy wins and nothing is
+    /// deleted. --check-sync stays on, so a merge that didn't bring both sides together fails now
+    /// instead of breaking the next sync. Files that change during the merge fail that check;
+    /// one more pass usually settles them.
+    private func merge(_ run: FolderRun, kind: String, driftNote: String = "choose Repair when it's quiet") async -> Bool {
+        var kind = kind
+        for pass in 1...2 {
+            let r = await bisync(run, kind: kind, extra: ["--resync", "--resync-mode", "newer"])
+            if r.status == 0 { succeeded(run); return true }
+            let res = BisyncResult.classify(r.output, timedOut: r.status == 124)
+            if res.outcome != .drift || pass == 2 || quitting {
+                if res.outcome == .drift {
+                    markNeedsRepair(run.f, AutoMerge.driftReason(res.path, driftNote))
+                } else {
+                    await failed(run, res, r.output)
+                }
+                return false
+            }
+            Log.line("\(run.f.path): files changed during the merge (\(res.path ?? "listings differ")); merging once more")
+            kind = "merge (second pass)"
         }
         return false
     }
 
-    /// Runs rclone, remembering the process so Quit can stop it cleanly; stops it after syncTimeout.
+    private func bisync(_ run: FolderRun, kind: String, extra: [String]) async -> Shell.Result {
+        // Merges are rare: log every copy so a merge can be checked afterwards.
+        let level = kind == "sync" ? "NOTICE" : "INFO"
+        let args = ["bisync", run.local.path, config.remoteSpec + run.f.path,
+                    "--workdir", run.work.path, "--filters-file", run.filters.path,
+                    "--create-empty-src-dirs", "--compare", "size,modtime",
+                    "--resilient", "--recover", "--max-lock", "10m",
+                    "--conflict-resolve", "newer", "--conflict-loser", "num",
+                    "--transfers", "4", "--checkers", "6", "--log-level", level] + extra
+        let log = Log.url("sync-\(run.f.stateName).log")
+        Log.append("\n=== \(Date()) \(kind) of \(run.f.path)\n", to: log)
+        return await runTracked(config.rclone, args, log: log)
+    }
+
+    private func succeeded(_ run: FolderRun) {
+        let fm = FileManager.default
+        fm.createFile(atPath: run.marker.path, contents: nil)
+        try? fm.removeItem(at: stateFile(run.f, ".needs-repair"))
+        try? config.serverIdentity.write(to: run.serverFile, atomically: true, encoding: .utf8)
+        status[run.f.path]?.state = .ok
+        status[run.f.path]?.lastSuccess = Date()
+        saveLastSuccess()
+    }
+
+    static let missingRemoteText = "Folder is missing or empty in OpenCloud"
+
+    /// Shows why a run failed (drift is handled by the caller).
+    private func failed(_ run: FolderRun, _ res: BisyncResult, _ out: String) async {
+        let f = run.f
+        switch res.outcome {
+        case .signedOut:
+            if config.isOIDC {
+                // The token command said the sign-in is gone; don't show rclone's raw error.
+                markSignedOut()
+                status[f.path]?.state = .failed("signed out")
+            } else {
+                status[f.path]?.state = .failed("rclone couldn't sign in; will retry")
+            }
+        case .interrupted:
+            if res.timeout && !quitting {
+                status[f.path]?.state = .failed("timed out; will retry")
+            } else {
+                status[f.path]?.state = .skipped("interrupted; continues with the next sync")
+            }
+        case .bigChange:
+            if res.side != "Path1", await remoteMissingOrEmpty(f) {
+                status[f.path]?.state = .failed(Self.missingRemoteText)
+            } else {
+                status[f.path]?.state = .bigDeletion
+            }
+        case .needsResync:
+            if out.contains("directory not found"), await remoteMissingOrEmpty(f) {
+                status[f.path]?.state = .failed(Self.missingRemoteText)
+            } else {
+                markNeedsRepair(f, "sync history is out of date")
+            }
+        case .drift:
+            markNeedsRepair(f, AutoMerge.driftReason(res.path, "choose Repair when it's quiet"))
+        case .failed:
+            if out.contains("directory not found"), await remoteMissingOrEmpty(f) {
+                status[f.path]?.state = .failed(Self.missingRemoteText)
+            } else {
+                status[f.path]?.state = .failed("rclone failed; will retry (see the sync log)")
+            }
+        }
+    }
+
+    /// True when the folder is gone from OpenCloud or holds nothing. A safety abort then means
+    /// the server copy vanished, not that files were deleted on purpose: the large-deletion
+    /// override must not be offered, or it would empty this Mac's copy too.
+    private func remoteMissingOrEmpty(_ f: KeptFolder) async -> Bool {
+        let r = await Shell.run(config.rclone, ["lsf", "--max-depth", "1", config.remoteSpec + f.path], timeout: 60)
+        if r.status != 0 { return r.output.contains("directory not found") || r.output.contains("not found") }
+        return r.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Runs rclone, remembering the process so Quit can stop it cleanly. After syncTimeout it is
+    /// interrupted (bisync finishes the current file and saves its state); if it is still
+    /// running a minute later it is terminated.
     private func runTracked(_ exe: String, _ args: [String], log: URL) async -> Shell.Result {
         let timedOut = Flag()
+        let timeout = syncTimeout
         let result: Shell.Result = await withCheckedContinuation { cont in
             let p = Process()
             p.executableURL = URL(fileURLWithPath: exe)
@@ -525,8 +654,13 @@ final class AppModel: ObservableObject {
             do {
                 try p.run()
                 currentSync = p
-                DispatchQueue.global().asyncAfter(deadline: .now() + syncTimeout) {
-                    if p.isRunning { timedOut.set(); p.interrupt() }
+                DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                    guard p.isRunning else { return }
+                    timedOut.set()
+                    p.interrupt()
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 60) {
+                        if p.isRunning { p.terminate() }
+                    }
                 }
             } catch {
                 cont.resume(returning: Shell.Result(status: -1, output: "\(error)"))
@@ -559,11 +693,15 @@ final class AppModel: ObservableObject {
         _ = exclusive { [weak self] in
             guard let self else { return }
             try? FileManager.default.removeItem(at: self.stateFile(f, ".needs-repair"))
+            // A repair the user chose also resets the daily automatic-merge allowance.
+            try? FileManager.default.removeItem(at: self.stateFile(f, ".auto-merge"))
             await self.syncFolder(f, mode: .repair)
         }
     }
 
+    /// Only while the folder is blocked for that reason, never when the server copy is missing.
     func allowBigDeletion(_ f: KeptFolder) {
+        guard case .bigDeletion = status[f.path]?.state else { return }
         guard confirm("Allow a large deletion in “\(f.displayName)”?",
                       "More than half of this folder's files were deleted on one side. If that was on purpose, the deletion will be applied to the other side too. If not, choose Cancel and restore the files first.",
                       button: "Apply Deletion") else { return }
@@ -616,8 +754,12 @@ final class AppModel: ObservableObject {
         config.kept.append(folder)
         config.save()
         refreshStatusEntries()
-        lastMessage = "Downloading “\(folder.displayName)”…"
-        if !syncing { syncNow() }
+        if config.paused {
+            lastMessage = "“\(folder.displayName)” downloads when you resume syncing"
+        } else {
+            lastMessage = "Downloading “\(folder.displayName)”…"
+            if !syncing { syncNow() }
+        }
     }
 
     /// Final sync, then moves the local copy to the Trash and stops syncing it.
@@ -630,8 +772,7 @@ final class AppModel: ObservableObject {
                 text += "\n\n\(n) file(s) in it are never synced (for example build folders, node_modules, or folders excluded in Settings). They exist only on this Mac and will go to the Trash with it."
             }
             guard confirm("Stop keeping “\(f.displayName)” on this Mac?", text, button: "Stop Keeping") else { return }
-            _ = exclusive { [weak self] in
-                guard let self else { return }
+            _ = exclusive { [self] in
                 guard await self.syncFolder(f, mode: .normal) else {
                     self.alert("Couldn't sync “\(f.displayName)”", "Nothing was removed. Check the sync log and try again.")
                     return
@@ -643,7 +784,7 @@ final class AppModel: ObservableObject {
                     return
                 }
                 try? fm.removeItem(at: self.workDir(f))
-                for s in [".initialised", ".needs-repair"] { try? fm.removeItem(at: self.stateFile(f, s)) }
+                for s in [".initialised", ".needs-repair", ".auto-merge"] { try? fm.removeItem(at: self.stateFile(f, s)) }
                 try? fm.removeItem(at: self.config.stateURL.appendingPathComponent("filters-\(f.stateName).txt"))
                 self.config.kept.removeAll { $0.path == f.path }
                 self.config.save()
@@ -688,18 +829,64 @@ final class AppModel: ObservableObject {
     /// Live numbers from the drive's rclone (nil when the drive isn't running or doesn't answer).
     func driveStats() async -> DriveStats? {
         guard mount?.isRunning == true,
-              let url = URL(string: "http://127.0.0.1:\(config.rcPort)/vfs/stats") else { return nil }
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.timeoutInterval = 3
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = Data("{}".utf8)
-        guard let (data, resp) = try? await URLSession.shared.data(for: req),
-              (resp as? HTTPURLResponse)?.statusCode == 200,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let json = await rc("vfs/stats", timeout: 5),
               let disk = json["diskCache"] as? [String: Any] else { return nil }
         func n(_ k: String) -> Int64 { (disk[k] as? NSNumber)?.int64Value ?? 0 }
         return DriveStats(cacheBytes: n("bytesUsed"), uploading: Int(n("uploadsInProgress")), queued: Int(n("uploadsQueued")))
+    }
+
+    // MARK: - Pause and updates
+
+    /// Pauses or resumes syncing of kept folders (saved in the settings). The drive keeps
+    /// working; a sync that is already running finishes first.
+    func setPaused(_ paused: Bool) {
+        Task {
+            if let e = await updateConfig({ $0.paused = paused }) {
+                alert(paused ? "Couldn't pause syncing" : "Couldn't resume syncing", e)
+                return
+            }
+            Log.line(paused ? "syncing paused" : "syncing resumed")
+            if !paused { nextSyncAt = Date(); tick() }
+        }
+    }
+
+    /// Asks GitHub for the latest release. The daily check is silent; the menu's
+    /// Check for Updates… always says what it found.
+    func checkForUpdates(manual: Bool) async {
+        guard !updateState.checking else { return }
+        updateState.checking = true
+        var s = updateState
+        do {
+            let (tag, url) = try await Updates.fetchLatest()
+            s.latest = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+            s.url = url
+            s.error = nil
+        } catch {
+            s.error = error.localizedDescription
+        }
+        s.checking = false
+        s.checkedAt = Date()
+        updateState = s
+        Updates.save(s)
+        if s.available { Log.line("update available: \(s.latest ?? "")") }
+        guard manual else { return }
+        if let e = s.error {
+            alert("Couldn't check for updates", e)
+        } else if s.available, let v = s.latest {
+            if confirm("OpenCloud Bar \(v) is available", "You have \(Updates.running). Open the release page to download it?",
+                       button: "Open Release Page") { openRelease() }
+        } else if Updates.isDevBuild {
+            alert("Development build", "This is a development build (\(Updates.running)), so it isn't compared with releases. The latest release is \(s.latest ?? "unknown").")
+        } else {
+            alert("OpenCloud Bar is up to date", "You have \(Updates.running), the latest release.")
+        }
+    }
+
+    /// Opens the release page GitHub reported (only ever this project's own pages).
+    func openRelease() {
+        var link = updateState.url ?? ""
+        if !link.hasPrefix(Updates.pagePrefix) { link = Updates.pagePrefix + "latest" }
+        if let u = URL(string: link) { NSWorkspace.shared.open(u) }
     }
 
     // MARK: - Settings
@@ -833,10 +1020,29 @@ final class AppModel: ObservableObject {
         guard confirm("Sign out of OpenCloud?",
                       "The drive is disconnected and syncing stops. Your kept folders stay on this Mac. Sign in again to resume.",
                       button: "Sign Out") else { return }
-        Auth.logout()
-        signedOut = true
-        lastMessage = Self.signedOutText
-        restartConnection()
+        Task {
+            guard await confirmUploads(action: "Sign Out Anyway", later: "They upload after you sign in again.") else { return }
+            Auth.logout()
+            signedOut = true
+            lastMessage = Self.signedOutText
+            restartConnection()
+        }
+    }
+
+    /// Asks before stopping the drive while files may still be uploading. Fails closed: if the
+    /// count can't be read, it asks too.
+    private func confirmUploads(action: String, later: String) async -> Bool {
+        switch await pendingUploads() {
+        case .some(0):
+            return true
+        case .some(let n):
+            return confirmRisky("Files are still uploading",
+                                "\(n) file(s) written to the OpenCloud drive haven't finished uploading. \(later)", button: action)
+        case .none:
+            return confirmRisky("Uploads couldn't be checked",
+                                "OpenCloud Bar couldn't check whether files written to the OpenCloud drive have finished uploading. Anything not uploaded yet: \(later.prefix(1).lowercased() + later.dropFirst())",
+                                button: action)
+        }
     }
 
     /// Stops the drive and tunnel so tick() starts them again with the current settings.
@@ -861,10 +1067,7 @@ final class AppModel: ObservableObject {
     func quit() {
         guard !quitting else { return }
         Task {
-            if let n = await pendingUploads(), n > 0,
-               !confirm("Files are still uploading",
-                        "\(n) file(s) written to the OpenCloud drive haven't finished uploading. They will upload the next time OpenCloud Bar runs. Quit anyway?",
-                        button: "Quit Anyway") {
+            guard await confirmUploads(action: "Quit Anyway", later: "They upload the next time OpenCloud Bar runs.") else {
                 NSApp.reply(toApplicationShouldTerminate: false)
                 return
             }
@@ -897,6 +1100,18 @@ final class AppModel: ObservableObject {
         a.runModal()
     }
 
+    /// Like confirm, but Cancel is the default button (Return doesn't take the risky choice).
+    func confirmRisky(_ title: String, _ text: String, button: String) -> Bool {
+        let a = NSAlert()
+        a.messageText = title
+        a.informativeText = text
+        a.alertStyle = .warning
+        a.addButton(withTitle: "Cancel")
+        a.addButton(withTitle: button)
+        NSApp.activate(ignoringOtherApps: true)
+        return a.runModal() == .alertSecondButtonReturn
+    }
+
     func confirm(_ title: String, _ text: String, button: String) -> Bool {
         let a = NSAlert()
         a.messageText = title
@@ -910,10 +1125,34 @@ final class AppModel: ObservableObject {
     // MARK: - Summary for the menu
 
     func hasProblem(_ f: KeptFolder) -> Bool {
+        attentionReason(f) != nil
+    }
+
+    /// Why a folder needs the user, in a few words (nil if it doesn't).
+    func attentionReason(_ f: KeptFolder) -> String? {
         switch status[f.path]?.state {
-        case .failed, .needsRepair, .bigDeletion: return true
-        default: return false
+        case .needsRepair(let why): return why.isEmpty ? "needs repair" : "needs repair: \(why)"
+        case .bigDeletion: return "large deletion blocked"
+        case .failed(let why): return why.isEmpty ? "sync failed" : "sync failed: \(why)"
+        default: return nil
         }
+    }
+
+    /// The folder's line in the Kept Folders menu: the problem, or when it last synced.
+    func menuDetail(_ f: KeptFolder) -> String {
+        switch status[f.path]?.state {
+        case .needsRepair: return "needs repair"
+        case .bigDeletion: return "large deletion blocked"
+        case .failed(let why): return why == Self.missingRemoteText ? "missing or empty in OpenCloud" : "sync failed"
+        default: break
+        }
+        switch status[f.path]?.state {
+        case .syncing: return "syncing…"
+        case .skipped(let why): return "skipped (\(why))"
+        default: break
+        }
+        if let t = status[f.path]?.lastSuccess { return "synced \(agoText(t))" }
+        return "waiting for first sync"
     }
 
     var summary: String {
@@ -921,10 +1160,18 @@ final class AppModel: ObservableObject {
         if !config.isConfigured { return "Not set up: choose Set Up / Sign In…" }
         if signedOut { return Self.signedOutText }
         if syncing { return "Syncing…" }
-        if let bad = config.kept.first(where: hasProblem) { return "“\(bad.displayName)” needs attention" }
+        let bad = config.kept.filter(hasProblem)
+        if let first = bad.first, let why = attentionReason(first) {
+            var s = "“\(first.displayName)” \(why)"
+            if bad.count == 2 { s += " (and 1 more folder)" } else if bad.count > 2 { s += " (and \(bad.count - 1) more folders)" }
+            return s
+        }
         let times = config.kept.compactMap { status[$0.path]?.lastSuccess }
+        if config.paused {
+            return times.min().map { "Paused · synced \(agoText($0))" } ?? "Paused"
+        }
         if let oldest = times.min(), times.count == config.kept.count {
-            return "Up to date · synced \(Self.relative(oldest))"
+            return "Up to date · synced \(agoText(oldest))"
         }
         if !tunnelUp { return "Connecting to server…" }
         return config.kept.isEmpty ? "Nothing kept on this Mac" : "Waiting for first sync"
@@ -935,6 +1182,7 @@ final class AppModel: ObservableObject {
         if syncing { return "arrow.triangle.2.circlepath.icloud" }
         if config.kept.contains(where: hasProblem) { return "exclamationmark.icloud" }
         if !tunnelUp { return "icloud.slash" }
+        if config.paused { return "pause.circle" }
         return "icloud"
     }
 

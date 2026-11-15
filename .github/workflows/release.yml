@@ -51,8 +51,9 @@ jobs:
             --product-version "${{ steps.ver.outputs.version }}" --file-version "${{ steps.ver.outputs.version }}" `
             --copyright "Copyright (c) 2026 Sebastian Dalton, MIT License"
           New-Item -ItemType Directory -Force ..\dist | Out-Null
-          go build -trimpath -ldflags "-s -w -H windowsgui" -o "..\dist\OpenCloud Bar.exe" .
-          go build -trimpath -ldflags "-s -w" -o ..\dist\opencloud-bar.exe .
+          $ld = "-X main.version=${{ steps.ver.outputs.version }}"
+          go build -trimpath -ldflags "-s -w -H windowsgui $ld" -o "..\dist\OpenCloud Bar.exe" .
+          go build -trimpath -ldflags "-s -w $ld" -o ..\dist\opencloud-bar.exe .
 
       - name: Upload unsigned
         id: unsigned
@@ -123,7 +124,7 @@ jobs:
           for arch in amd64 arm64; do
             d="stage/opencloud-bar-linux-$arch"
             mkdir -p "$d"
-            (cd cross && CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w" -o "../$d/opencloud-bar" .)
+            (cd cross && CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version=$v" -o "../$d/opencloud-bar" .)
             ./scripts/fetch-rclone.sh linux $arch "$d"
             cp LICENSE README.md "$d/"
             cp packaging/linux/opencloud-bar.desktop packaging/linux/opencloud-bar.service "$d/"
@@ -146,7 +147,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build DMG
         run: |
-          ./scripts/build-dmg.sh
+          v=0.0.0-dev; [[ "$GITHUB_REF" == refs/tags/v* ]] && v=${GITHUB_REF_NAME#v}
+          VERSION=$v ./scripts/build-dmg.sh
           mkdir -p dist
           cp build/OpenCloud-Bar.dmg dist/OpenCloud-Bar-macOS.dmg
       - uses: actions/upload-artifact@v4

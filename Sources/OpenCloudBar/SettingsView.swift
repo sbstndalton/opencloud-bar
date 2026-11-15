@@ -300,6 +300,10 @@ struct SyncPage: View {
     var body: some View {
         Form {
             Section("Kept Folders") {
+                Toggle("Pause syncing", isOn: Binding(get: { model.config.paused }, set: { model.setPaused($0) }))
+                    .disabled(model.configError != nil || !model.config.isConfigured)
+                Text("While paused, kept folders don't sync. The OpenCloud drive keeps working.")
+                    .font(.caption).foregroundStyle(.secondary)
                 ChoicePicker(title: "Sync", choices: Self.intervals, current: model.config.syncIntervalSeconds,
                              customLabel: { "Every \($0) seconds" }) { v in
                     Task { error = await model.updateConfig { $0.syncIntervalSeconds = v } }
@@ -503,16 +507,46 @@ struct GeneralPage: View {
             || localPort != String(c.localPort) || rclonePath != c.rclonePath
     }
 
+    @Local private var updateError: String?
+
     private var version: String {
-        let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-        return v ?? "development build"
+        Updates.isDevBuild ? "\(Updates.running) (development build)" : Updates.running
+    }
+
+    private var updateText: String {
+        let u = model.updateState
+        if u.checking { return "Checking…" }
+        if let e = u.error { return "The last check failed: \(e)" }
+        guard let t = u.checkedAt else { return "Not checked yet." }
+        let when = "Checked \(agoText(t))."
+        if u.available, let v = u.latest { return "\(when) Version \(v) is available." }
+        if Updates.isDevBuild { return "\(when) This is a development build; the latest release is \(u.latest ?? "unknown")." }
+        return "\(when) You have the latest version."
     }
 
     var body: some View {
         Form {
             Section {
                 Toggle("Open at Login", isOn: Binding(get: { model.opensAtLogin }, set: { _ in model.toggleOpenAtLogin() }))
-                LabeledContent("Version") { Text(version) }
+                LabeledContent("Version") { Text(version).textSelection(.enabled) }
+            }
+            Section("Updates") {
+                Toggle("Check for updates automatically", isOn: Binding(
+                    get: { model.config.checkForUpdates },
+                    set: { on in Task { updateError = await model.updateConfig { $0.checkForUpdates = on } } }))
+                Text("Once a day OpenCloud Bar asks GitHub for the latest release. Nothing about you is sent.")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Text(updateText).foregroundStyle(model.updateState.available ? Color.accentColor : Color.secondary)
+                    Spacer()
+                    if model.updateState.checking { ProgressView().controlSize(.small) }
+                    Button("Check Now") { Task { await model.checkForUpdates(manual: true) } }
+                        .disabled(model.updateState.checking)
+                    if model.updateState.available, let v = model.updateState.latest {
+                        Button("Get v\(v)…") { model.openRelease() }.buttonStyle(.borderedProminent)
+                    }
+                }
+                InlineError(text: updateError)
             }
             if model.config.tunnel {
                 Section("Server") {
