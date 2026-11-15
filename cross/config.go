@@ -34,7 +34,7 @@ type Config struct {
 	LocalPort             int          `json:"localPort"`
 	RcloneRemote          string       `json:"rcloneRemote"`
 	DavPath               string       `json:"davPath"`
-	RclonePath            string       `json:"rclonePath"`
+	RclonePath            string       `json:"rclonePath,omitempty"`   // empty: the rclone bundled with the app, else rclone on PATH
 	RcloneConfig          string       `json:"rcloneConfig,omitempty"` // optional rclone.conf path
 	SSHPath               string       `json:"sshPath,omitempty"`
 	LocalRoot             string       `json:"localRoot"`
@@ -53,17 +53,13 @@ type Config struct {
 }
 
 func defaultConfig() Config {
-	rc := "rclone"
-	if runtime.GOOS == "windows" {
-		rc = "rclone.exe"
-	}
 	mnt := "~/OpenCloud-Drive"
 	if runtime.GOOS == "windows" {
 		mnt = "O:"
 	}
 	return Config{
 		ServerPort: 9200, LocalPort: 19201, RcloneRemote: "opencloud",
-		DavPath: "/remote.php/dav/files/USER", RclonePath: rc,
+		DavPath:   "/remote.php/dav/files/USER",
 		LocalRoot: "~/OpenCloud/Personal", MountPoint: mnt, VolumeName: "OpenCloud",
 		CacheMaxSize: "20G", CacheMaxAge: "72h", SyncIntervalSeconds: 300,
 		MinServerAvailableMiB: 8192, StateDir: filepath.Join(appDir(), "state"),
@@ -89,6 +85,36 @@ func configFile() string { return filepath.Join(appDir(), "config.json") }
 func logDir() string     { return filepath.Join(appDir(), "logs") }
 
 func home() string { h, _ := os.UserHomeDir(); return h }
+
+// Rclone returns the rclone to run: rclonePath if set, else a copy installed with the app
+// (next to the executable, or /usr/lib/opencloud-bar on Linux packages), else rclone on PATH.
+func (c Config) Rclone() string {
+	if c.RclonePath != "" {
+		return expand(c.RclonePath)
+	}
+	name := "rclone"
+	if runtime.GOOS == "windows" {
+		name = "rclone.exe"
+	}
+	var dirs []string
+	if runtime.GOOS == "linux" {
+		// Linux packages put it here; checked first so an older distro rclone in /usr/bin isn't picked.
+		dirs = append(dirs, "/usr/lib/opencloud-bar")
+	}
+	if exe, err := os.Executable(); err == nil {
+		if real, err := filepath.EvalSymlinks(exe); err == nil {
+			exe = real
+		}
+		dirs = append(dirs, filepath.Dir(exe))
+	}
+	for _, d := range dirs {
+		p := filepath.Join(d, name)
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
+		}
+	}
+	return name
+}
 
 func expand(p string) string {
 	if p == "~" {

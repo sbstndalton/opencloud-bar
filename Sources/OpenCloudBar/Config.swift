@@ -51,7 +51,8 @@ struct Config: Codable {
     var localPort = 19201
     var rcloneRemote = "opencloud"
     var davPath = "/remote.php/dav/files/USER"
-    var rclonePath = "/opt/homebrew/bin/rclone"
+    /// Empty: the rclone bundled in the app, else Homebrew's.
+    var rclonePath = ""
     var localRoot = "~/OpenCloud/Personal"
     var mountPoint = "~/OpenCloud-Drive"
     var volumeName = "OpenCloud"
@@ -123,6 +124,16 @@ struct Config: Codable {
     /// Identifies "which server, which account" for a kept folder's sync history.
     var serverIdentity: String { "\(sshHost)|\(serverPort)|\(rcloneRemote)|\(davPath)" }
     /// Connection settings: changing any of these restarts the tunnel and drive.
+    /// The rclone to run: rclonePath if set, else the copy inside the app bundle, else Homebrew's.
+    var rclone: String {
+        if !rclonePath.isEmpty { return (rclonePath as NSString).expandingTildeInPath }
+        let candidates = [
+            Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/rclone").path,
+            "/opt/homebrew/bin/rclone", "/usr/local/bin/rclone",
+        ]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) } ?? "/opt/homebrew/bin/rclone"
+    }
+
     var connectionKey: String { "\(sshHost)|\(serverPort)|\(localPort)|\(rcloneRemote)|\(davPath)|\(mountPoint)|\(rclonePath)" }
 
     static func expand(_ p: String) -> String { (p as NSString).expandingTildeInPath }

@@ -1,13 +1,12 @@
-# Builds release files for macOS, Windows and Linux, and attaches them to the release for a v* tag.
-# Windows binaries: When SignPath is set up, they are signed through SignPath
-# (free code signing for open source; certificate by SignPath Foundation) so Smart App Control accepts them.
+# Builds installers for macOS, Windows and Linux and attaches them to the release for a v* tag.
+#   macOS:   OpenCloud-Bar-macOS.dmg        (rclone inside the app)
+#   Windows: OpenCloud-Bar-Setup-<v>.exe    (rclone, WinFsp, Start menu, start at sign-in, CLI on PATH)
+#   Linux:   .deb / .rpm (rclone included, depends on fuse3 + ssh) and a .tar.gz
 #
-# SignPath settings (Settings > Secrets and variables > Actions):
-#   secret   SIGNPATH_API_TOKEN        API token of a SignPath user with submitter rights
-#   variable SIGNPATH_ORGANIZATION_ID
-#   variable SIGNPATH_PROJECT_SLUG     default: opencloud-bar
-#   variable SIGNPATH_POLICY_SLUG      default: release-signing
-# Without the token the workflow still builds, and releases get unsigned binaries.
+# Windows executables are signed through SignPath when it is set up
+# (free code signing for open source; certificate by SignPath Foundation):
+#   secret   SIGNPATH_API_TOKEN
+#   variable SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG (opencloud-bar), SIGNPATH_POLICY_SLUG (release-signing)
 name: Release
 
 on:
@@ -24,9 +23,9 @@ jobs:
     runs-on: windows-latest
     env:
       HAS_SIGNPATH: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-go@v5
         with:
           go-version-file: cross/go.mod
@@ -52,14 +51,14 @@ jobs:
             --product-version "${{ steps.ver.outputs.version }}" --file-version "${{ steps.ver.outputs.version }}" `
             --copyright "Copyright (c) 2026 Sebastian Dalton, MIT License"
           New-Item -ItemType Directory -Force ..\dist | Out-Null
-          go build -trimpath -ldflags "-s -w -H windowsgui" -o ..\dist\opencloud-bar.exe .
-          go build -trimpath -ldflags "-s -w" -o ..\dist\opencloud-bar-cli.exe .
+          go build -trimpath -ldflags "-s -w -H windowsgui" -o "..\dist\OpenCloud Bar.exe" .
+          go build -trimpath -ldflags "-s -w" -o ..\dist\opencloud-bar.exe .
 
       - name: Upload unsigned
         id: unsigned
         uses: actions/upload-artifact@v4
         with:
-          name: opencloud-bar-windows-amd64-unsigned
+          name: windows-unsigned
           path: dist/*.exe
 
       - name: Sign with SignPath
@@ -75,7 +74,7 @@ jobs:
           wait-for-completion-timeout-in-seconds: 86400
           output-artifact-directory: signed
 
-      - name: Verify signatures
+      - name: Use signed files
         if: env.HAS_SIGNPATH == 'true'
         shell: pwsh
         run: |
@@ -84,20 +83,29 @@ jobs:
             "{0}: {1} ({2})" -f $_.Name, $s.Status, $s.SignerCertificate.Subject
             if ($s.Status -ne 'Valid') { exit 1 }
           }
-          Remove-Item dist\*.exe; Copy-Item signed\*.exe dist\
+          Copy-Item signed\*.exe dist\ -Force
 
-      - name: Upload signed
-        if: env.HAS_SIGNPATH == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: opencloud-bar-windows-amd64
-          path: dist/*.exe
+      - name: Gather rclone and WinFsp
+        shell: bash
+        run: |
+          ./scripts/fetch-rclone.sh windows amd64 dist
+          gh release download -R winfsp/winfsp --pattern '*.msi' --dir "$RUNNER_TEMP/winfsp"
+          cp "$RUNNER_TEMP"/winfsp/*.msi dist/winfsp.msi
+          cp LICENSE dist/LICENSE.txt
 
-      - name: Upload for release
-        uses: actions/upload-artifact@v4
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+          & $iscc /Qp "/DAppVersion=${{ steps.ver.outputs.version }}" "/DSrc=$PWD\dist" packaging\windows\opencloud-bar.iss
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Get-ChildItem dist\out
+
+      - uses: actions/upload-artifact@v4
         with:
           name: release-windows
-          path: dist/*.exe
+          path: dist/out/*.exe
 
   linux:
     runs-on: ubuntu-latest
@@ -109,15 +117,22 @@ jobs:
           cache-dependency-path: cross/go.sum
       - name: Build
         run: |
+          v=0.0.0; [[ "$GITHUB_REF" == refs/tags/v* ]] && v=${GITHUB_REF_NAME#v}
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
           mkdir -p dist
           for arch in amd64 arm64; do
-            d="opencloud-bar-linux-$arch"
-            mkdir -p "stage/$d"
-            (cd cross && CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w" -o "../stage/$d/opencloud-bar" .)
-            cp LICENSE README.md "stage/$d/"
-            cp -r deploy-ms02 "stage/$d/systemd-example"
-            tar -C stage -czf "dist/$d.tar.gz" "$d"
+            d="stage/opencloud-bar-linux-$arch"
+            mkdir -p "$d"
+            (cd cross && CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w" -o "../$d/opencloud-bar" .)
+            ./scripts/fetch-rclone.sh linux $arch "$d"
+            cp LICENSE README.md "$d/"
+            cp packaging/linux/opencloud-bar.desktop packaging/linux/opencloud-bar.service "$d/"
+            tar -C stage -czf "dist/opencloud-bar-linux-$arch.tar.gz" "opencloud-bar-linux-$arch"
+            for fmt in deb rpm; do
+              VERSION=$v ARCH=$arch SRC="$d" nfpm package -p $fmt -f packaging/linux/nfpm.yaml -t dist/
+            done
           done
+          ls -la dist
       - uses: actions/upload-artifact@v4
         with:
           name: release-linux
@@ -127,11 +142,11 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - name: Build app
+      - name: Build DMG
         run: |
-          ./scripts/build-app.sh
+          ./scripts/build-dmg.sh
           mkdir -p dist
-          ditto -c -k --keepParent "build/OpenCloud Bar.app" dist/OpenCloud-Bar-macOS.zip
+          cp build/OpenCloud-Bar.dmg dist/OpenCloud-Bar-macOS.dmg
       - uses: actions/upload-artifact@v4
         with:
           name: release-macos

@@ -1,0 +1,15 @@
+# Headless mode (servers, no tray): systemctl --user enable --now opencloud-bar
+[Unit]
+Description=OpenCloud Bar (headless): two-way sync of kept folders with OpenCloud
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/opencloud-bar run --no-tray
+Restart=on-failure
+RestartSec=30
+KillSignal=SIGTERM
+TimeoutStopSec=180
+MemoryMax=256M
+
+[Install]
+WantedBy=default.target

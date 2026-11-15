@@ -1,0 +1,37 @@
+# Linux .deb and .rpm. Build: VERSION=1.2.3 ARCH=amd64 SRC=<folder> nfpm package -p deb|rpm -f packaging/linux/nfpm.yaml
+name: opencloud-bar
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: net
+priority: optional
+maintainer: OpenCloud Bar contributors <noreply@github.com>
+description: |
+  Tray app and service for OpenCloud: an on-demand drive (rclone mount) plus
+  folders kept in two-way sync (rclone bisync), over an SSH tunnel. Includes rclone.
+homepage: https://github.com/sbstndalton/opencloud-bar
+license: MIT
+depends:
+  - fuse3
+recommends:
+  - zenity
+overrides:
+  deb:
+    depends: [fuse3, openssh-client]
+  rpm:
+    depends: [fuse3, openssh-clients]
+contents:
+  - src: ${SRC}/opencloud-bar
+    dst: /usr/bin/opencloud-bar
+    file_info: {mode: 0755}
+  - src: ${SRC}/rclone
+    dst: /usr/lib/opencloud-bar/rclone
+    file_info: {mode: 0755}
+  - src: ${SRC}/LICENSE
+    dst: /usr/share/doc/opencloud-bar/LICENSE
+  - src: ${SRC}/rclone-LICENSE.txt
+    dst: /usr/share/doc/opencloud-bar/rclone-LICENSE.txt
+  - src: packaging/linux/opencloud-bar.desktop
+    dst: /usr/share/applications/opencloud-bar.desktop
+  - src: packaging/linux/opencloud-bar.service
+    dst: /usr/lib/systemd/user/opencloud-bar.service

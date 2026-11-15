@@ -1,7 +1,7 @@
 // Command opencloud-bar keeps chosen OpenCloud folders synced both ways with rclone bisync,
 // mounts the rest on demand with rclone mount, and runs everything through an SSH tunnel.
 //
-//	opencloud-bar run [--no-tray]     start (tray icon if a desktop is available)
+//	opencloud-bar [run [--no-tray]]   start (tray icon if a desktop is available)
 //	opencloud-bar status              show what's going on
 //	opencloud-bar sync                sync kept folders now
 //	opencloud-bar keep PATH [--local DIR]
@@ -40,7 +40,9 @@ func usage() {
 
 func main() {
 	if len(os.Args) < 2 {
-		usage()
+		// Started from a shortcut, Explorer or the Start menu: run the app.
+		runDaemon(hasDisplay())
+		return
 	}
 	switch os.Args[1] {
 	case "run":

@@ -184,7 +184,7 @@ final class AppModel: ObservableObject {
         unmountRequested = false
         mountStartedAt = Date()
         do {
-            mount = try Shell.launch(config.rclonePath, args, log: Log.url("drive.log")) { [weak self] code in
+            mount = try Shell.launch(config.rclone, args, log: Log.url("drive.log")) { [weak self] code in
                 self?.mountExited(code)
             }
             Log.line("drive mount started")
@@ -229,7 +229,7 @@ final class AppModel: ObservableObject {
     /// Files written to the drive that rclone hasn't uploaded yet (nil if unknown).
     private func pendingUploads() async -> Int? {
         guard mount?.isRunning == true else { return 0 }
-        let r = await Shell.run(config.rclonePath, ["rc", "vfs/stats", "--url", "http://127.0.0.1:\(config.rcPort)/"], timeout: 10)
+        let r = await Shell.run(config.rclone, ["rc", "vfs/stats", "--url", "http://127.0.0.1:\(config.rcPort)/"], timeout: 10)
         guard r.status == 0, let data = r.output.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let disk = json["diskCache"] as? [String: Any] else { return nil }
@@ -394,7 +394,7 @@ final class AppModel: ObservableObject {
 
         let log = Log.url("sync-\(f.stateName).log")
         Log.append("\n=== \(Date()) \(first ? "merge (resync)" : "sync") of \(f.path)\n", to: log)
-        let r = await runTracked(config.rclonePath, args, log: log)
+        let r = await runTracked(config.rclone, args, log: log)
 
         if r.status == 0 {
             fm.createFile(atPath: marker.path, contents: nil)
@@ -573,8 +573,8 @@ final class AppModel: ObservableObject {
         let local = config.localRootURL.appendingPathComponent(f.path)
         let filters = config.stateURL.appendingPathComponent("filters-\(f.stateName).txt")
         guard FileManager.default.fileExists(atPath: filters.path) else { return nil }
-        async let all = Shell.run(config.rclonePath, ["lsf", "-R", "--files-only", local.path], timeout: 300)
-        async let synced = Shell.run(config.rclonePath, ["lsf", "-R", "--files-only", "--filters-file", filters.path, local.path], timeout: 300)
+        async let all = Shell.run(config.rclone, ["lsf", "-R", "--files-only", local.path], timeout: 300)
+        async let synced = Shell.run(config.rclone, ["lsf", "-R", "--files-only", "--filters-file", filters.path, local.path], timeout: 300)
         let (a, s) = await (all, synced)
         guard a.status == 0, s.status == 0 else { return nil }
         let count = { (t: String) in t.split(separator: "\n").count }

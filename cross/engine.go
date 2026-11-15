@@ -269,7 +269,7 @@ func (e *Engine) startMountLocked() {
 		"--rc", "--rc-addr", fmt.Sprintf("127.0.0.1:%d", e.cfg.RcPort()), "--rc-no-auth",
 		"--log-level", "NOTICE"}
 	args = append(args, mountExtraArgs()...)
-	cmd := exec.Command(e.cfg.RclonePath, args...)
+	cmd := exec.Command(e.cfg.Rclone(), args...)
 	cmd.Env = e.env()
 	hideWindow(cmd)
 	if f := e.logFile("drive.log"); f != nil {
@@ -325,7 +325,7 @@ func (e *Engine) startMountLocked() {
 func (e *Engine) unmount(m *exec.Cmd) error {
 	err := unmountOS(e.mountTarget())
 	if err == errNoOSUnmount {
-		_, err = e.run(15*time.Second, nil, e.cfg.RclonePath, "rc", "core/quit", "--url", fmt.Sprintf("http://127.0.0.1:%d/", e.cfg.RcPort()))
+		_, err = e.run(15*time.Second, nil, e.cfg.Rclone(), "rc", "core/quit", "--url", fmt.Sprintf("http://127.0.0.1:%d/", e.cfg.RcPort()))
 	}
 	if err != nil {
 		return err
@@ -350,7 +350,7 @@ func (e *Engine) PendingUploads() int {
 	if !running {
 		return 0
 	}
-	out, err := e.run(10*time.Second, nil, e.cfg.RclonePath, "rc", "vfs/stats", "--url", fmt.Sprintf("http://127.0.0.1:%d/", e.cfg.RcPort()))
+	out, err := e.run(10*time.Second, nil, e.cfg.Rclone(), "rc", "vfs/stats", "--url", fmt.Sprintf("http://127.0.0.1:%d/", e.cfg.RcPort()))
 	if err != nil {
 		return -1
 	}
@@ -594,7 +594,7 @@ func (e *Engine) syncFolder(f KeptFolder, mode syncMode) bool {
 		fmt.Fprintf(lf, "\n=== %s %s of %s\n", time.Now().Format(time.RFC3339), kind, f.Path)
 		defer lf.Close()
 	}
-	out, err := e.run(syncTimeout, lf, e.cfg.RclonePath, args...)
+	out, err := e.run(syncTimeout, lf, e.cfg.Rclone(), args...)
 	if err == nil {
 		_ = os.WriteFile(marker, nil, 0o600)
 		_ = os.Remove(e.stateFile(f, ".needs-repair"))
@@ -631,7 +631,7 @@ func (e *Engine) run(timeout time.Duration, logTo io.Writer, name string, args .
 	if err := cmd.Start(); err != nil {
 		return "", err
 	}
-	tracked := name == e.cfg.RclonePath && len(args) > 0 && args[0] == "bisync"
+	tracked := name == e.cfg.Rclone() && len(args) > 0 && args[0] == "bisync"
 	if tracked {
 		e.mu.Lock()
 		e.currentSync = cmd
@@ -741,8 +741,8 @@ func (e *Engine) UnsyncedCount(path string) int {
 		return -1
 	}
 	local := e.cfg.Local(f)
-	all, err1 := e.run(5*time.Minute, nil, e.cfg.RclonePath, "lsf", "-R", "--files-only", local)
-	synced, err2 := e.run(5*time.Minute, nil, e.cfg.RclonePath, "lsf", "-R", "--files-only", "--filters-file", e.filtersFile(f), local)
+	all, err1 := e.run(5*time.Minute, nil, e.cfg.Rclone(), "lsf", "-R", "--files-only", local)
+	synced, err2 := e.run(5*time.Minute, nil, e.cfg.Rclone(), "lsf", "-R", "--files-only", "--filters-file", e.filtersFile(f), local)
 	if err1 != nil || err2 != nil {
 		return -1
 	}
