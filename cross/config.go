@@ -18,8 +18,8 @@ import (
 
 // KeptFolder is a folder kept on this machine and synced both ways with the server.
 type KeptFolder struct {
-	Path         string   `json:"path"`                // relative to the space root
-	StateName    string   `json:"stateName"`           // unique; names the bisync state
+	Path         string   `json:"path"`      // relative to the space root
+	StateName    string   `json:"stateName"` // unique; names the bisync state
 	ExtraFilters []string `json:"extraFilters,omitempty"`
 	LocalPath    string   `json:"localPath,omitempty"` // optional: absolute local folder instead of localRoot/path
 }

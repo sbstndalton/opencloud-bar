@@ -52,13 +52,13 @@ type Status struct {
 // Engine runs the SSH tunnel, the on-demand drive (rclone mount) and the two-way sync
 // (rclone bisync). One mutex guards all state; only one bisync runs at a time.
 type Engine struct {
-	mu        sync.Mutex
-	cfg       Config
-	cfgErr    error
-	status    map[string]*FolderStatus
-	message   string
-	syncing   bool
-	quitting  bool
+	mu       sync.Mutex
+	cfg      Config
+	cfgErr   error
+	status   map[string]*FolderStatus
+	message  string
+	syncing  bool
+	quitting bool
 
 	tunnel        *exec.Cmd
 	tunnelDone    chan struct{}
@@ -472,10 +472,26 @@ func (e *Engine) serverTooBusy() string {
 	if e.cfg.MinServerAvailableMiB <= 0 {
 		return ""
 	}
-	out, err := e.run(20*time.Second, nil, e.cfg.SSH(), "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-		e.cfg.SSHHost, "awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo")
-	mib, perr := strconv.Atoi(strings.TrimSpace(out))
+	out, err := e.run(20*time.Second, nil, e.cfg.SSH(), "-n", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+		e.cfg.SSHHost, "grep MemAvailable /proc/meminfo")
+	// Look for "MemAvailable:   12345678 kB"; ssh may add warning lines (stdout and stderr are combined).
+	// No quotes or $ in the remote command: Windows ssh mangles them.
+	var mib int
+	var perr error = fmt.Errorf("no MemAvailable line")
+	for _, line := range strings.Split(out, "\n") {
+		if fs := strings.Fields(line); len(fs) >= 2 && fs[0] == "MemAvailable:" {
+			var kb int
+			kb, perr = strconv.Atoi(fs[1])
+			mib = kb / 1024
+			break
+		}
+	}
+	// The value is what matters: ssh on Windows can linger after printing it.
+	if perr == nil {
+		err = nil
+	}
 	if err != nil || perr != nil {
+		e.logLine("server check failed: %v %v: %s", err, perr, strings.TrimSpace(out))
 		e.setMessage("Server unreachable; sync skipped")
 		return "server unreachable"
 	}
@@ -610,6 +626,8 @@ func (e *Engine) run(timeout time.Duration, logTo io.Writer, name string, args .
 		w = io.MultiWriter(&buf, logTo)
 	}
 	cmd.Stdout, cmd.Stderr = w, w
+	// Don't wait forever for output pipes that a finished process left open (seen with ssh on Windows).
+	cmd.WaitDelay = 5 * time.Second
 	if err := cmd.Start(); err != nil {
 		return "", err
 	}
@@ -744,7 +762,7 @@ func (e *Engine) Unkeep(path string, result func(error)) error {
 			return
 		}
 		if err := moveToTrash(e.cfg.Local(f)); err != nil {
-			result(fmt.Errorf("couldn't move it to the trash: %w", err))
+			result(fmt.Errorf("couldn't move it to %s: %w", trashName(), err))
 			return
 		}
 		_ = os.RemoveAll(e.workDir(f))

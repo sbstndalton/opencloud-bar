@@ -4,11 +4,13 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 var errNoOSUnmount = errors.New("no OS unmount")
@@ -52,11 +54,37 @@ func ps(script string, args ...string) *exec.Cmd {
 // psQuote makes a PowerShell single-quoted string literal.
 func psQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 
+// moveToTrash moves a folder that is no longer kept into "Removed by OpenCloud Bar" in the
+// user's profile. The Recycle Bin isn't used: outside a desktop session Windows can delete
+// permanently without reporting it, and a plain rename on the same drive can't lose data.
+// trashName says where moveToTrash puts things, for messages.
+func trashName() string { return `the "Removed by OpenCloud Bar" folder in your user folder` }
+
 func moveToTrash(path string) error {
-	abs, _ := filepath.Abs(path)
-	script := "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory(" +
-		psQuote(abs) + ", 'OnlyErrorDialogs', 'SendToRecycleBin')"
-	return ps(script).Run()
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(home, "Removed by OpenCloud Bar")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	base := filepath.Base(abs) + " (removed " + time.Now().Format("2006-01-02 1504") + ")"
+	dest := filepath.Join(dir, base)
+	for i := 2; ; i++ {
+		if _, err := os.Stat(dest); os.IsNotExist(err) {
+			break
+		}
+		dest = filepath.Join(dir, fmt.Sprintf("%s %d", base, i))
+	}
+	if err := os.Rename(abs, dest); err != nil {
+		return fmt.Errorf("couldn't move %s to %s: %w", abs, dir, err)
+	}
+	return nil
 }
 
 func openPath(p string) {

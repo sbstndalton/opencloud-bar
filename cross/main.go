@@ -5,7 +5,7 @@
 //	opencloud-bar status              show what's going on
 //	opencloud-bar sync                sync kept folders now
 //	opencloud-bar keep PATH [--local DIR]
-//	opencloud-bar unkeep PATH         final sync, then move the local copy to the trash
+//	opencloud-bar unkeep PATH         final sync, then move the local copy out of the way
 //	opencloud-bar repair PATH         merge both sides after "needs repair"
 //	opencloud-bar allow-delete PATH   apply a blocked large deletion
 //	opencloud-bar connect | eject     the on-demand drive
@@ -71,7 +71,7 @@ func main() {
 		path := needPath()
 		var n struct{ Unsynced int }
 		_ = call("GET", "/unsynced", url.Values{"path": {path}}, &n)
-		fmt.Printf("Stop keeping %q here? Changes are synced first, then the local copy goes to the trash.\n", path)
+		fmt.Printf("Stop keeping %q here? Changes are synced first, then the local copy is moved to %s.\n", path, trashName())
 		if n.Unsynced > 0 {
 			fmt.Printf("%d file(s) in it are never synced (build folders, excluded items) and exist only here.\n", n.Unsynced)
 		}
@@ -198,16 +198,16 @@ func call(method, path string, q url.Values, out any) error {
 	return nil
 }
 
-func serveAPI(e *Engine, stop func()) {
+// serveAPI starts the control API. It fails if the port is taken, which means another
+// copy of opencloud-bar is already running.
+func serveAPI(e *Engine, stop func()) error {
 	tok, err := apiToken(true)
 	if err != nil {
-		e.logLine("api token: %v", err)
-		return
+		return fmt.Errorf("api token: %w", err)
 	}
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", e.cfg.APIPort()))
 	if err != nil {
-		e.logLine("control API not started: %v", err)
-		return
+		return fmt.Errorf("opencloud-bar is already running (control port %d is in use)", e.cfg.APIPort())
 	}
 	mux := http.NewServeMux()
 	reply := func(w http.ResponseWriter, err error) {
@@ -251,6 +251,7 @@ func serveAPI(e *Engine, stop func()) {
 		mux.ServeHTTP(w, r)
 	})
 	go func() { _ = http.Serve(ln, auth) }()
+	return nil
 }
 
 func runDaemon(tray bool) {
@@ -261,7 +262,13 @@ func runDaemon(tray bool) {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	go func() { <-sig; cancel() }()
-	serveAPI(e, stop)
+	if err := serveAPI(e, stop); err != nil {
+		e.logLine("not started: %v", err)
+		if tray {
+			dialogAlert("OpenCloud Bar", err.Error())
+		}
+		fail(err)
+	}
 	go func() { e.Run(ctx); close(done) }()
 	e.logLine("started (tray=%v)", tray)
 	if tray {

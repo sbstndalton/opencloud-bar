@@ -150,9 +150,9 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 					}
 				case <-s.stop.ClickedCh:
 					if f, ok := folderAt(i); ok {
-						text := "Your changes are synced to OpenCloud first. Then the copy on this computer is moved to the trash. The folder stays in OpenCloud."
+						text := "Your changes are synced to OpenCloud first. Then the copy on this computer is moved to " + trashName() + ". The folder stays in OpenCloud."
 						if n := e.UnsyncedCount(f.Path); n > 0 {
-							text += fmt.Sprintf("\n\n%d file(s) in it are never synced (build folders, excluded items) and exist only here. They go to the trash with it.", n)
+							text += fmt.Sprintf("\n\n%d file(s) in it are never synced (build folders, excluded items) and exist only here. They move with it.", n)
 						}
 						if dialogConfirm("Stop keeping "+f.Name+" here?", text, "Stop Keeping") {
 							alertErr(e.Unkeep(f.Path, alertErr))

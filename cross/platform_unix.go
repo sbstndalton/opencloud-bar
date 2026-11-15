@@ -89,6 +89,9 @@ func forceUnmount(target string) {
 }
 
 // moveToTrash follows the freedesktop.org trash spec on Linux and uses ~/.Trash on macOS.
+// trashName says where moveToTrash puts things, for messages.
+func trashName() string { return "the trash" }
+
 func moveToTrash(path string) error {
 	if runtime.GOOS == "darwin" {
 		return os.Rename(path, uniquePath(filepath.Join(home(), ".Trash", filepath.Base(path))))
