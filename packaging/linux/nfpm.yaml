@@ -1,4 +1,6 @@
-# Linux .deb and .rpm. Build: VERSION=1.2.3 ARCH=amd64 SRC=<folder> nfpm package -p deb|rpm -f packaging/linux/nfpm.yaml
+# Linux .deb and .rpm. Fill in the variables, then package (run from the repo root):
+#   VERSION=1.2.3 ARCH=amd64 SRC=/abs/folder envsubst < packaging/linux/nfpm.yaml > /tmp/nfpm.yaml
+#   nfpm package -p deb -f /tmp/nfpm.yaml
 name: opencloud-bar
 arch: ${ARCH}
 platform: linux

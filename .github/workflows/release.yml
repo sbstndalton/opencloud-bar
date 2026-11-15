@@ -129,7 +129,8 @@ jobs:
             cp packaging/linux/opencloud-bar.desktop packaging/linux/opencloud-bar.service "$d/"
             tar -C stage -czf "dist/opencloud-bar-linux-$arch.tar.gz" "opencloud-bar-linux-$arch"
             for fmt in deb rpm; do
-              VERSION=$v ARCH=$arch SRC="$d" nfpm package -p $fmt -f packaging/linux/nfpm.yaml -t dist/
+              VERSION=$v ARCH=$arch SRC="$PWD/$d" envsubst < packaging/linux/nfpm.yaml > "$RUNNER_TEMP/nfpm.yaml"
+              nfpm package -p $fmt -f "$RUNNER_TEMP/nfpm.yaml" -t dist/
             done
           done
           ls -la dist

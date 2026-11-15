@@ -13,15 +13,17 @@ A small menu-bar and tray app for macOS, Windows and Linux. It lets you use a se
 
 ## Download
 
-Get the latest build from [Releases](https://github.com/sbstndalton/opencloud-bar/releases/latest):
+Get the latest build from [Releases](https://github.com/sbstndalton/opencloud-bar/releases/latest). Each installer includes [rclone](https://rclone.org), so you don't install it separately.
 
-| File | For |
-|---|---|
-| `OpenCloud-Bar-macOS.zip` | macOS on Apple silicon. It's ad-hoc signed, so the first time, right-click the app and choose **Open**. |
-| `opencloud-bar.exe`, `opencloud-bar-cli.exe` | Windows x64 (tray app, command line). Needs [WinFsp](https://winfsp.dev) for the drive. |
-| `opencloud-bar-linux-amd64.tar.gz`, `opencloud-bar-linux-arm64.tar.gz` | Linux. Needs FUSE 3 for the drive. |
+| File | For | What it sets up |
+|---|---|---|
+| `OpenCloud-Bar-macOS.dmg` | macOS 14+ on Apple silicon | Drag the app to Applications. It's ad-hoc signed, so the first time, right-click it and choose **Open**. macOS's own NFS client provides the drive, so nothing else is needed. |
+| `OpenCloud-Bar-Setup-<version>.exe` | Windows 10/11 x64 | Installs the app, rclone and [WinFsp](https://winfsp.dev) (for the drive letter). Adds a Start menu entry, an optional start at sign-in, and the `opencloud-bar` command for terminals. |
+| `opencloud-bar_<version>_amd64.deb` / `_arm64.deb` | Debian, Ubuntu | `sudo apt install ./opencloud-bar_*.deb` pulls in FUSE 3 and the SSH client. |
+| `opencloud-bar-<version>.x86_64.rpm` / `.aarch64.rpm` | Fedora, openSUSE | `sudo dnf install ./opencloud-bar-*.rpm` |
+| `opencloud-bar-linux-amd64.tar.gz` / `arm64` | other Linux | The app plus rclone. Install FUSE 3 yourself. |
 
-Every platform also needs [rclone](https://rclone.org/downloads/) and SSH key access to your server.
+What no installer can do for you is connect to your own server. You still need SSH key access to the machine running OpenCloud, and an app token for your account (see Requirements below).
 
 ## How it works
 
@@ -104,9 +106,9 @@ cd cross && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "-H window
 | Tray | StatusNotifier (most desktops) | notification area |
 | Dialogs | `zenity` | built-in Windows dialogs (via PowerShell) |
 
-Start it with `opencloud-bar run`, or `opencloud-bar run --no-tray` on a server. Then control it with `status`, `sync`, `keep PATH [--local DIR]`, `unkeep PATH`, `repair PATH`, `allow-delete PATH`, `connect`, `eject`, `reload` and `quit`. On Windows, build a second copy without `-H windowsgui` to use the commands from a terminal.
+Start it with `opencloud-bar run`, or `opencloud-bar run --no-tray` on a server. Then control it with `status`, `sync`, `keep PATH [--local DIR]`, `unkeep PATH`, `repair PATH`, `allow-delete PATH`, `connect`, `eject`, `reload` and `quit`. On Windows the installer puts two programs in one folder: `OpenCloud Bar.exe` (the tray app, with no console window) and `opencloud-bar.exe` (the same program built as a console app, so commands print their output in a terminal). Windows decides at build time whether a program gets a console, so one file can't do both cleanly.
 
-Download Windows builds from [Releases](https://github.com/sbstndalton/opencloud-bar/releases). They are built by the **Windows** workflow and signed through SignPath (see [Code signing policy](#code-signing-policy)). Tested on Windows 11: two-way sync, the O: drive, eject, stop keeping and quit. On Windows, Stop Keeping moves the local copy to "Removed by OpenCloud Bar" in your user folder rather than the Recycle Bin.
+Windows builds are made by the **Release** workflow and will be signed through SignPath once that is set up (see [Code signing policy](#code-signing-policy)). Tested on Windows 11: two-way sync, the O: drive, eject, stop keeping and quit. On Windows, Stop Keeping moves the local copy to "Removed by OpenCloud Bar" in your user folder rather than the Recycle Bin.
 
 Extra settings for the port:
 
