@@ -778,6 +778,8 @@ final class AppModel: ObservableObject {
         Log.append("\n=== \(Date()) \(kind) of \(run.f.path)\n", to: log)
         let changes = ChangeCollector()   // fed off the main thread, line by line
         let r = await runTracked(config.rclone, args, log: log, onLine: { changes.line($0) })
+        let (wrote, over) = changes.localWrites()
+        live.ownWrites(run.f.key, wrote, unknown: over || kind != "sync")   // live sync: the run's own writes
         if r.status == 0 {
             var list = changes.result(kind: kind, folder: run.f, now: Date())
             if kind == "sync" { for i in list.indices { list[i].trigger = runTrigger[run.f.key] ?? "timer" } }

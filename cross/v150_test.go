@@ -1,10 +1,12 @@
 package main
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -92,28 +94,92 @@ func TestLiveDebounce(t *testing.T) {
 	}
 }
 
-func TestLiveIgnoresOwnSync(t *testing.T) {
+func TestLiveOwnSyncWrites(t *testing.T) {
 	e, clk, f := liveRig(t)
-	e.mu.Lock()
-	trigger := e.ownSyncLocked(f.Key(), true, clk.now())
-	e.mu.Unlock()
-	if trigger != "timer" {
-		t.Errorf("trigger %q", trigger)
+	run := func(events, wrote []string, unknown bool) time.Time {
+		e.mu.Lock()
+		began := clk.now()
+		e.ownSyncLocked(f.Key(), true, began)
+		e.mu.Unlock()
+		for _, p := range events {
+			e.localEvent("Docs", p)
+		}
+		clk.add(10 * time.Second)
+		e.mu.Lock()
+		e.ownWritesLocked(f.Key(), wrote, unknown)
+		e.ownSyncLocked(f.Key(), false, began)
+		e.mu.Unlock()
+		return began
 	}
-	e.localEvent("Docs", "written-by-sync.txt")
-	clk.add(10 * time.Second)
-	e.mu.Lock()
-	e.ownSyncLocked(f.Key(), false, clk.now().Add(-10*time.Second))
-	e.mu.Unlock()
+	// Only what the run wrote (a file, its new folder; a late event within the tail): nothing.
+	run([]string{"new/sub", "new/sub/a.txt", "gone.txt"}, []string{"new/sub/a.txt", "gone.txt"}, false)
 	clk.add(time.Second)
-	e.localEvent("Docs", "late-event-of-own-write.txt") // within the 2 s tail
+	e.localEvent("Docs", "new")
 	if e.Status().Folders[0].Pending {
-		t.Fatal("own writes counted")
+		t.Fatal("own writes counted during the tail")
 	}
 	clk.add(2 * time.Second)
-	e.localEvent("Docs", "user.txt")
+	e.liveTick()
+	if e.Status().Folders[0].Pending || queued(e, "Docs") {
+		t.Fatal("own writes counted after the run")
+	}
+	// A real change during the run: one follow-up, after the minimum gap from that run's start.
+	run([]string{"a.txt", "user.txt"}, []string{"a.txt"}, false)
+	clk.add(3 * time.Second)
+	e.liveTick()
+	if !e.Status().Folders[0].Pending || queued(e, "Docs") {
+		t.Fatal("a change during the run: not pending, or synced before the gap")
+	}
+	clk.add(20 * time.Second) // 33 s after the run started
+	e.liveTick()
+	if !queued(e, "Docs") {
+		t.Fatal("no follow-up sync")
+	}
+	clearQueue(e)
+	// A merge (writes unknown) with events: a follow-up. Too many events: a follow-up.
+	clk.add(time.Minute)
+	run([]string{"x"}, nil, true)
+	clk.add(3 * time.Second)
+	e.liveTick()
+	if !e.Status().Folders[0].Pending {
+		t.Fatal("merge with events: no follow-up")
+	}
+	e.mu.Lock()
+	e.live().folders["Docs"].pending = false
+	e.status["Docs"].Pending = false
+	e.mu.Unlock()
+	var many []string
+	for i := 0; i <= liveOwnCap; i++ {
+		many = append(many, "f"+strconv.Itoa(i))
+	}
+	run(many, many, false)
+	clk.add(3 * time.Second)
+	e.liveTick()
+	if !e.Status().Folders[0].Pending {
+		t.Fatal("overflowed during the run: no follow-up")
+	}
+	// After a real change outside a run: counted at once.
+	e.mu.Lock()
+	e.live().folders["Docs"].pending = false
+	e.status["Docs"].Pending = false
+	e.mu.Unlock()
+	e.localEvent("Docs", "user2.txt")
 	if !e.Status().Folders[0].Pending {
 		t.Fatal("a real change after the tail ignored")
+	}
+}
+
+func TestLiveIgnoredNames(t *testing.T) {
+	e, _, _ := liveRig(t)
+	for _, p := range []string{"~$Report.docx", "a/.~lock.Sheet.ods#", "x/.DS_Store", "a.tmp", "Thumbs.db", "desktop.ini", "._x", "b~"} {
+		e.localEvent("Docs", p)
+	}
+	if e.Status().Folders[0].Pending {
+		t.Error("noise counted as a change")
+	}
+	names := ignoredNames([]string{"- *.bak", "- **/*.log", "- /Old/**", "- a/b.txt", "+ *.keep"})
+	if !nameMatches(names, "x.bak") || !nameMatches(names, "y.log") || nameMatches(names, "b.txt") || len(names) != 2 {
+		t.Errorf("names %v", names)
 	}
 }
 
@@ -185,78 +251,279 @@ func TestLivePausedMarksDirty(t *testing.T) {
 	}
 }
 
-func TestLiveWatchLimitFallsBack(t *testing.T) {
-	e := pausedRig(t, `,"liveSync":true,"kept":[{"path":"Big","stateName":"big"},{"path":"Small","stateName":"small"}]`)
-	for _, d := range []string{"Big/a", "Big/b", "Big/c/d", "Small"} {
-		_ = os.MkdirAll(filepath.Join(e.cfg.Local(KeptFolder{Path: d}), ""), 0o700)
-	}
+// resetLive stops the watches the engine started, so a test starts over.
+func resetLive(e *Engine) {
 	e.mu.Lock()
 	l := e.live()
-	for _, lf := range l.folders { // started by NewEngine: start over with the limit
-		e.stopWatchLocked(lf)
+	var stops []*folderWatch
+	for _, lf := range l.folders {
+		if lf.watch != nil {
+			stops = append(stops, lf.watch)
+		}
 	}
 	l.folders = map[string]*liveFolder{}
-	old := maxWatchDirs
-	maxWatchDirs = 3
-	defer func() { maxWatchDirs = old }()
+	l.noticed = false
 	e.message = ""
-	e.updateWatchesLocked()
-	big, small := l.folders["Big"], l.folders["Small"]
-	msg := e.message
 	e.mu.Unlock()
-	if big == nil || !big.fallback || big.watch != nil {
-		t.Fatalf("Big: %+v", big)
-	}
-	if small == nil || small.watch == nil || small.fallback {
-		t.Fatalf("Small: %+v", small)
-	}
-	if !strings.Contains(msg, "can't watch “Big”") {
-		t.Errorf("notice %q", msg)
-	}
-	// The system refusing more watches (inotify's limit) does the same, with no second notice.
-	e.mu.Lock()
-	e.stopWatchesLocked()
-	l.folders = map[string]*liveFolder{}
-	maxWatchDirs = old
-	l.addWatch = func(w *fsnotify.Watcher, dir string) error {
-		return &os.SyscallError{Syscall: "inotify_add_watch", Err: syscall.ENOSPC}
-	}
-	e.message = ""
-	e.updateWatchesLocked()
-	fb := l.folders["Small"].fallback
-	again := e.message
-	e.mu.Unlock()
-	if !fb || again != "" {
-		t.Errorf("ENOSPC: fallback %v, notice %q", fb, again)
-	}
-	if !errors.Is(&os.SyscallError{Err: syscall.ENOSPC}, syscall.ENOSPC) {
-		t.Fatal("errors.Is")
+	for _, fw := range stops {
+		fw.stop()
 	}
 }
 
-// The real watcher: a file written in a kept folder makes it pending; in an excluded folder not.
+func watchOf(e *Engine, key string) *folderWatch {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if lf := e.live().folders[key]; lf != nil {
+		return lf.watch
+	}
+	return nil
+}
+
+// fakeWatcher behaves like fsnotify on Windows: Add and Remove are served by the goroutine
+// that sends the events, so while nobody takes events, Add waits.
+type fakeWatcher struct {
+	events chan fsnotify.Event
+	errs   chan error
+	input  chan chan error
+	done   chan struct{}
+	once   sync.Once
+	addErr error
+	flood  func(i int) (fsnotify.Event, bool)
+}
+
+func newFakeWatcher(addErr error, flood func(i int) (fsnotify.Event, bool)) *fakeWatcher {
+	w := &fakeWatcher{events: make(chan fsnotify.Event), errs: make(chan error), input: make(chan chan error),
+		done: make(chan struct{}), addErr: addErr, flood: flood}
+	go w.reader()
+	return w
+}
+
+func (w *fakeWatcher) reader() {
+	for i := 0; ; i++ {
+		ev, more := fsnotify.Event{}, false
+		if w.flood != nil {
+			ev, more = w.flood(i)
+		}
+		if !more {
+			select {
+			case r := <-w.input:
+				r <- w.addErr
+			case <-w.done:
+				return
+			}
+			continue
+		}
+		select {
+		case r := <-w.input:
+			r <- w.addErr
+		default:
+		}
+		select {
+		case w.events <- ev:
+		case <-w.done:
+			return
+		}
+	}
+}
+
+func (w *fakeWatcher) call() error {
+	r := make(chan error)
+	select {
+	case w.input <- r:
+		return <-r
+	case <-w.done:
+		return fsnotify.ErrClosed
+	}
+}
+func (w *fakeWatcher) Add(string) error              { return w.call() }
+func (w *fakeWatcher) Remove(string) error           { return w.call() }
+func (w *fakeWatcher) Close() error                  { w.once.Do(func() { close(w.done) }); return nil }
+func (w *fakeWatcher) Events() <-chan fsnotify.Event { return w.events }
+func (w *fakeWatcher) Errors() <-chan error          { return w.errs }
+
+func TestLiveWatchLimitFallsBack(t *testing.T) {
+	e := pausedRig(t, `,"liveSync":true,"kept":[{"path":"Big","stateName":"big"},{"path":"Small","stateName":"small"}]`)
+	for _, d := range []string{"Big/a", "Big/b", "Big/c/d", "Small"} {
+		_ = os.MkdirAll(e.cfg.Local(KeptFolder{Path: d}), 0o700)
+	}
+	l := e.live()
+	old := l.maxDirs.Load()
+	l.maxDirs.Store(3)
+	resetLive(e)
+	e.reconcileWatches()
+	e.mu.Lock()
+	big, small := l.folders["Big"], l.folders["Small"]
+	msg := e.message
+	e.mu.Unlock()
+	if big == nil || big.fallback == "" || big.watch != nil {
+		t.Fatalf("Big: %+v", big)
+	}
+	if small == nil || small.watch == nil || small.fallback != "" {
+		t.Fatalf("Small: %+v", small)
+	}
+	if !strings.Contains(msg, "can't watch “Big”: the system's watch limit was reached, or the folder has too many subfolders") {
+		t.Errorf("notice %q", msg)
+	}
+	if n := l.watchDirs.Load(); n != 1 {
+		t.Errorf("watched dirs %d, want 1 (Small)", n)
+	}
+	// The system refusing more watches (inotify's limit) does the same, with no second notice.
+	l.maxDirs.Store(old)
+	e.mu.Lock()
+	l.newWatcher = func() (fsWatcher, error) {
+		return newFakeWatcher(&os.SyscallError{Syscall: "inotify_add_watch", Err: syscall.ENOSPC}, nil), nil
+	}
+	l.noticed = true
+	e.mu.Unlock()
+	resetLive(e)
+	e.mu.Lock()
+	l.noticed = true
+	e.mu.Unlock()
+	e.reconcileWatches()
+	e.mu.Lock()
+	fb := l.folders["Small"].fallback
+	again := e.message
+	e.mu.Unlock()
+	if fb == "" || again != "" {
+		t.Errorf("ENOSPC: fallback %q, notice %q", fb, again)
+	}
+	// Changing the folder's excludes tries again.
+	e.mu.Lock()
+	l.newWatcher = newRealWatcher
+	e.cfg.Kept[1].ExtraFilters = []string{"- *.bak"}
+	e.mu.Unlock()
+	e.reconcileWatches()
+	if watchOf(e, "Small") == nil {
+		t.Error("not watched again after the excludes changed")
+	}
+}
+
+// Events pour in while folders are added: fsnotify (Windows) can't take an Add while its
+// events wait, so this hangs unless events are taken without e.mu and Add runs without it.
+func TestLiveNoDeadlockUnderFlood(t *testing.T) {
+	e := pausedRig(t, `,"liveSync":true,"kept":[{"path":"Docs","stateName":"docs-1"}]`)
+	local := e.cfg.Local(e.cfg.Kept[0])
+	for i := 0; i < 30; i++ {
+		_ = os.MkdirAll(filepath.Join(local, "d"+strconv.Itoa(i)), 0o700)
+	}
+	resetLive(e)
+	real, _ := resolveRoot(local)
+	var stopFlood atomic.Bool
+	e.mu.Lock()
+	e.live().newWatcher = func() (fsWatcher, error) {
+		return newFakeWatcher(nil, func(i int) (fsnotify.Event, bool) {
+			if stopFlood.Load() {
+				return fsnotify.Event{}, false
+			}
+			if i%10 == 0 {
+				return fsnotify.Event{Name: filepath.Join(real, "late"+strconv.Itoa(i/10%5)), Op: fsnotify.Create}, true
+			}
+			return fsnotify.Event{Name: filepath.Join(real, "f.txt"), Op: fsnotify.Write}, true
+		}), nil
+	}
+	e.mu.Unlock()
+	defer stopFlood.Store(true)
+	done := make(chan struct{})
+	go func() { e.reconcileWatches(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("deadlock: watching the folder never finished")
+	}
+	for i := 0; i < 5; i++ { // new folders while the events keep coming: Add from the event loop
+		_ = os.MkdirAll(filepath.Join(local, "late"+strconv.Itoa(i)), 0o700)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		fw := watchOf(e, "Docs")
+		if fw != nil && fw.count() == 36 && e.Status().Folders[0].Pending {
+			break
+		}
+		if time.Now().After(deadline) {
+			n := -1
+			if fw != nil {
+				n = fw.count()
+			}
+			t.Fatalf("deadlock or lost folders: watched %d", n)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	stopFlood.Store(true)
+}
+
+// The real watcher: a file written in a kept folder makes it pending; in an excluded folder
+// not. Watched folders are counted once and forgotten when removed.
 func TestLiveWatcherSeesChanges(t *testing.T) {
 	e := pausedRig(t, `,"liveSync":true,"kept":[{"path":"Docs","stateName":"docs-1","extraFilters":["- /Skip/**"]}]`)
 	local := e.cfg.Local(e.cfg.Kept[0])
 	_ = os.MkdirAll(filepath.Join(local, "Skip"), 0o700)
-	e.mu.Lock()
-	e.updateWatchesLocked() // the folder exists now
-	e.mu.Unlock()
+	e.reconcileWatches() // the folder exists now
+	fw := watchOf(e, "Docs")
+	if fw == nil || fw.count() != 1 {
+		t.Fatalf("watch %+v", fw)
+	}
 	_ = os.WriteFile(filepath.Join(local, "Skip", "x.txt"), []byte("x"), 0o600)
 	time.Sleep(300 * time.Millisecond)
 	if e.Status().Folders[0].Pending {
 		t.Fatal("excluded folder watched")
 	}
-	_ = os.MkdirAll(filepath.Join(local, "new"), 0o700)
-	time.Sleep(200 * time.Millisecond)
+	_ = os.MkdirAll(filepath.Join(local, "new", "sub"), 0o700)
+	waitFor(t, func() bool { return fw.count() == 3 })
 	_ = os.WriteFile(filepath.Join(local, "new", "a.txt"), []byte("x"), 0o600)
 	waitFor(t, func() bool { return e.Status().Folders[0].Pending })
+	_ = os.RemoveAll(filepath.Join(local, "new"))
+	waitFor(t, func() bool { return fw.count() == 1 })
+	if n := e.live().watchDirs.Load(); n != 1 {
+		t.Errorf("watched dirs %d after removing a folder", n)
+	}
 	e.mu.Lock()
 	e.cfg.LiveSync = false
-	e.updateWatchesLocked()
+	e.mu.Unlock()
+	e.reconcileWatches()
+	e.mu.Lock()
 	n := len(e.live().folders)
 	e.mu.Unlock()
-	if n != 0 {
+	if n != 0 || e.live().watchDirs.Load() != 0 {
 		t.Errorf("watches left after turning it off: %d", n)
 	}
+}
+
+// The watched root renamed away: the watch starts over (when the folder is back) and the
+// folder syncs. A symlinked root is watched where it leads.
+func TestLiveRootReplacedAndSymlinked(t *testing.T) {
+	e := pausedRig(t, `,"liveSync":true,"kept":[{"path":"Docs","stateName":"docs-1"}]`)
+	local := e.cfg.Local(e.cfg.Kept[0])
+	target := filepath.Join(filepath.Dir(local), "elsewhere")
+	_ = os.MkdirAll(target, 0o700)
+	_ = os.RemoveAll(local)
+	if err := os.Symlink(target, local); err != nil {
+		t.Skip("no symlinks:", err)
+	}
+	resetLive(e)
+	e.reconcileWatches()
+	fw := watchOf(e, "Docs")
+	real, _ := resolveRoot(target)
+	if fw == nil || fw.root != real {
+		t.Fatalf("symlinked root: %+v", fw)
+	}
+	_ = os.WriteFile(filepath.Join(local, "a.txt"), []byte("x"), 0o600)
+	waitFor(t, func() bool { return e.Status().Folders[0].Pending })
+	e.mu.Lock()
+	e.live().folders["Docs"].pending = false
+	e.status["Docs"].Pending = false
+	e.mu.Unlock()
+	// Point the link at another folder: the next reconcile notices the root changed.
+	other := filepath.Join(filepath.Dir(local), "other")
+	_ = os.MkdirAll(other, 0o700)
+	_ = os.Remove(local)
+	_ = os.Symlink(other, local)
+	e.reconcileWatches()
+	fw2 := watchOf(e, "Docs")
+	real2, _ := resolveRoot(other)
+	if fw2 == nil || fw2 == fw || fw2.root != real2 {
+		t.Fatalf("root changed, watch %+v", fw2)
+	}
+	// The root itself removed: restart (nothing to watch now) and a sync.
+	_ = os.RemoveAll(other)
+	waitFor(t, func() bool { return e.Status().Folders[0].Pending && watchOf(e, "Docs") != fw2 })
 }

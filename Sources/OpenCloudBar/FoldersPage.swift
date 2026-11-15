@@ -117,6 +117,14 @@ struct FoldersPage: View {
 
     private func state(_ f: KeptFolder) -> FolderStatus.State { model.status[f.key]?.state ?? .idle }
 
+    /// A change waiting only shows when the folder has no problem to show first.
+    private func waitingQuietly(_ f: KeptFolder) -> Bool {
+        switch state(f) {
+        case .idle, .ok, .skipped: return true
+        default: return false
+        }
+    }
+
     /// What VoiceOver says for a folder's row: its name, its space, its status.
     private func rowLabel(_ f: KeptFolder) -> String {
         f.displayName + (f.space.map { " in \($0.name)" } ?? "") + ", " + state(f).text
@@ -153,7 +161,7 @@ struct FoldersPage: View {
                                 .lineLimit(1)
                         }
                         .accessibilityElement(children: .combine)
-                    } else if model.status[f.key]?.pending == true {
+                    } else if model.status[f.key]?.pending == true, !model.config.paused, waitingQuietly(f) {
                         Label("Change detected, syncing soon", systemImage: "clock.arrow.circlepath")
                             .lineLimit(1)
                             .accessibilityLabel("Change detected, syncing soon")

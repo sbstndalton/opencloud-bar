@@ -97,6 +97,15 @@ final class ChangeCollector: @unchecked Sendable {
     private var events: [(action: String, path: String)] = []
     private var counts: [String: Int] = [:]
     private var copied = 0, compared = -1
+    /// Paths written on this Mac (downloads, deletions from OpenCloud), for live sync.
+    private var wrote: [String] = []
+    private var wroteOver = false
+
+    /// What the run wrote on this Mac, as far as its output says; true: more than that.
+    func localWrites() -> ([String], Bool) {
+        lock.lock(); defer { lock.unlock() }
+        return (wrote, wroteOver)
+    }
 
     func line(_ raw: String) {
         var l = raw.trimmingCharacters(in: CharacterSet(charactersIn: "\r\n"))
@@ -111,6 +120,9 @@ final class ChangeCollector: @unchecked Sendable {
             let rel = String(p.dropFirst(root.count))
             guard !Changes.skip(rel) else { return }
             counts[action, default: 0] += 1
+            if action == "downloaded" || action == "deleted in OpenCloud" {
+                if wrote.count < LiveSync.wroteCap { wrote.append(rel) } else { wroteOver = true }
+            }
             if events.count <= Changes.bulk { events.append((action, rel)) }
         }
         if let m = Changes.groups(Changes.reCopy, l) {

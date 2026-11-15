@@ -85,6 +85,8 @@ type changeCollector struct {
 	counts       map[string]int
 	copied       int
 	compared     int
+	wrote        []string // paths written here (downloads, deletions from OpenCloud): live sync
+	wroteOver    bool
 }
 
 func newChangeCollector() *changeCollector {
@@ -127,6 +129,13 @@ func (c *changeCollector) line(l string) {
 			return
 		}
 		c.counts[act]++
+		if act == actDownloaded || act == actDeletedRemote {
+			if len(c.wrote) < liveWroteCap {
+				c.wrote = append(c.wrote, p)
+			} else {
+				c.wroteOver = true
+			}
+		}
 		if len(c.events) < bulkChanges+1 {
 			c.events = append(c.events, Change{Path: p, Action: act})
 		}
@@ -146,6 +155,13 @@ func (c *changeCollector) line(l string) {
 		}
 		add(m[1], m[2], act)
 	}
+}
+
+// localWrites: what the run wrote on this computer, as far as its output says.
+func (c *changeCollector) localWrites() ([]string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.wrote...), c.wroteOver
 }
 
 // result is what the run changed: one line per file, or one summary line for a merge or a

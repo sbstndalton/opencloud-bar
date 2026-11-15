@@ -144,11 +144,13 @@ Off by default. Turn on **Sync local changes right away (preview)** (Mac: Settin
 
 - A folder syncs once nothing in it has changed for 5 seconds, or 60 seconds after the first change while changes keep coming.
 - Syncs started this way are at least 30 seconds apart per folder (longer if the folder's last sync took longer). The regular interval syncs aren't affected, and there is never more than one sync at a time: the folder waits in the same queue as a newly kept folder.
-- The app's own writes don't count: everything during a sync of that folder and 2 seconds after is ignored, and so are rclone's temporary files (`.partial`, `.~tmp~`), the backups folder and conflict copies. Folders excluded by name (like `- **/node_modules/**` or `- /Old/**`) aren't watched; other excludes still apply to the sync itself.
+- The app's own writes don't count. Changes seen while the app syncs a folder are kept aside; when the sync is over, the files it downloaded or deleted here are taken out, and if anything else is left (a change you made meanwhile), the folder syncs once more after the 30 seconds.
+- Noise doesn't count: rclone's temporary files (`.partial`, `.~tmp~`), the backups folder, conflict copies, `.DS_Store`, `Thumbs.db`, `desktop.ini`, `._*`, `*~`, `*.tmp`, `.sync_*.db`, Office lock files (`~$*`), LibreOffice lock files (`.~lock.*#`) and the simple file names in your excludes (like `- *.bak`). Folders excluded by name (like `- **/node_modules/**` or `- /Old/**`) aren't watched; other excludes still apply to the sync itself.
 - While paused, changes only mark the folder; it syncs when you resume.
 - Recent Changes shows "(after a local change)" for changes made by such a sync.
 - Changes made in OpenCloud still arrive at the next interval.
-- Mac: FSEvents watches each folder (about 1 second latency), and the watches are started again after the Mac wakes from sleep. Windows and Linux: each folder in the tree is watched; on Linux, if the system's watch limit is reached (`fs.inotify.max_user_watches`) or a folder tree has more than 50,000 folders, that folder goes back to the interval and a notice says so once.
+- Mac: FSEvents watches each folder (about 1 second latency). Watches start again after the Mac wakes from sleep, when a folder's excludes change, and when its folder is moved or replaced. Windows and Linux: each folder in the tree is watched. If the system's watch limit is reached (Linux `fs.inotify.max_user_watches`), or the kept folders have more than 2,000 folders in all on Windows (each watch takes memory there) or 20,000 on Linux, that kept folder goes back to the interval and a notice says so once.
+- If watching fails or loses events, or the kept folder itself is moved, removed or replaced, the folder syncs and watching starts over. A local folder that is a symbolic link is watched where it leads.
 - A kept folder whose local copy is missing isn't watched; it is watched once it is there again.
 
 ## Keeping a folder while a sync runs

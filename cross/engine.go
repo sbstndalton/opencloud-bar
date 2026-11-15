@@ -1187,8 +1187,12 @@ func (e *Engine) bisync(r folderRun, kind string, extra ...string) (string, erro
 	e.activeFiles = 0
 	e.mu.Unlock()
 	out, err := e.run(syncTimeout, sf, r.cfg.Rclone(), args...)
+	sf.Flush()
+	wrote, over := changes.localWrites()
+	e.mu.Lock()
+	e.ownWritesLocked(r.f.Key(), wrote, over || kind != "sync") // live sync: the run's own writes
+	e.mu.Unlock()
 	if err == nil {
-		sf.Flush()
 		list := changes.result(kind, r.f, time.Now())
 		if kind == "sync" {
 			for i := range list {
