@@ -28,9 +28,9 @@ Get the latest build from [Releases](https://github.com/sbstndalton/opencloud-ba
 1. Install the app (above).
 2. Open it. The first time, the set-up opens by itself; later it is **Set Up / Sign In…** in the menu. On the command line: `opencloud-bar setup https://cloud.example.com`.
 3. Enter your server address, for example `https://cloud.example.com`. Your browser opens on OpenCloud's own sign-in page. Sign in there.
-4. Choose **Keep a Folder…** to keep a folder on this computer. Everything else is on the drive.
+4. In the menu, open **Kept Folders** and choose **Keep a Folder…** to keep a folder on this computer. Everything else is on the drive. (On the Mac, **Settings…** (⌘,) opens the settings window for everything below.)
 
-That's all: no SSH key, no app token and no rclone configuration. The app signs in the same way OpenCloud's own desktop client does (OpenID Connect with PKCE). The refresh token is stored in the macOS Keychain, the Windows Credential Manager, or the Linux Secret Service. Without a Secret Service (a headless Linux machine) it is kept in a private file (mode 0600) in the app's settings folder. Choose **Sign Out** to forget it.
+That's all: no SSH key, no app token, no rclone configuration and no file to edit. The app signs in the same way OpenCloud's own desktop client does (OpenID Connect with PKCE). The refresh token is stored in the macOS Keychain, the Windows Credential Manager, or the Linux Secret Service. Without a Secret Service (a headless Linux machine) it is kept in a private file (mode 0600) in the app's settings folder. Choose **Sign Out** (on the Mac: Settings ▸ Account) to forget it.
 
 It connects straight to your server over HTTPS, so it also works through a proxy such as Cloudflare. Uploads use rclone's `infinitescale` WebDAV vendor, which sends large files in chunks (tus) and so isn't stopped by the proxy's 100 MB request limit.
 
@@ -62,9 +62,30 @@ rclone connects directly to your server (`serverURL`) over HTTPS. To authenticat
 ./scripts/install.sh
 ```
 
-On first launch the menu shows **Set Up / Sign In…**; see [Getting started](#getting-started). Settings live in `~/Library/Application Support/OpenCloudBar/config.json`.
+On first launch the menu shows **Set Up / Sign In…**; see [Getting started](#getting-started).
 
-## Settings (`config.json`)
+### The menu
+
+The menu stays short however many folders you keep: the status line, the OpenCloud Drive items, a **Kept Folders (N)** submenu, **Sync Now**, **Settings…** and **Quit**. In the Kept Folders submenu each folder is one item with a status icon; folders that need attention are listed first, and choosing one opens it in Finder. With more than 15 folders the submenu lists 15 and **All N Folders…** opens the window. **Keep a Folder…** and **Manage Folders…** are at the bottom.
+
+### The settings window
+
+**Settings…** (⌘,) opens one window with these pages. Changes apply as soon as you make them. Settings that reconnect the drive (location, tunnel, rclone path) and exclude lists have an **Apply** button instead, and an error is shown next to the field if a value isn't accepted.
+
+| Page | What it does |
+|---|---|
+| **Kept Folders** | A table of your kept folders: name, location on this Mac, status and when each last synced (this survives restarts). Per folder: Open in Finder, Open in Browser, Sync Now, Repair, Allow Large Deletion (when needed) and Stop Keeping. Select a folder to see its paths, its last error and its own exclude rules. |
+| **Account** | Server address and version, your name, email and username, and a storage bar with used and total space. **Open OpenCloud in Browser**, **Refresh**, and **Sign Out** (or **Sign In…**). It reads these from the server with your sign-in; nothing is shown if you're signed out. |
+| **Sync** | How often kept folders sync (1, 5, 15, 30 or 60 minutes), the exclude rules for all folders (with **Restore Defaults**), where kept folders live on this Mac (changeable only while no folder is kept), and the file names the server refuses. |
+| **OpenCloud Drive** | Connect or eject the drive, its mount location and volume name, the cache size limit and age, and live cache use and pending uploads while it is connected. |
+| **General** | Open at Login. With an SSH tunnel: whether to check the server's memory before syncing. Under **Advanced**: the SSH tunnel settings, the rclone path, **Open Settings File** and **Reload Settings**. |
+| **Logs** | The app log, the drive and tunnel logs, and each folder's sync log: the last 3000 lines, refreshed every 2 seconds, with errors in red. **Copy**, **Reveal in Finder** and **Clear…**. |
+
+Changing exclude rules (for one folder or for all) means rclone needs a one-time **Repair** of the affected folders before they sync again. A Repair merges both sides and never deletes anything; the window asks before it applies the change.
+
+## Advanced: the settings file (`config.json`)
+
+Everything below can be changed in the settings window. The file, `~/Library/Application Support/OpenCloudBar/config.json`, is only a fallback for hand edits: open it with **Settings… ▸ General ▸ Advanced ▸ Open Settings File**, then choose **Reload Settings**. Keys the app doesn't know about are kept when it saves.
 
 | Key | Meaning | Default |
 |---|---|---|
@@ -87,7 +108,7 @@ On first launch the menu shows **Set Up / Sign In…**; see [Getting started](#g
 - Ejecting the drive in Finder keeps it ejected until you choose **Connect Drive**. If rclone crashes, the app remounts automatically.
 - Eject and Quit wait for files written to the drive to finish uploading. The upload cache lives in Application Support, not Caches, so macOS won't purge it.
 - If bisync's history goes stale, or the server settings change, the folder is marked **needs repair** rather than resynced automatically. Repair is a merge: the newer copy of each file wins and nothing is deleted.
-- If more than half a folder's files would be deleted, bisync refuses. The menu then offers **Allow Large Deletion…**.
+- If more than half a folder's files would be deleted, bisync refuses. The folder then offers **Allow Large Deletion…** in the settings window.
 - Kept folder paths are limited to about 90 characters. That's a limit of rclone bisync's history file names.
 
 ## Linux and Windows

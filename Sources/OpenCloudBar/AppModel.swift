@@ -37,6 +37,7 @@ final class AppModel: ObservableObject {
     private var authBusy = false
     private var authRetryAt = Date.distantPast
     private var setupWindow: SetupWindowController?
+    private var settingsWindow: SettingsWindowController?
     private var tunnelRestartAt = Date.distantPast
     private var mount: Process?
     private var mountStartedAt = Date.distantPast
@@ -106,9 +107,35 @@ final class AppModel: ObservableObject {
         tick()
     }
 
+    private var lastSuccessURL: URL { config.stateURL.appendingPathComponent("last-success.json") }
+
+    /// "Last synced" times survive restarts: stateDir/last-success.json maps stateName to a date.
+    private func loadLastSuccess() -> [String: Date] {
+        guard let data = try? Data(contentsOf: lastSuccessURL),
+              let raw = try? JSONDecoder().decode([String: String].self, from: data) else { return [:] }
+        let f = ISO8601DateFormatter()
+        return raw.compactMapValues { f.date(from: $0) }
+    }
+
+    private func saveLastSuccess() {
+        let f = ISO8601DateFormatter()
+        var out: [String: String] = [:]
+        for k in config.kept {
+            if let d = status[k.path]?.lastSuccess { out[k.stateName] = f.string(from: d) }
+        }
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? enc.encode(out) else { return }
+        try? FileManager.default.createDirectory(at: config.stateURL, withIntermediateDirectories: true)
+        try? data.write(to: lastSuccessURL, options: .atomic)
+    }
+
     private func refreshStatusEntries() {
+        var saved: [String: Date]?
         for f in config.kept where status[f.path] == nil {
             var s = FolderStatus()
+            if saved == nil { saved = loadLastSuccess() }
+            s.lastSuccess = saved?[f.stateName]
             if let reason = needsRepairReason(f) { s.state = .needsRepair(reason) }
             status[f.path] = s
         }
@@ -454,6 +481,7 @@ final class AppModel: ObservableObject {
             try? config.serverIdentity.write(to: serverFile, atomically: true, encoding: .utf8)
             status[f.path]?.state = .ok
             status[f.path]?.lastSuccess = Date()
+            saveLastSuccess()
             return true
         }
         if config.isOIDC && r.output.contains(Auth.signedOutText) {
@@ -620,6 +648,7 @@ final class AppModel: ObservableObject {
                 self.config.kept.removeAll { $0.path == f.path }
                 self.config.save()
                 self.refreshStatusEntries()
+                self.saveLastSuccess()
                 self.lastMessage = "“\(f.displayName)” is now only in OpenCloud"
             }
         }
@@ -642,6 +671,37 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.open(config.localRootURL.appendingPathComponent(f.path))
     }
 
+    /// Syncs just this folder now (the Settings window's per-folder Sync Now).
+    func syncNow(_ f: KeptFolder) {
+        guard !needsSignIn, configError == nil else { return }
+        _ = exclusive { [weak self] in
+            await self?.syncFolder(f, mode: .normal)
+        }
+    }
+
+    struct DriveStats {
+        var cacheBytes: Int64
+        var uploading: Int
+        var queued: Int
+    }
+
+    /// Live numbers from the drive's rclone (nil when the drive isn't running or doesn't answer).
+    func driveStats() async -> DriveStats? {
+        guard mount?.isRunning == true,
+              let url = URL(string: "http://127.0.0.1:\(config.rcPort)/vfs/stats") else { return nil }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 3
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = Data("{}".utf8)
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let disk = json["diskCache"] as? [String: Any] else { return nil }
+        func n(_ k: String) -> Int64 { (disk[k] as? NSNumber)?.int64Value ?? 0 }
+        return DriveStats(cacheBytes: n("bytesUsed"), uploading: Int(n("uploadsInProgress")), queued: Int(n("uploadsQueued")))
+    }
+
     // MARK: - Settings
 
     func toggleOpenAtLogin() {
@@ -662,6 +722,70 @@ final class AppModel: ObservableObject {
     func editConfig() {
         if !FileManager.default.fileExists(atPath: Config.fileURL.path) { config.save() }
         NSWorkspace.shared.open(Config.fileURL)
+    }
+
+    /// Applies one edit from the Settings window: validates, saves config.json (other keys in
+    /// the file are kept) and applies it. Returns an error message, or nil on success.
+    /// Changes that restart the connection or alter sync filters wait until no sync is running.
+    func updateConfig(_ edit: (inout Config) -> Void) async -> String? {
+        if configError != nil {
+            return "The settings file has a problem (shown at the top of this window). Fix it, then choose Reload Settings."
+        }
+        var trial = config
+        edit(&trial)
+        if trial.connectionKey != config.connectionKey, driveMounted, let n = await pendingUploads(), n > 0 {
+            return "\(n) file(s) written to the drive haven't finished uploading. Try again in a moment."
+        }
+        // Settings may have changed while we waited for rclone.
+        var c = config
+        edit(&c)
+        if let e = c.validationError() { return e }
+        if config.isConfigured && !c.isConfigured { return "That would leave OpenCloud Bar without a server to connect to." }
+        let old = config
+        let reconnect = c.connectionKey != old.connectionKey
+        let filtersChanged = c.commonFilters != old.commonFilters || c.kept.map(\.extraFilters) != old.kept.map(\.extraFilters)
+        if (reconnect || filtersChanged) && syncing { return "A sync is running. Try again when it finishes." }
+        do { try c.write() } catch { return "Couldn't save the settings: \(error.localizedDescription)" }
+
+        config = c
+        applyEnvironment()
+        refreshStatusEntries()
+        if c.syncIntervalSeconds != old.syncIntervalSeconds {
+            nextSyncAt = min(nextSyncAt, Date().addingTimeInterval(TimeInterval(max(60, c.syncIntervalSeconds))))
+        }
+        if reconnect {
+            restartConnection()
+        } else if c.cacheMaxSize != old.cacheMaxSize || c.cacheMaxAge != old.cacheMaxAge || c.volumeName != old.volumeName {
+            restartDriveForNewSettings()
+        }
+        return nil
+    }
+
+    /// The drive reads its cache and volume settings only at start: remount it (the connection
+    /// itself stays up) unless files are still uploading.
+    private func restartDriveForNewSettings() {
+        guard mount?.isRunning == true else { return }
+        Task {
+            if let n = await pendingUploads(), n > 0 {
+                lastMessage = "Drive settings apply the next time the drive reconnects (\(n) file(s) still uploading)"
+                return
+            }
+            unmountRequested = true
+            let r = await Shell.run("/usr/sbin/diskutil", ["unmount", config.mountURL.path], timeout: 30)
+            if r.status == 0 {
+                mountRestartAt = .distantPast
+                lastMessage = nil
+            } else {
+                unmountRequested = false
+                lastMessage = "Drive settings apply the next time the drive reconnects (it is in use)"
+            }
+        }
+    }
+
+    /// Opens the Settings window (one shared window), optionally on a given page.
+    func openSettings(_ page: SettingsPage? = nil) {
+        if settingsWindow == nil { settingsWindow = SettingsWindowController(model: self) }
+        settingsWindow?.show(page: page)
     }
 
     func reloadConfig() {
@@ -765,7 +889,7 @@ final class AppModel: ObservableObject {
 
     // MARK: - Dialogs
 
-    private func alert(_ title: String, _ text: String) {
+    func alert(_ title: String, _ text: String) {
         let a = NSAlert()
         a.messageText = title
         a.informativeText = text
@@ -773,7 +897,7 @@ final class AppModel: ObservableObject {
         a.runModal()
     }
 
-    private func confirm(_ title: String, _ text: String, button: String) -> Bool {
+    func confirm(_ title: String, _ text: String, button: String) -> Bool {
         let a = NSAlert()
         a.messageText = title
         a.informativeText = text
@@ -785,7 +909,7 @@ final class AppModel: ObservableObject {
 
     // MARK: - Summary for the menu
 
-    private func hasProblem(_ f: KeptFolder) -> Bool {
+    func hasProblem(_ f: KeptFolder) -> Bool {
         switch status[f.path]?.state {
         case .failed, .needsRepair, .bigDeletion: return true
         default: return false
@@ -794,7 +918,7 @@ final class AppModel: ObservableObject {
 
     var summary: String {
         if let e = configError { return e }
-        if !config.isConfigured { return "Not set up: choose Set Up / Sign In… (or Advanced ▸ Edit Settings File)" }
+        if !config.isConfigured { return "Not set up: choose Set Up / Sign In…" }
         if signedOut { return Self.signedOutText }
         if syncing { return "Syncing…" }
         if let bad = config.kept.first(where: hasProblem) { return "“\(bad.displayName)” needs attention" }

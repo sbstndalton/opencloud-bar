@@ -203,7 +203,7 @@ struct Config: Codable {
             if let e = c.validationError() { return (Config(), "Settings problem: \(e)") }
             return (c, nil)
         } catch {
-            return (Config(), "Couldn't read the settings file (\(error.localizedDescription)). Fix it and choose Reload Settings.")
+            return (Config(), "Couldn't read the settings file (\(error.localizedDescription)). Fix it, then choose Settings… ▸ General ▸ Reload Settings.")
         }
     }
 
@@ -238,11 +238,34 @@ struct Config: Codable {
         _ = try FileManager.default.replaceItemAt(fileURL, withItemAt: tmp)
     }
 
-    func save() {
-        try? FileManager.default.createDirectory(at: Config.supportURL, withIntermediateDirectories: true)
+    func save() { try? write() }
+
+    /// Writes config.json. Keys this version doesn't know about (the Go app's extra settings,
+    /// for example `mountEnabled` or `kept[].localPath`) are kept as they are in the file.
+    func write() throws {
+        try FileManager.default.createDirectory(at: Config.supportURL, withIntermediateDirectories: true)
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        guard let data = try? enc.encode(self) else { return }
-        try? data.write(to: Config.fileURL, options: .atomic)
+        var data = try enc.encode(self)
+        if let existing = try? Data(contentsOf: Config.fileURL),
+           let old = try? JSONSerialization.jsonObject(with: existing) as? [String: Any],
+           var new = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            var merged = old
+            // Optional settings this app owns are left out of the encoding when nil; drop them
+            // from the old file too, so clearing one actually removes it.
+            for k in ["serverURL", "auth", "useTunnel", "webdavVendor"] { merged.removeValue(forKey: k) }
+            let oldKept = (old["kept"] as? [[String: Any]]) ?? []
+            if let newKept = new["kept"] as? [[String: Any]] {
+                new["kept"] = newKept.map { entry -> [String: Any] in
+                    guard let path = entry["path"] as? String,
+                          var base = oldKept.first(where: { ($0["path"] as? String) == path }) else { return entry }
+                    base.merge(entry) { _, n in n }
+                    return base
+                }
+            }
+            merged.merge(new) { _, n in n }
+            data = try JSONSerialization.data(withJSONObject: merged, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+        }
+        try data.write(to: Config.fileURL, options: .atomic)
     }
 }

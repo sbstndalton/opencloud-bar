@@ -64,58 +64,51 @@ struct MenuContent: View {
         }
         Divider()
 
-        Section("Kept on This Mac") {
-            ForEach(model.config.kept) { f in
-                Menu(label(for: f)) {
-                    Button("Open in Finder") { model.openLocal(f) }
-                    switch model.status[f.path]?.state {
-                    case .needsRepair:
-                        Button("Repair (Merge Both Sides)…") { model.repair(f) }.disabled(model.syncing)
-                    case .bigDeletion:
-                        Button("Allow Large Deletion…") { model.allowBigDeletion(f) }.disabled(model.syncing)
-                    default:
-                        EmptyView()
-                    }
-                    Divider()
-                    Button("Stop Keeping on This Mac…") { model.stopKeeping(f) }
-                        .disabled(model.syncing)
-                }
-            }
-            Button("Keep a Folder on This Mac…") { model.keepFolder() }
-                .disabled(model.syncing || model.needsSignIn)
-        }
+        keptFoldersMenu
         Divider()
 
         Button("Sync Now") { model.syncNow() }
             .disabled(model.syncing || model.needsSignIn)
             .keyboardShortcut("s")
-        Toggle("Open at Login", isOn: Binding(get: { model.opensAtLogin },
-                                              set: { _ in model.toggleOpenAtLogin() }))
-        Menu("Advanced") {
-            Button("Show Logs") { model.openLogs() }
-            Button("Edit Settings File") { model.editConfig() }
-            Button("Reload Settings") { model.reloadConfig() }
-            if model.config.isOIDC && !model.needsSignIn {
-                Divider()
-                Button("Sign Out") { model.signOut() }
-            }
-        }
+        Button("Settings…") { model.openSettings() }
+            .keyboardShortcut(",")
         Divider()
         Button("Quit OpenCloud Bar") { NSApp.terminate(nil) }
             .keyboardShortcut("q")
     }
 
-    private func label(for f: KeptFolder) -> String {
-        let s = model.status[f.path]
-        switch s?.state {
-        case .syncing: return "\(f.displayName) — syncing…"
-        case .failed(let why): return "\(f.displayName) — \(why)"
-        case .needsRepair(let why): return "\(f.displayName) — needs repair (\(why))"
-        case .bigDeletion: return "\(f.displayName) — large deletion blocked"
-        case .skipped(let why): return "\(f.displayName) — skipped (\(why))"
-        default:
-            if let t = s?.lastSuccess { return "\(f.displayName) — \(AppModel.relative(t))" }
-            return "\(f.displayName) — waiting"
+    private static let menuLimit = 15
+
+    /// One compact submenu, however many folders are kept. Folders that need attention come
+    /// first; past `menuLimit` folders only the most relevant ones are listed.
+    private var keptFoldersMenu: some View {
+        let all = model.config.kept
+        let attention = all.filter { model.hasProblem($0) }
+        var shown = attention + all.filter { !model.hasProblem($0) }
+        if all.count > Self.menuLimit {
+            let rest = all.filter { !model.hasProblem($0) }
+                .sorted { (model.status[$0.path]?.lastSuccess ?? .distantPast) > (model.status[$1.path]?.lastSuccess ?? .distantPast) }
+            shown = Array((attention + rest).prefix(Self.menuLimit))
+        }
+        let names = Dictionary(grouping: all, by: \.displayName).mapValues(\.count)
+        return Menu("Kept Folders (\(all.count))") {
+            ForEach(shown) { f in
+                Button {
+                    model.openLocal(f)
+                } label: {
+                    Label((names[f.displayName] ?? 0) > 1 ? f.path : f.displayName,
+                          systemImage: (model.status[f.path]?.state ?? .idle).symbol)
+                }
+            }
+            if all.count > Self.menuLimit {
+                Button("All \(all.count) Folders…") { model.openSettings(.folders) }
+            }
+            if !all.isEmpty { Divider() }
+            Button("Keep a Folder…") { model.keepFolder() }
+                .disabled(model.syncing || model.needsSignIn)
+            if !all.isEmpty {
+                Button("Manage Folders…") { model.openSettings(.folders) }
+            }
         }
     }
 }

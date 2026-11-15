@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strings"
@@ -315,12 +316,54 @@ func loadConfig() (Config, error) {
 	return c, nil
 }
 
+// saveConfig writes c to config.json. Keys in the existing file that this version doesn't know
+// about are kept, so the Go app and the macOS app (and hand edits) don't wipe each other's settings.
 func saveConfig(c Config) error {
-	if err := os.MkdirAll(appDir(), 0o700); err != nil {
+	fresh, err := json.Marshal(c)
+	if err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(c, "", "  ")
-	if err != nil {
+	var data []byte
+	if old, rerr := os.ReadFile(configFile()); rerr == nil {
+		raw := map[string]json.RawMessage{}
+		if json.Unmarshal(old, &raw) == nil {
+			for k := range knownConfigKeys() {
+				delete(raw, k)
+			}
+			var mine map[string]json.RawMessage
+			_ = json.Unmarshal(fresh, &mine)
+			for k, v := range mine {
+				raw[k] = v
+			}
+			data, err = json.MarshalIndent(raw, "", "  ")
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if data == nil {
+		if data, err = json.MarshalIndent(c, "", "  "); err != nil {
+			return err
+		}
+	}
+	return writeConfigBytes(data)
+}
+
+// knownConfigKeys lists the JSON keys of the Config struct.
+func knownConfigKeys() map[string]bool {
+	keys := map[string]bool{}
+	t := reflect.TypeOf(Config{})
+	for i := 0; i < t.NumField(); i++ {
+		if name, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ","); name != "" && name != "-" {
+			keys[name] = true
+		}
+	}
+	return keys
+}
+
+// writeConfigBytes replaces config.json atomically.
+func writeConfigBytes(data []byte) error {
+	if err := os.MkdirAll(appDir(), 0o700); err != nil {
 		return err
 	}
 	tmp := configFile() + ".tmp"

@@ -13,12 +13,14 @@
 //	opencloud-bar repair PATH         merge both sides after "needs repair"
 //	opencloud-bar allow-delete PATH   apply a blocked large deletion
 //	opencloud-bar connect | eject     the on-demand drive
+//	opencloud-bar settings            open the settings page in the browser
 //	opencloud-bar reload | quit
 package main
 
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -38,7 +40,7 @@ import (
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage: opencloud-bar setup [URL] | logout | token | run [--no-tray] | status | sync | keep PATH [--local DIR] |
-       unkeep PATH | repair PATH | allow-delete PATH | connect | eject | reload | quit`)
+       unkeep PATH | repair PATH | allow-delete PATH | connect | eject | settings | reload | quit`)
 	os.Exit(2)
 }
 
@@ -64,6 +66,16 @@ func main() {
 		if err := call("POST", "/"+os.Args[1], nil, nil); err != nil {
 			fail(err)
 		}
+	case "settings":
+		var out struct{ URL string }
+		if err := call("POST", "/settings-link", nil, &out); err != nil {
+			fail(err)
+		}
+		if err := openURL(out.URL); err != nil {
+			fmt.Println("open this address in your browser within a minute:\n" + out.URL)
+		}
+	case "settings-window": // internal: started by the tray's Settings…
+		cmdSettingsWindow(os.Args[2:])
 	case "setup":
 		cmdSetup(os.Args[2:])
 	case "token":
@@ -225,6 +237,14 @@ func serveAPI(e *Engine, stop func()) error {
 	if err != nil {
 		return fmt.Errorf("opencloud-bar is already running (control port %d is in use)", e.cfg.APIPort())
 	}
+	settingsUI.setPort(ln.Addr().(*net.TCPAddr).Port)
+	go func() { _ = http.Serve(ln, apiHandler(e, stop, tok, settingsUI)) }()
+	return nil
+}
+
+// apiHandler is the whole local server: the bearer-token control API (CLI and scripts) and the
+// cookie-protected settings page under /ui/ (see ui.go). The two never accept each other's credentials.
+func apiHandler(e *Engine, stop func(), tok string, ui *webUI) http.Handler {
 	mux := http.NewServeMux()
 	reply := func(w http.ResponseWriter, err error) {
 		if err != nil {
@@ -259,15 +279,22 @@ func serveAPI(e *Engine, stop func()) error {
 		reply(w, e.AllowBigDeletion(r.URL.Query().Get("path")))
 	})
 	mux.HandleFunc("POST /quit", func(w http.ResponseWriter, r *http.Request) { reply(w, nil); go stop() })
+	// A one-time link to the settings page, for `opencloud-bar settings`.
+	mux.HandleFunc("POST /settings-link", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"url": ui.loginURL(r.URL.Query().Get("section"))})
+	})
+	want := []byte("Bearer " + tok)
 	auth := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer "+tok {
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), want) != 1 {
 			http.Error(w, "unauthorized", 401)
 			return
 		}
 		mux.ServeHTTP(w, r)
 	})
-	go func() { _ = http.Serve(ln, auth) }()
-	return nil
+	root := http.NewServeMux()
+	root.Handle("/ui/", ui.handler(e))
+	root.Handle("/", auth)
+	return root
 }
 
 func runDaemon(tray bool) {

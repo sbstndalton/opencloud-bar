@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenCloud Bar</title>
+<style nonce="{{NONCE}}">
+:root { color-scheme: light dark; --bg:#f6f7f9; --panel:#fff; --text:#1c1e21; --muted:#6a7077; --line:#dcdfe4; --accent:#2f6fed; --ok:#2e9d57; --warn:#d98a00; --bad:#d23b3b; }
+@media (prefers-color-scheme: dark) { :root { --bg:#17181b; --panel:#212328; --text:#e8eaed; --muted:#9aa1a9; --line:#363a41; --accent:#6b9bff; --ok:#4cc27a; --warn:#f0a93a; --bad:#ff6b6b; } }
+* { box-sizing: border-box; }
+body { margin:0; font:14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background:var(--bg); color:var(--text); }
+.app { display:flex; min-height:100vh; }
+nav { width:190px; padding:16px 10px; border-right:1px solid var(--line); background:var(--panel); flex:none; }
+nav h1 { font-size:15px; margin:0 8px 14px; }
+nav button { display:block; width:100%; text-align:left; border:0; background:none; color:var(--text); padding:8px 10px; border-radius:6px; font:inherit; cursor:pointer; }
+nav button:hover { background:var(--bg); }
+nav button.on { background:var(--accent); color:#fff; }
+main { flex:1; padding:20px 28px 60px; max-width:980px; min-width:0; }
+h2 { margin:0 0 4px; font-size:20px; }
+h3 { margin:22px 0 8px; font-size:14px; }
+.summary { color:var(--muted); margin:0 0 18px; }
+.card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px 16px; margin:12px 0; }
+.row { display:flex; gap:12px; align-items:center; margin:8px 0; flex-wrap:wrap; }
+.row > label { width:210px; flex:none; }
+.hint { color:var(--muted); font-size:12.5px; margin:2px 0; }
+input[type=text], input[type=number], select, textarea { font:inherit; color:var(--text); background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:6px 8px; min-width:0; }
+input[type=text] { width:320px; max-width:100%; }
+input[type=number] { width:110px; }
+textarea { width:100%; min-height:150px; font-family:ui-monospace, Menlo, Consolas, monospace; font-size:12.5px; }
+button.btn { font:inherit; color:var(--text); background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:6px 12px; cursor:pointer; }
+button.btn:hover:not(:disabled) { border-color:var(--accent); }
+button.btn.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+button.btn.danger { color:var(--bad); }
+button.btn:disabled { opacity:.45; cursor:default; }
+table { width:100%; border-collapse:collapse; }
+th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+th { font-size:12px; color:var(--muted); font-weight:600; }
+tr.sel { background:color-mix(in srgb, var(--accent) 12%, transparent); }
+tbody tr { cursor:pointer; }
+.dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; background:var(--muted); }
+.dot.ok { background:var(--ok); } .dot.warn { background:var(--warn); } .dot.bad { background:var(--bad); } .dot.busy { background:var(--accent); }
+.path { font-family:ui-monospace, Menlo, Consolas, monospace; font-size:12.5px; word-break:break-all; }
+.bar { height:12px; background:var(--bg); border:1px solid var(--line); border-radius:6px; overflow:hidden; max-width:420px; }
+.bar > div { height:100%; background:var(--ok); }
+.bar.nearing > div { background:var(--warn); } .bar.critical > div, .bar.exceeded > div { background:var(--bad); }
+pre.log { background:#101114; color:#d7dae0; padding:12px; border-radius:8px; height:60vh; overflow:auto; font:12px/1.4 ui-monospace, Menlo, Consolas, monospace; white-space:pre-wrap; word-break:break-all; margin:8px 0; }
+pre.log .err { color:#ff8b8b; } pre.log .warn { color:#f0c36a; }
+#toast { position:fixed; right:18px; bottom:18px; max-width:420px; padding:10px 14px; border-radius:8px; background:var(--panel); border:1px solid var(--line); box-shadow:0 4px 18px rgba(0,0,0,.2); display:none; }
+#toast.bad { border-color:var(--bad); color:var(--bad); }
+#banner { display:none; background:var(--bad); color:#fff; padding:10px 28px; }
+details { margin:14px 0; } summary { cursor:pointer; font-weight:600; }
+.inline-err { color:var(--bad); }
+@media (max-width: 640px) { .app { flex-direction:column; } nav { width:auto; display:flex; flex-wrap:wrap; gap:4px; border-right:0; border-bottom:1px solid var(--line); } nav h1 { width:100%; } nav button { width:auto; } .row > label { width:100%; } }
+</style>
+</head>
+<body>
+<div id="banner"></div>
+<div class="app">
+  <nav id="nav"><h1>OpenCloud Bar</h1></nav>
+  <main id="main"></main>
+</div>
+<div id="toast"></div>
+<script nonce="{{NONCE}}">
+"use strict";
+// Plain DOM code, no libraries. Text from the server is only ever set with textContent.
+const SECTIONS = [["folders","Folders"],["account","Account"],["sync","Sync"],["drive","Drive"],["general","General"],["logs","Logs"]];
+let S = null;            // last /ui/api/state
+let section = "folders";
+let selected = null;     // selected folder path
+let timers = [];
+let render = 0;          // bumps on every section render so stale async results are dropped
+
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") el.className = v;
+    else if (k === "text") el.textContent = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (v === true) el.setAttribute(k, "");
+    else if (v !== false && v != null) el.setAttribute(k, v);
+  }
+  for (const c of kids.flat()) if (c != null) el.append(c.nodeType ? c : document.createTextNode(String(c)));
+  return el;
+}
+
+async function api(method, path, body) {
+  const opt = { method, headers: { "X-OpenCloud-Bar": "1" }, credentials: "same-origin" };
+  if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
+  let resp;
+  try { resp = await fetch("/ui/api/" + path, opt); } catch (e) { throw new Error("OpenCloud Bar isn't answering. Is it still running?"); }
+  let data = {};
+  try { data = await resp.json(); } catch (e) { /* empty */ }
+  if (resp.status === 401) { banner("This page's sign-in ended. Choose Settings… in the OpenCloud Bar menu to open it again."); throw new Error("not signed in"); }
+  if (!resp.ok || data.error) { const err = new Error(data.error || ("Error " + resp.status)); err.data = data; throw err; }
+  return data;
+}
+const get = (p) => api("GET", p);
+const post = (p, b) => api("POST", p, b === undefined ? {} : b);
+
+function banner(msg) { const b = document.getElementById("banner"); b.textContent = msg; b.style.display = "block"; }
+let toastTimer;
+function toast(msg, bad) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.className = bad ? "bad" : ""; t.style.display = "block";
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.style.display = "none"; }, bad ? 9000 : 2500);
+}
+async function act(fn, okMsg) {
+  try { await fn(); if (okMsg) toast(okMsg); } catch (e) { toast(e.message, true); }
+  await refreshState();
+}
+
+// Settings save: build a patch, send it, show the server's validation message if it refuses.
+async function save(patch, then) {
+  try {
+    const r = await post("config", patch);
+    if (r.pending) toast("Saved. It applies when the running sync finishes.");
+    else if (r.restartRequired) toast("Saved. Restart OpenCloud Bar for the new port to take effect.");
+    else toast("Saved");
+  } catch (e) {
+    toast(e.message, true);
+  }
+  await refreshState();
+  if (then) then();
+}
+const debounced = {};
+function saveSoon(key, patch) { clearTimeout(debounced[key]); debounced[key] = setTimeout(() => save(patch), 700); }
+
+function fmtBytes(n) {
+  if (n == null) return "";
+  const u = ["B","KB","MB","GB","TB"]; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i ? n.toFixed(1) : n) + " " + u[i];
+}
+function ago(iso) {
+  const t = Date.parse(iso);
+  if (!iso || isNaN(t) || t < 86400000) return "not yet";
+  const m = Math.round((Date.now() - t) / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return m + " min ago";
+  if (m < 48 * 60) return Math.round(m / 60) + " h ago";
+  return Math.round(m / 1440) + " days ago";
+}
+function stateLook(f) {
+  switch (f.state) {
+    case "syncing": return ["busy", "Syncing…"];
+    case "ok": return ["ok", "Up to date"];
+    case "skipped": return ["warn", "Skipped" + (f.detail ? " (" + f.detail + ")" : "")];
+    case "failed": return ["bad", "Failed" + (f.detail ? ": " + f.detail : "")];
+    case "needs-repair": return ["bad", "Needs repair" + (f.detail ? " (" + f.detail + ")" : "")];
+    case "large-deletion": return ["warn", "Large deletion blocked"];
+  }
+  return ["", "Waiting"];
+}
+
+// ---- shell
+
+function buildNav() {
+  const nav = document.getElementById("nav");
+  nav.replaceChildren(h("h1", { text: "OpenCloud Bar" }));
+  for (const [id, label] of SECTIONS) {
+    nav.append(h("button", { class: id === section ? "on" : "", onclick: () => go(id) }, label));
+  }
+}
+function go(id) {
+  section = id; location.hash = id;
+  timers.forEach(clearInterval); timers = [];
+  render++;
+  buildNav();
+  const main = document.getElementById("main");
+  main.replaceChildren();
+  ({ folders, account, sync: syncPage, drive, general, logs })[id](main, render);
+}
+async function refreshState() {
+  try { S = await get("state"); } catch (e) { return; }
+  const sum = document.getElementById("summary");
+  if (sum) sum.textContent = S.status.summary + (S.status.message ? " — " + S.status.message : "");
+  if (section === "folders") drawFolders();
+  if (section === "drive") drawDriveButtons();
+}
+function header(main, title) {
+  main.append(h("h2", { text: title }), h("p", { class: "summary", id: "summary", text: S ? S.status.summary : "" }));
+}
+
+// ---- Folders
+
+function folders(main) {
+  header(main, "Folders");
+  main.append(h("div", { id: "folders-body" }));
+  drawFolders();
+  timers.push(setInterval(refreshState, 3000));
+}
+function drawFolders() {
+  const body = document.getElementById("folders-body");
+  if (!body) return;
+  const busy = S.status.syncing;
+  const list = S.folders;
+  const bar = h("div", { class: "row" },
+    h("button", { class: "btn primary", disabled: busy || !S.config.configured || S.status.signedOut, onclick: keepFolder }, "Keep a Folder…"),
+    h("button", { class: "btn", disabled: busy || !S.config.configured, onclick: () => act(() => post("sync"), "Sync started") }, "Sync Now"),
+    h("button", { class: "btn", disabled: !S.config.serverURL, onclick: () => act(() => post("open", { kind: "web" })) }, "Open OpenCloud in Browser"));
+  const tbl = h("table", {}, h("thead", {}, h("tr", {}, h("th", { text: "Name" }), h("th", { text: "On this computer" }), h("th", { text: "Status" }), h("th", { text: "Last synced" }))),
+    h("tbody", {}, list.map(f => {
+      const [cls, text] = stateLook(f);
+      return h("tr", { class: f.path === selected ? "sel" : "", onclick: () => { selected = f.path; drawFolders(); } },
+        h("td", { text: f.name }), h("td", { class: "path", text: f.local }),
+        h("td", {}, h("span", { class: "dot " + cls }), text), h("td", { text: ago(f.lastSuccess) }));
+    })));
+  const parts = [bar];
+  parts.push(list.length ? tbl : h("div", { class: "card" }, "Nothing is kept on this computer yet. Choose Keep a Folder… to start."));
+  const f = list.find(x => x.path === selected);
+  if (f) parts.push(folderDetail(f, busy));
+  parts.push(h("details", {}, h("summary", { text: "Keep a folder by typing its path" }),
+    h("p", { class: "hint", text: "Use this if the folder dialog isn't available. The path is inside your OpenCloud drive, for example Documents/Projects." }),
+    h("div", { class: "row" }, h("input", { type: "text", id: "keep-path", placeholder: "Documents/Projects" }),
+      h("button", { class: "btn", disabled: busy, onclick: () => { const p = document.getElementById("keep-path").value.trim(); if (p) act(() => post("keep", { path: p }), "Folder kept; the first sync starts shortly"); } }, "Keep"))));
+  const old = body.querySelector("textarea"); // don't wipe unsaved exclude edits on the 3 s refresh
+  const keepText = old && old.dataset.path === selected ? old.value : null;
+  const keepFocus = old && document.activeElement === old;
+  const typed = body.querySelector("#keep-path"), typedVal = typed ? typed.value : "";
+  body.replaceChildren(...parts);
+  const ta = body.querySelector("textarea");
+  if (ta && keepText != null) { ta.value = keepText; if (keepFocus) ta.focus(); }
+  if (typedVal) body.querySelector("#keep-path").value = typedVal;
+}
+function keepFolder() {
+  act(() => post("keep", {}), "Choose the folder in the dialog on your desktop");
+}
+function folderDetail(f, busy) {
+  const ta = h("textarea", { "data-path": f.path, spellcheck: "false" });
+  ta.value = f.extraFilters.join("\n");
+  const acts = [
+    h("button", { class: "btn", onclick: () => act(() => post("open", { kind: "folder", path: f.path })) }, "Open Folder")];
+  if (f.state === "needs-repair") acts.push(h("button", { class: "btn", disabled: busy, onclick: () => {
+    if (confirm("Repair " + f.name + "?\n\nThis merges this computer's copy with OpenCloud. For each file the newer copy wins, and nothing is deleted. Files deleted since the last good sync will come back.")) act(() => post("repair", { path: f.path }), "Repair started");
+  } }, "Repair (Merge Both Sides)…"));
+  if (f.state === "large-deletion") acts.push(h("button", { class: "btn", disabled: busy, onclick: () => {
+    if (confirm("Allow a large deletion in " + f.name + "?\n\nMore than half of this folder's files were deleted on one side. If that was on purpose, the deletion will be applied to the other side too.")) act(() => post("allow-delete", { path: f.path }), "Started");
+  } }, "Allow Large Deletion…"));
+  acts.push(h("button", { class: "btn danger", disabled: busy, onclick: () => stopKeeping(f) }, "Stop Keeping Here…"));
+  return h("div", { class: "card" },
+    h("h3", { text: f.name }),
+    h("div", { class: "row" }, h("label", { text: "On this computer" }), h("span", { class: "path", text: f.local })),
+    h("div", { class: "row" }, h("label", { text: "In OpenCloud" }), h("span", { class: "path", text: "/" + f.remote })),
+    f.detail ? h("div", { class: "row" }, h("label", { text: "Last message" }), h("span", { text: f.detail })) : null,
+    h("div", { class: "row" }, acts),
+    h("h3", { text: "Excludes for this folder only" }),
+    h("p", { class: "hint", text: "One rule per line, like - *.iso (exclude) or + keep.txt (include). They apply on top of the common excludes in Sync." }),
+    ta,
+    h("div", { class: "row" }, h("button", { class: "btn", onclick: () => save({ keptFilters: { [f.path]: ta.value.split("\n") } }) }, "Save Excludes")));
+}
+async function stopKeeping(f) {
+  let text = "Your changes are synced to OpenCloud first. Then the copy on this computer is moved to the trash. The folder stays in OpenCloud.";
+  try { const u = await get("unsynced?path=" + encodeURIComponent(f.path)); if (u.unsynced > 0) text += "\n\n" + u.unsynced + " file(s) in it are never synced (build folders, excluded items) and exist only here. They move with it."; } catch (e) { /* ignore */ }
+  if (confirm("Stop keeping " + f.name + " here?\n\n" + text)) act(() => post("unkeep", { path: f.path }), "Started; see the status above");
+}
+
+// ---- Account
+
+async function account(main, r) {
+  header(main, "Account");
+  const box = h("div", {}, "Loading…");
+  main.append(box);
+  let a;
+  try { a = await get("account"); } catch (e) { box.textContent = e.message; box.className = "inline-err"; return; }
+  if (r !== render) return;
+  const row = (k, v) => v ? h("div", { class: "row" }, h("label", { text: k }), h("span", { text: v })) : null;
+  const card = h("div", { class: "card" },
+    row("Server", a.server), row("Name", a.displayName), row("Email", a.email), row("Username", a.username), row("Server version", a.version),
+    a.note ? h("p", { class: "hint", text: a.note }) : null);
+  if (a.quota && a.quota.total > 0) {
+    const pct = Math.min(100, Math.round(100 * a.quota.used / a.quota.total));
+    const fill = h("div", {}); fill.style.width = pct + "%";
+    card.append(h("div", { class: "row" }, h("label", { text: "Storage" }),
+      h("div", {}, h("div", { class: "bar " + (a.quota.state || "normal") }, fill),
+        h("div", { class: "hint", text: fmtBytes(a.quota.used) + " of " + fmtBytes(a.quota.total) + " used (" + pct + "%)" + (a.quota.state && a.quota.state !== "normal" ? " — " + a.quota.state : "") }))));
+  } else if (a.quota) {
+    card.append(row("Storage", fmtBytes(a.quota.used) + " used (no limit)"));
+  }
+  for (const e of a.errors || []) card.append(h("p", { class: "inline-err", text: e }));
+  const btns = h("div", { class: "row" },
+    h("button", { class: "btn", disabled: !a.server || a.mode === "none", onclick: () => act(() => post("open", { kind: "web" })) }, "Open OpenCloud in Browser"),
+    h("button", { class: "btn", onclick: () => go("account") }, "Refresh"));
+  if (a.mode === "none" || a.signedOut) btns.append(h("button", { class: "btn primary", onclick: () => act(() => post("setup"), "Continue in the dialog and browser") }, "Sign In…"));
+  else if (a.mode === "oidc") btns.append(h("button", { class: "btn danger", onclick: () => {
+    if (confirm("Sign out of OpenCloud?\n\nThe drive is disconnected and syncing stops. Your kept folders stay on this computer. Sign in again to resume.")) act(() => post("signout"), "Signed out").then(() => go("account"));
+  } }, "Sign Out"));
+  card.append(btns);
+  box.replaceWith(card);
+}
+
+// ---- field helpers for the settings pages
+
+function textField(label, key, hint, opts) {
+  opts = opts || {};
+  const inp = h("input", { type: "text", value: S.config[key] || "", placeholder: opts.placeholder || "", disabled: !!opts.disabled });
+  inp.addEventListener("input", () => saveSoon(key, { [key]: inp.value }));
+  return h("div", { class: "row" }, h("label", { text: label }), inp, hint ? h("span", { class: "hint", text: hint }) : null);
+}
+function numField(label, key, hint, min, max) {
+  const inp = h("input", { type: "number", value: S.config[key], min, max });
+  inp.addEventListener("input", () => { if (inp.value !== "") saveSoon(key, { [key]: parseInt(inp.value, 10) }); });
+  return h("div", { class: "row" }, h("label", { text: label }), inp, hint ? h("span", { class: "hint", text: hint }) : null);
+}
+function selectField(label, key, options, hint) {
+  const sel = h("select", {});
+  const cur = String(S.config[key]);
+  const opts = options.some(o => String(o[0]) === cur) ? options : options.concat([[S.config[key], String(S.config[key])]]);
+  for (const [v, t] of opts) { const o = h("option", { value: String(v), text: t }); if (String(v) === cur) o.selected = true; sel.append(o); }
+  sel.addEventListener("change", () => save({ [key]: typeof S.config[key] === "number" ? parseInt(sel.value, 10) : sel.value }));
+  return h("div", { class: "row" }, h("label", { text: label }), sel, hint ? h("span", { class: "hint", text: hint }) : null);
+}
+function checkField(label, key, hint) {
+  const cb = h("input", { type: "checkbox" }); cb.checked = !!S.config[key];
+  cb.addEventListener("change", () => save({ [key]: cb.checked }));
+  return h("div", { class: "row" }, h("label", { text: label }), cb, hint ? h("span", { class: "hint", text: hint }) : null);
+}
+
+// ---- Sync
+
+async function syncPage(main, r) {
+  header(main, "Sync");
+  await refreshState();
+  if (r !== render) return;
+  const kept = S.folders.length > 0;
+  main.append(h("div", { class: "card" },
+    selectField("Sync every", "syncIntervalSeconds", [[60,"1 minute"],[300,"5 minutes"],[900,"15 minutes"],[1800,"30 minutes"],[3600,"1 hour"]]),
+    textField("Local folder", "localRoot", kept ? "Can't change while folders are kept here. Stop keeping them first." : "New kept folders are placed inside this folder.", { disabled: kept }),
+    numField("Parallel transfers", "transfers", "How many files copy at once (1 to 32).", 1, 32),
+    numField("Parallel checks", "checkers", "How many files are compared at once (1 to 64).", 1, 64)));
+  const ta = h("textarea", { spellcheck: "false" }); ta.value = S.config.commonFilters.join("\n");
+  main.append(h("div", { class: "card" }, h("h3", { text: "Common excludes" }),
+    h("p", { class: "hint", text: "Files matching these rules are never synced, in any kept folder. One rule per line, like - *.tmp (exclude) or + keep.txt (include)." }),
+    ta, h("div", { class: "row" },
+      h("button", { class: "btn", onclick: () => save({ commonFilters: ta.value.split("\n") }) }, "Save Excludes"),
+      h("button", { class: "btn", onclick: () => { ta.value = S.defaults.commonFilters.join("\n"); save({ commonFilters: S.defaults.commonFilters }); } }, "Restore Defaults"))));
+  const blocked = h("div", { class: "card" }, h("h3", { text: "File names the server doesn't accept" }), h("p", { class: "hint", text: "Loading…" }));
+  main.append(blocked);
+  try {
+    const a = await get("account");
+    if (r !== render) return;
+    blocked.replaceChildren(h("h3", { text: "File names the server doesn't accept" }),
+      a.blockedNames.length ? h("p", { class: "path", text: a.blockedNames.join("   ") }) : h("p", { class: "hint", text: a.mode === "oidc" ? "None reported." : "Only shown when signed in with the browser." }),
+      h("p", { class: "hint", text: "Read-only; set by the server's administrator." }));
+  } catch (e) { blocked.replaceChildren(h("p", { class: "inline-err", text: e.message })); }
+}
+
+// ---- Drive
+
+function drive(main, r) {
+  header(main, "Drive");
+  refreshState().then(() => {
+    if (r !== render) return;
+    const isWin = navigator.userAgent.includes("Windows");
+    main.append(h("div", { class: "card" },
+      checkField("Show the OpenCloud drive", "mountEnabled", "Mounts your OpenCloud files as a drive that downloads files when you open them."),
+      textField("Mount location", "mountPoint", isWin ? "A drive letter like O: or an empty folder." : "An empty folder."),
+      textField("Volume name", "volumeName"),
+      selectField("Cache size limit", "cacheMaxSize", [["5G","5 GB"],["10G","10 GB"],["20G","20 GB"],["50G","50 GB"],["100G","100 GB"]]),
+      selectField("Keep cached files for", "cacheMaxAge", [["24h","24 hours"],["72h","3 days"],["168h","7 days"]])));
+    main.append(h("div", { class: "card", id: "drive-live" }));
+    drawDriveButtons();
+    pollDrive(r);
+    timers.push(setInterval(() => pollDrive(r), 2000));
+    timers.push(setInterval(refreshState, 3000));
+  });
+}
+function drawDriveButtons() {
+  const box = document.getElementById("drive-live"); if (!box) return;
+  const live = box.querySelector("#drive-stats");
+  const st = S.status;
+  const btns = h("div", { class: "row" },
+    st.driveMounted ? h("button", { class: "btn", onclick: () => act(() => post("eject"), "Drive ejected") }, "Eject Drive")
+      : h("button", { class: "btn primary", disabled: !S.config.mountEnabled || st.driveWanted, onclick: () => act(() => post("connect")) }, st.driveWanted ? "Connecting…" : "Connect Drive"),
+    h("button", { class: "btn", disabled: !S.config.mountEnabled, onclick: () => act(() => post("open", { kind: "drive" })) }, "Open Drive Folder"));
+  box.replaceChildren(h("h3", { text: st.driveMounted ? "Drive is connected" : "Drive is not connected" }), live || h("div", { id: "drive-stats" }), btns);
+}
+async function pollDrive(r) {
+  let d;
+  try { d = await get("drive"); } catch (e) { return; }
+  const el = document.getElementById("drive-stats");
+  if (r !== render || !el) return;
+  if (!d.mounted) { el.replaceChildren(h("p", { class: "hint", text: "Connect the drive to see cache use and uploads." })); return; }
+  if (d.error) { el.replaceChildren(h("p", { class: "hint", text: d.error })); return; }
+  el.replaceChildren(h("div", { class: "row" }, h("label", { text: "Cache in use" }), h("span", { text: fmtBytes(d.cacheBytes) })),
+    h("div", { class: "row" }, h("label", { text: "Uploading" }), h("span", { text: d.uploadsInProgress + " file(s)" })),
+    h("div", { class: "row" }, h("label", { text: "Waiting to upload" }), h("span", { text: d.uploadsQueued + " file(s)" })));
+}
+
+// ---- General
+
+function general(main, r) {
+  header(main, "General");
+  refreshState().then(() => {
+    if (r !== render) return;
+    const c = S.config;
+    if (c.useTunnel) main.append(h("div", { class: "card" }, numField("Keep this much server memory free (MiB)", "minServerAvailableMiB", "Sync is skipped when the server has less memory available. 0 turns the check off.", 0, 4194304)));
+    main.append(h("div", { class: "card" }, h("h3", { text: "Settings file" }),
+      h("p", { class: "hint", text: "Everything here is saved to a settings file. You never need to edit it by hand." }),
+      h("div", { class: "path", text: S.configFile }),
+      h("div", { class: "row" },
+        h("button", { class: "btn", onclick: () => act(() => post("reload"), "Settings reloaded") }, "Reload Settings"),
+        h("button", { class: "btn", onclick: () => act(() => post("open", { kind: "config" })) }, "Open Settings File"))));
+    const adv = h("details", {}, h("summary", { text: "Advanced" }),
+      h("div", { class: "card" },
+        h("h3", { text: "SSH tunnel" }),
+        h("p", { class: "hint", text: "Only for servers reached through an SSH tunnel. Most people leave this off." }),
+        checkField("Use an SSH tunnel", "useTunnel"),
+        textField("SSH host", "sshHost", "As in your ssh config, for example myserver."),
+        numField("Server port", "serverPort", "OpenCloud's port on the server.", 1, 65535),
+        numField("Local port", "localPort", "Needs a restart of OpenCloud Bar.", 1024, 65000),
+        h("h3", { text: "rclone" }),
+        textField("rclone path", "rclonePath", "Leave empty to use the rclone that comes with the app.")));
+    main.append(adv);
+  });
+}
+
+// ---- Logs
+
+let logName = "app.log";
+async function logs(main, r) {
+  header(main, "Logs");
+  let src;
+  try { src = await get("logs"); } catch (e) { main.append(h("p", { class: "inline-err", text: e.message })); return; }
+  if (r !== render) return;
+  if (!src.some(s => s.name === logName)) logName = "app.log";
+  const sel = h("select", { onchange: () => { logName = sel.value; stick = true; load(); } },
+    src.map(s => { const o = h("option", { value: s.name, text: s.label }); if (s.name === logName) o.selected = true; return o; }));
+  const pre = h("pre", { class: "log" });
+  let stick = true;
+  pre.addEventListener("scroll", () => { stick = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20; });
+  main.append(h("div", { class: "row" }, sel,
+    h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(pre.textContent); toast("Copied"); } catch (e) { toast("Couldn't copy", true); } } }, "Copy"),
+    h("button", { class: "btn", onclick: () => act(() => post("open", { kind: "logs" })) }, "Open Log Folder"),
+    h("button", { class: "btn danger", onclick: async () => {
+      if (!confirm("Clear this log? The file is emptied and can't be recovered.")) return;
+      try { await post("log/clear?name=" + encodeURIComponent(logName)); toast("Cleared"); } catch (e) { toast(e.message, true); }
+      load();
+    } }, "Clear…")), pre);
+  async function load() {
+    if (r !== render || document.hidden) return;
+    let d;
+    try { d = await get("log?name=" + encodeURIComponent(logName) + "&lines=3000"); } catch (e) { return; }
+    if (r !== render) return;
+    const frag = document.createDocumentFragment();
+    for (const line of d.text.split("\n")) {
+      const cls = /\b(ERROR|CRITICAL|failed|error)\b/.test(line) ? "err" : /\b(WARN|NOTICE|warning)\b/.test(line) ? "warn" : "";
+      frag.append(h("div", { class: cls, text: line || " " }));
+    }
+    pre.replaceChildren(frag);
+    if (stick) pre.scrollTop = pre.scrollHeight;
+  }
+  load();
+  timers.push(setInterval(load, 2000));
+}
+
+// ---- start
+
+window.addEventListener("hashchange", () => { const id = location.hash.slice(1); if (id !== section && SECTIONS.some(s => s[0] === id)) go(id); });
+(async () => {
+  try { S = await get("state"); } catch (e) { banner(e.message); return; }
+  const id = location.hash.slice(1);
+  go(SECTIONS.some(s => s[0] === id) ? id : "folders");
+})();
+</script>
+</body>
+</html>

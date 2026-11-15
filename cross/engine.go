@@ -998,7 +998,7 @@ func (e *Engine) Status() Status {
 	case st.ConfigError != "":
 		st.Summary = st.ConfigError
 	case !e.cfg.Configured():
-		st.Summary = "Not set up: choose Set Up / Sign In… (or edit " + configFile() + ")"
+		st.Summary = "Not set up: choose Set Up / Sign In…"
 	case st.SignedOut:
 		st.Summary = signedOutMessage
 	case e.syncing:
