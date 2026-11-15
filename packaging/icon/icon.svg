@@ -20,6 +20,7 @@
       <circle cx="690" cy="580" r="110"/>
       <rect x="400" y="560" width="290" height="130"/>
     </g>
+    <g transform="translate(-5,-27)">
     <g stroke="#2E6BE6" stroke-width="26" stroke-linecap="round" fill="none">
       <path d="M472.3,560.4 A72,72 0 0 1 607.7,560.4"/>
       <path d="M607.7,609.6 A72,72 0 0 1 472.3,609.6"/>
@@ -27,6 +28,7 @@
     <g fill="#2E6BE6">
       <polygon points="621.4,598.0 639.7,548.8 575.7,572.0"/>
       <polygon points="458.6,572.0 440.3,621.2 504.3,597.9"/>
+    </g>
     </g>
   </g>
 </svg>
