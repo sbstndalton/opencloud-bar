@@ -84,7 +84,7 @@ cd cross && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "-H window
 
 Start it with `opencloud-bar run`, or `opencloud-bar run --no-tray` on a server. Then control it with `status`, `sync`, `keep PATH [--local DIR]`, `unkeep PATH`, `repair PATH`, `allow-delete PATH`, `connect`, `eject`, `reload` and `quit`. On Windows, build a second copy without `-H windowsgui` to use the commands from a terminal.
 
-Windows Smart App Control blocks unsigned builds, so use the signed build from the **Windows (signed)** workflow. See [docs/windows-signing.md](docs/windows-signing.md). The Windows build hasn't been tested end to end yet.
+Download Windows builds from [Releases](https://github.com/sbstndalton/opencloud-bar/releases). They are built by the **Windows** workflow and signed through SignPath (see [Code signing policy](#code-signing-policy)). The Windows build hasn't been tested end to end yet.
 
 Extra settings for the port:
 
@@ -101,3 +101,16 @@ Extra settings for the port:
 ## License
 
 MIT
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+Windows binaries are built from this repository by the [Windows workflow](.github/workflows/windows.yml) on GitHub-hosted runners, and each release is approved by hand before it is signed.
+
+- Committers and reviewers: [sbstndalton](https://github.com/sbstndalton)
+- Approvers: [sbstndalton](https://github.com/sbstndalton)
+
+## Privacy
+
+This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it. It only connects to the OpenCloud server and SSH host that you put in its settings file.

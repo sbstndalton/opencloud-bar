@@ -7,7 +7,7 @@ struct KeptFolder: Codable, Hashable, Identifiable {
     var path: String
     /// Name of the bisync state (work dir, marker, filters, log). Must be unique.
     var stateName: String
-    /// Extra rclone filter lines for this folder only, e.g. "- /Noevia backup/**".
+    /// Extra rclone filter lines for this folder only, e.g. "- /Old backups/**".
     var extraFilters: [String] = []
 
     var id: String { path }

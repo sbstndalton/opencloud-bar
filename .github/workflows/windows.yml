@@ -1,0 +1,99 @@
+# Builds the Windows binaries. When SignPath is set up, they are signed through SignPath
+# (free code signing for open source; certificate by SignPath Foundation) so Smart App Control accepts them.
+#
+# SignPath settings (Settings > Secrets and variables > Actions):
+#   secret   SIGNPATH_API_TOKEN        API token of a SignPath user with submitter rights
+#   variable SIGNPATH_ORGANIZATION_ID
+#   variable SIGNPATH_PROJECT_SLUG     default: opencloud-bar
+#   variable SIGNPATH_POLICY_SLUG      default: release-signing
+# Without the token the workflow still builds, and releases get unsigned binaries.
+name: Windows
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      HAS_SIGNPATH: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cross/go.mod
+          cache-dependency-path: cross/go.sum
+
+      - name: Version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF_NAME.Substring(1) } else { '0.0.0' }
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Build
+        shell: pwsh
+        working-directory: cross
+        env:
+          CGO_ENABLED: "0"
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          go run github.com/tc-hib/go-winres@v0.3.3 simply --arch amd64 `
+            --product-name "OpenCloud Bar" --file-description "OpenCloud Bar" `
+            --product-version "${{ steps.ver.outputs.version }}" --file-version "${{ steps.ver.outputs.version }}" `
+            --copyright "Copyright (c) 2026 Sebastian Dalton, MIT License"
+          New-Item -ItemType Directory -Force ..\dist | Out-Null
+          go build -trimpath -ldflags "-s -w -H windowsgui" -o ..\dist\opencloud-bar.exe .
+          go build -trimpath -ldflags "-s -w" -o ..\dist\opencloud-bar-cli.exe .
+
+      - name: Upload unsigned
+        id: unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencloud-bar-windows-amd64-unsigned
+          path: dist/*.exe
+
+      - name: Sign with SignPath
+        if: env.HAS_SIGNPATH == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'opencloud-bar' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG || 'release-signing' }}
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 86400
+          output-artifact-directory: signed
+
+      - name: Verify signatures
+        if: env.HAS_SIGNPATH == 'true'
+        shell: pwsh
+        run: |
+          Get-ChildItem signed\*.exe | ForEach-Object {
+            $s = Get-AuthenticodeSignature $_.FullName
+            "{0}: {1} ({2})" -f $_.Name, $s.Status, $s.SignerCertificate.Subject
+            if ($s.Status -ne 'Valid') { exit 1 }
+          }
+          Remove-Item dist\*.exe; Copy-Item signed\*.exe dist\
+
+      - name: Upload signed
+        if: env.HAS_SIGNPATH == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencloud-bar-windows-amd64
+          path: dist/*.exe
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
