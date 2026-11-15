@@ -11,6 +11,10 @@ The first stable release. It gathers the reliability work and features of 0.4 an
 ### Added
 - **Universal macOS app:** one download runs natively on both Apple silicon and Intel Macs. The app and the bundled rclone both contain both architectures.
 - Release notes on GitHub come from this changelog, followed by GitHub's generated notes. A tag with a `-` (for example `v1.1.0-beta.1`) is published as a pre-release; a plain `vX.Y.Z` tag becomes the latest release.
+- **Merge backups:** a first sync, a Repair and an automatic merge keep the older copy of every file they replace: in OpenCloud under `.opencloud-bar-backups/<folder>/<date and time>/`, and on this computer under `backups/` in the sync state folder (removed after 30 days). The backup folder is never synced and can't be kept.
+- A folder that waits for Repair after drifting out of sync tries a plain sync each interval, and needs no repair once that works.
+- Windows: a clear message when WinFsp is missing, instead of a drive that silently never appears.
+- Linux packages recommend `libnotify-bin` (deb) or `libnotify` (rpm) for notifications.
 
 ### Changed
 - The README was rewritten for 1.0. New sections cover:
@@ -21,11 +25,19 @@ The first stable release. It gathers the reliability work and features of 0.4 an
 
 ### Fixed
 - Windows and Linux: **About OpenCloud Bar** in the tray now switches an already open settings window to About. Before, it did nothing.
+- **An empty or missing copy on this computer** (an unplugged disk, a moved folder) is no longer offered as a "large deletion" to apply to OpenCloud. The folder says "This computer's copy of “X” is empty or missing — reconnect the disk or Stop Keeping". Allow Large Deletion checks both sides again before it runs, and its dialog says on which side the files were deleted.
+- The automatic-merge notification said "nothing was deleted", but a merge replaces the older copy of a file. Those copies are now kept (see Merge backups) and the text says where.
+- An automatic merge only runs if its once-a-day record could be saved. A merge that was interrupted doesn't count toward the daily limit.
+- Windows and Linux: Pause, Keep, Stop Keeping, sign-in and the settings page each change only their own settings, so one no longer undoes another's change, and settings of other versions inside kept folders are kept. A running sync uses its own copy of the settings.
+- A failed update check is retried after 15 minutes (doubling, up to 6 hours) instead of counting as the day's check. The update notification isn't used up while notifications are off.
+- macOS: the single-instance lock is no longer inherited by rclone and ssh; two notifications at once no longer lose the second while permission is asked; the sign-in is saved under the same lock as token refreshes; a sync that ignores SIGTERM after a timeout or on Quit is killed.
+- Per-folder **Sync Now** (also in the menu's problem submenu) is disabled while syncing is paused.
+- Linux without zenity: Quit while files may still be uploading keeps running and says so in a notification, with `opencloud-bar quit --force` to quit anyway.
 
 ### Highlights since 0.3
-- **Sync recovery:** when the two sides drift out of sync, a folder is merged automatically (the newer copy of each file wins, nothing is deleted), at most once per folder a day. Interrupted syncs resume without a repair. The menu says why a folder needs attention.
+- **Sync recovery:** when the two sides drift out of sync, a folder is merged automatically (the newer copy of each file wins; the older copy is kept in a backup), at most once per folder a day. Interrupted syncs resume without a repair. The menu says why a folder needs attention.
 - **Safety:**
-  - The large-deletion override is never offered when the folder is missing or empty in OpenCloud.
+  - The large-deletion override is never offered when the folder is missing or empty on either side.
   - Quit and Sign Out ask first while files are still uploading.
   - The drive's control port needs a per-launch password.
   - Only one copy of the macOS app runs at a time.
@@ -76,7 +88,7 @@ The first stable release. It gathers the reliability work and features of 0.4 an
 - The version is stamped into every build and shown in Settings, and there is an `opencloud-bar version` command.
 
 ### Changed
-- When the two sides' listings drift apart ("out of sync"), the folder is merged automatically (newer wins, nothing deleted), at most once per folder in 24 hours. After that, it waits for **Repair**.
+- When the two sides' listings drift apart ("out of sync"), the folder is merged automatically (newer wins; no file is deleted, but the older copy of a changed file is replaced, which 1.0 keeps in a backup), at most once per folder in 24 hours. After that, it waits for **Repair**.
   - Merges now pass `--resync` explicitly.
   - Merges keep rclone's final check on, so a merge that didn't converge is caught right away.
 - Interrupted syncs (quit, sleep, timeout) resume on the next run without a repair. On macOS a timed-out sync is stopped after a further 60 s.

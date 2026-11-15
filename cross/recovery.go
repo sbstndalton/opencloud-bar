@@ -1,8 +1,11 @@
 package main
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	pathpkg "path"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -106,3 +109,69 @@ func driftReason(path, note string) string {
 }
 
 const missingRemoteText = "Folder is missing or empty in OpenCloud"
+
+// missingLocalText is shown when this computer's copy vanished (an unplugged disk, a moved
+// folder). Never offer the large-deletion override then: it would empty the server copy.
+func missingLocalText(name string) string {
+	return "This computer's copy of “" + name + "” is empty or missing — reconnect the disk or Stop Keeping"
+}
+
+// localMissingOrEmpty is true when dir doesn't exist or holds no files (empty folders and
+// .DS_Store don't count). It stops at the first real file.
+func localMissingOrEmpty(dir string) bool {
+	if _, err := os.Stat(dir); err != nil {
+		return true
+	}
+	found := errors.New("found")
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // unreadable parts: keep looking elsewhere
+		}
+		if !d.IsDir() && d.Name() != ".DS_Store" {
+			return found
+		}
+		return nil
+	})
+	return err != found
+}
+
+// Merges (first sync, Repair, automatic merge) keep every copy they overwrite: the older copy
+// goes to a dated backup folder, on this computer under the state folder and in OpenCloud
+// under backupFolderName at the top of the drive. Local backups are pruned after 30 days.
+const (
+	backupFolderName = ".opencloud-bar-backups"
+	backupKeep       = 30 * 24 * time.Hour
+	backupStampFmt   = "20060102T150405Z"
+)
+
+// backupFilter keeps the backup folder out of every sync.
+const backupFilter = "- " + backupFolderName + "/**"
+
+func backupStamp(now time.Time) string { return now.UTC().Format(backupStampFmt) }
+
+// localBackupDir is <stateDir>/backups/<stateName>/<stamp>.
+func localBackupDir(stateDir, stateName, stamp string) string {
+	return filepath.Join(expand(stateDir), "backups", stateName, stamp)
+}
+
+// remoteBackupDir is <remote root>/.opencloud-bar-backups/<stateName>/<stamp> (the same remote
+// as the folder, outside it, as rclone requires).
+func remoteBackupDir(remoteSpec, stateName, stamp string) string {
+	return remoteSpec + backupFolderName + "/" + stateName + "/" + stamp
+}
+
+// pruneBackups removes this computer's backups of a folder older than 30 days (by the stamp
+// in their name; folders with other names are left alone).
+func pruneBackups(stateDir, stateName string, now time.Time) {
+	dir := filepath.Join(expand(stateDir), "backups", stateName)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, en := range entries {
+		t, err := time.Parse(backupStampFmt, en.Name())
+		if err == nil && en.IsDir() && now.Sub(t) > backupKeep {
+			_ = os.RemoveAll(filepath.Join(dir, en.Name()))
+		}
+	}
+}

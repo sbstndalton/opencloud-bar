@@ -6,12 +6,12 @@ A small menu-bar and tray app for [OpenCloud](https://opencloud.eu) on macOS, Wi
 
 - **On-demand drive.** Your whole OpenCloud space appears as a Finder volume on the Mac, a drive letter such as `O:` on Windows, or a folder on Linux. Files download only when you open them. They are cached (20 GB by default) and removed again after a few days unused.
 - **Kept folders.** Pick folders to keep as real local copies, synced both ways every few minutes. Stopping keeping one syncs it a last time, then moves the local copy out of the way. The folder stays in OpenCloud.
-  - If the two sides drift out of sync, the folder is merged automatically: the newer copy of each file wins and nothing is deleted.
+  - If the two sides drift out of sync, the folder is merged automatically: the newer copy of each file wins, and the older copy is kept in a backup folder (see [Safety](#safety)).
   - Anything that needs you says why in the menu.
 - **Browser sign-in.** You sign in on your server's own page, the same way OpenCloud's desktop client does it (OpenID Connect with PKCE). There is no app token, SSH key or rclone set-up.
 - **Pause and resume** syncing. The drive keeps working while paused.
 - **Notifications** when a folder needs attention, was merged automatically, when you are signed out, and when an update is available. You get one per change, never repeated.
-- **Update checks** once a day (they can be turned off), plus **Check for Updates…**.
+- **Update checks** once a day (they can be turned off), plus **Check for Updates…**. A new version is announced, not installed: the app opens the release page and you download it yourself.
 - **Settings in a window:** native on the Mac, a small app window on Windows and Linux. It covers kept folders, account and storage, sync, drive, general settings, logs and About. Live activity shows in the menu, for example "Syncing “School” (2 of 3) · 12 files…".
 
 ## Download
@@ -92,10 +92,14 @@ On Windows there are two programs in one folder:
 
 ## Safety
 
-- A folder's first sync, a Repair and an automatic merge all merge both sides: the newer copy of each file wins and nothing is deleted. An automatic merge happens at most once per folder a day; after that, the folder waits for you to choose **Repair**.
+- A folder's first sync, a Repair and an automatic merge all merge both sides: the newer copy of each file wins. No file is deleted, but the older copy of a file is replaced, so a merge keeps it first:
+  - in OpenCloud, in `.opencloud-bar-backups/<folder>/<date and time>/` at the top of your space (shown on the drive, never synced; delete old ones in the web UI when you no longer need them);
+  - on this computer, in `backups/<folder>/<date and time>/` in the sync state folder (`stateDir`), removed after 30 days.
+- An automatic merge happens at most once per folder a day; after that, the folder waits for you to choose **Repair**. Until then, each sync interval tries a plain sync, and if that works the folder needs no repair after all.
 - A sync stopped by Quit, sleep or a timeout resumes the next time without a repair.
 - If more than half a folder's files would be deleted, the sync stops and the folder offers **Allow Large Deletion…**.
-  - That override is never offered when the folder is missing or empty in OpenCloud. There, applying the "deletion" would empty your local copy.
+  - The dialog says on which side the files were deleted.
+  - That override is never offered when the copy on either side is missing or empty: for example the folder is gone from OpenCloud, or the disk with this computer's copy isn't connected. There, applying the "deletion" would empty the other copy. The folder says so ("…is empty or missing — reconnect the disk or Stop Keeping") instead.
 - **Stop Keeping** runs a final sync first, and only moves the local copy if that sync succeeds. It goes to the Trash (Mac and Linux), or to "Removed by OpenCloud Bar" in your user folder (Windows).
 - Eject, Quit and Sign Out wait for files written to the drive to finish uploading. If the app can't tell, they ask first.
 - Ejecting the drive in Finder keeps it ejected until you choose **Connect Drive**. If rclone crashes, the drive is mounted again automatically.
@@ -111,6 +115,8 @@ On Windows there are two programs in one folder:
 
 Only the refresh token is kept. The short-lived access token is cached next to the settings in `auth.json` (0600). Your password never reaches the app: you type it on your server's own sign-in page.
 
+**Security trade-off of the file (macOS, and Linux without a Secret Service):** file permissions keep other users out, but not other programs running as you. Any program you run can read the token, as it can read `rclone.conf`, your SSH keys or browser data. The Keychain would ask before another program reads it, but not reliably for an ad-hoc-signed app (see above). If someone may have copied it, choose **Sign Out** (it deletes the file), and sign out of other sessions in OpenCloud's web UI to revoke it on the server. Backups of your home folder (Time Machine, for example) include the file.
+
 ## Uninstall
 
 - **macOS:**
@@ -123,16 +129,16 @@ Only the refresh token is kept. The short-lived access token is cached next to t
   2. If you use the service, run `systemctl --user disable --now opencloud-bar`.
   3. Run `sudo apt remove opencloud-bar`, or `sudo dnf remove opencloud-bar`.
 
-**What stays:** your kept folders (by default `~/OpenCloud/Personal`, untouched) and the settings folder. Delete the settings folder by hand for a clean slate. It holds the settings, the sync state, the logs and the drive cache, and on macOS also the sign-in file if you didn't sign out:
-- **macOS:** `~/Library/Application Support/OpenCloudBar`, `~/Library/Logs/OpenCloudBar` and `~/Library/Caches/OpenCloudBar`.
+**What stays:** your kept folders (by default `~/OpenCloud/Personal`, untouched), the merge backups in OpenCloud (`.opencloud-bar-backups`), and the settings folder. Delete the settings folder by hand for a clean slate. It holds the settings, the sync state and local merge backups, the logs and the drive cache, and on macOS also the sign-in file if you didn't sign out:
+- **macOS:** `~/Library/Application Support/OpenCloudBar` (settings, sync state, backups, drive cache in `vfs-cache`, sign-in) and `~/Library/Logs/OpenCloudBar`. `~/Library/Caches/OpenCloudBar` only holds a lock file and, with an SSH tunnel, its control socket. With an SSH tunnel there is also `~/Library/LaunchAgents/<bundle id>.tunnel.plist`.
 - **Windows:** `%AppData%\OpenCloudBar`.
 - **Linux:** `~/.config/OpenCloudBar`.
 
 ## Known limits
 
-- **Builds aren't notarized (macOS) or code-signed (Windows) yet**, so the first launch needs the steps above. Notarization needs a paid Apple Developer ID. Windows signing through SignPath is being set up.
+- **Builds aren't notarized (macOS) or code-signed (Windows) yet**, so the first launch needs the steps above. Notarization needs a paid Apple Developer ID. Windows signing through SignPath is being set up. Once it is, it covers the programs inside the installer (`OpenCloud Bar.exe` and `opencloud-bar.exe`); the installer `OpenCloud-Bar-Setup-<version>.exe` itself is still unsigned, so SmartScreen may still warn when you run it.
 - **Linux tray:** the tray icon uses StatusNotifier. GNOME shows it only with the AppIndicator extension; KDE, Xfce, Cinnamon and most others show it as is. Without a tray the app still runs (`opencloud-bar run --no-tray`) and the settings page and command line work.
-- **Linux dialogs** use `zenity` and notifications use `notify-send`. Without zenity, sign in and keep folders from the settings page instead.
+- **Linux dialogs** use `zenity` and notifications use `notify-send` (package `libnotify-bin` or `libnotify`; the packages recommend both). Without zenity, sign in and keep folders from the settings page instead. Quit then only quits when nothing is still uploading; otherwise a notification says so, and `opencloud-bar quit --force` quits anyway.
 - One account and one OpenCloud space (your personal files) per computer. Shared spaces aren't kept yet.
 - There is no conflict viewer. When both sides changed, the newer copy wins and the other is kept next to it with a number added to its name.
 
@@ -218,7 +224,7 @@ On the Mac the tunnel runs as a per-user launchd agent that the app creates and 
 
 Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
 
-Windows binaries are built from this repository by the [Release workflow](.github/workflows/release.yml) on GitHub-hosted runners, and each release is approved by hand before it is signed.
+Windows binaries are built from this repository by the [Release workflow](.github/workflows/release.yml) on GitHub-hosted runners, and each release is approved by hand before it is signed. Signing covers the two programs (`OpenCloud Bar.exe`, `opencloud-bar.exe`); the installer that contains them is not signed yet.
 
 - Committers and reviewers: [sbstndalton](https://github.com/sbstndalton)
 - Approvers: [sbstndalton](https://github.com/sbstndalton)

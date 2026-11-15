@@ -567,7 +567,7 @@ func TestEngineEnvCarriesTokenCommand(t *testing.T) {
 	testEnv(t)
 	oidc := &Engine{cfg: Config{ServerURL: "https://c.example.com", DavPath: "/remote.php/dav/files/a"}}
 	found := false
-	for _, kv := range oidc.env() {
+	for _, kv := range envFor(oidc.cfg) {
 		if strings.HasPrefix(kv, "RCLONE_WEBDAV_BEARER_TOKEN_COMMAND=") && strings.HasSuffix(kv, ` token`) && strings.Contains(kv, `="`) {
 			found = true
 		}
@@ -576,7 +576,7 @@ func TestEngineEnvCarriesTokenCommand(t *testing.T) {
 		t.Fatal("OIDC engine env lacks the bearer token command")
 	}
 	legacy := &Engine{cfg: Config{SSHHost: "h", DavPath: "/remote.php/dav/files/a", RcloneRemote: "opencloud"}}
-	for _, kv := range legacy.env() {
+	for _, kv := range envFor(legacy.cfg) {
 		if strings.HasPrefix(kv, "RCLONE_WEBDAV_BEARER_TOKEN_COMMAND=") && !strings.Contains(strings.Join(os.Environ(), "\n"), kv) {
 			t.Fatal("legacy engine env must not set a token command")
 		}

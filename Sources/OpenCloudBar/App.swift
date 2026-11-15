@@ -43,7 +43,9 @@ enum SingleInstance {
             .appendingPathComponent("OpenCloudBar")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let path = dir.appendingPathComponent("instance.lock").path
-        let f = open(path, O_RDWR | O_CREAT, 0o600)
+        // O_CLOEXEC: rclone, ssh and other children must not inherit the lock, or a child that
+        // outlives the app would keep the next launch from starting.
+        let f = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
         guard f >= 0 else { return true }   // can't tell: don't refuse to start
         if flock(f, LOCK_EX | LOCK_NB) != 0 {
             close(f)
@@ -145,7 +147,7 @@ struct MenuContent: View {
                         case .bigDeletion:
                             Button("Allow Large Deletion…") { model.allowBigDeletion(f) }.disabled(model.syncing)
                         default:
-                            Button("Sync Now") { model.syncNow(f) }.disabled(model.syncing || model.needsSignIn)
+                            Button("Sync Now") { model.syncNow(f) }.disabled(model.syncing || model.needsSignIn || model.config.paused)
                         }
                         Button("Open in Finder") { model.openLocal(f) }
                         Button("Show in Settings…") { model.openSettings(.folders) }

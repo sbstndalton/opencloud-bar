@@ -149,6 +149,18 @@ type updater struct {
 	now   func() time.Time
 	state UpdateState
 	http  *http.Client
+	// A failed check is retried with a growing wait (it doesn't count as the daily check).
+	retryAt  time.Time
+	failures int
+}
+
+// updateRetry is the wait after the nth failed check in a row: 15 min, doubling, at most 6 h.
+func updateRetry(n int) time.Duration {
+	d := 15 * time.Minute
+	for i := 1; i < n && d < 6*time.Hour; i++ {
+		d *= 2
+	}
+	return min(d, 6*time.Hour)
 }
 
 func newUpdater() *updater {
@@ -176,7 +188,10 @@ func (u *updater) due() bool {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	now := u.now()
-	return !u.state.Checking && (u.state.CheckedAt.IsZero() || now.Sub(u.state.CheckedAt) >= updateInterval || u.state.CheckedAt.After(now))
+	if u.state.Checking || now.Before(u.retryAt) {
+		return false
+	}
+	return (u.state.CheckedAt.IsZero() || now.Sub(u.state.CheckedAt) >= updateInterval || u.state.CheckedAt.After(now))
 }
 
 // Check asks GitHub now and returns the new state.
@@ -193,14 +208,18 @@ func (u *updater) Check(ctx context.Context) UpdateState {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.state.Checking = false
-	u.state.CheckedAt = u.now()
 	if err != nil {
+		// Not a check: the daily check is still due, after a wait so it isn't retried every tick.
 		u.state.Error = err.Error()
-	} else {
-		u.state.Error = ""
-		u.state.Latest, u.state.URL = strings.TrimPrefix(r.Tag, "v"), r.URL
-		u.state.Available = updateAvailable(r.Tag, version)
+		u.failures++
+		u.retryAt = u.now().Add(updateRetry(u.failures))
+		return u.state
 	}
+	u.state.CheckedAt = u.now()
+	u.failures, u.retryAt = 0, time.Time{}
+	u.state.Error = ""
+	u.state.Latest, u.state.URL = strings.TrimPrefix(r.Tag, "v"), r.URL
+	u.state.Available = updateAvailable(r.Tag, version)
 	if b, err := json.MarshalIndent(u.state, "", "  "); err == nil {
 		_ = os.MkdirAll(filepath.Dir(u.file), 0o700)
 		_ = os.WriteFile(u.file, b, 0o600)

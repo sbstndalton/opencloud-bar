@@ -19,9 +19,9 @@ recommends:
   - zenity
 overrides:
   deb:
-    recommends: [zenity, openssh-client]   # ssh only for legacy SSH-tunnel configs
+    recommends: [zenity, libnotify-bin, openssh-client]   # notify-send; ssh only for legacy SSH-tunnel configs
   rpm:
-    recommends: [zenity, openssh-clients]
+    recommends: [zenity, libnotify, openssh-clients]
 contents:
   - src: ${SRC}/opencloud-bar
     dst: /usr/bin/opencloud-bar

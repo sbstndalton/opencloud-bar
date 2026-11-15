@@ -72,7 +72,7 @@ func signInWith(e *Engine, addr string) {
 		return
 	}
 	// The folder picker browses the drive, which needs a moment to mount.
-	for i := 0; i < 30 && !e.Status().DriveMounted && e.cfg.Mounting(); i++ {
+	for i := 0; i < 30 && !e.Status().DriveMounted && e.config().Mounting(); i++ {
 		time.Sleep(time.Second)
 	}
 	pickAndKeep(e)
@@ -148,7 +148,21 @@ func folderLabelAt(f FolderStatus, now time.Time) string {
 // confirmUploads asks before quitting or signing out while files may still be uploading.
 // It fails closed: an unknown count asks too.
 func confirmUploads(e *Engine, button string) bool {
-	switch n := e.PendingUploads(); {
+	n := e.PendingUploads()
+	if n != 0 && !hasDialogs() {
+		// No way to ask (Linux without zenity): keep running, and say how to go ahead anyway.
+		what := "Files written to the OpenCloud drive may still be uploading"
+		if n > 0 {
+			what = fmt.Sprintf("%d file(s) written to the OpenCloud drive haven't finished uploading", n)
+		}
+		text := what + ", so OpenCloud Bar keeps running. To " + strings.ToLower(strings.TrimSuffix(button, " Anyway")) + " anyway, run: opencloud-bar " + forceCommand(button)
+		e.setMessage(what + "; still running")
+		e.notify()
+		appLog("%s", text)
+		_ = desktopNotify("OpenCloud Bar", text)
+		return false
+	}
+	switch {
 	case n > 0:
 		return dialogConfirm("Files are still uploading",
 			fmt.Sprintf("%d file(s) written to the OpenCloud drive haven't finished uploading. They upload the next time OpenCloud Bar runs.", n), button)
@@ -157,6 +171,14 @@ func confirmUploads(e *Engine, button string) bool {
 			"OpenCloud Bar couldn't check whether files written to the OpenCloud drive have finished uploading. Anything not uploaded yet uploads the next time OpenCloud Bar runs.", button)
 	}
 	return true
+}
+
+// forceCommand is the command line that does button's action without asking.
+func forceCommand(button string) string {
+	if strings.HasPrefix(button, "Sign Out") {
+		return "logout --force"
+	}
+	return "quit --force"
 }
 
 // checkUpdatesNow is the menu's Check for Updates…: always says what it found.

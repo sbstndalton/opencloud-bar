@@ -90,11 +90,11 @@ func planNotifications(ns *notifyState, st Status, autoMerged []string) []note {
 	if len(autoMerged) > 0 {
 		out = append(out, note{
 			Title:   plural(autoMerged, "“%s” was merged automatically", "%d folders were merged automatically"),
-			Body:    "They were out of sync. The newer copy of each file was kept and nothing was deleted.",
+			Body:    "They were out of sync. The newer copy of each file was kept; older copies are kept in the backups (" + backupFolderName + " in OpenCloud, and on this computer).",
 			Section: "folders",
 		})
 		if len(autoMerged) == 1 {
-			out[len(out)-1].Body = "It was out of sync. The newer copy of each file was kept and nothing was deleted."
+			out[len(out)-1].Body = "It was out of sync. The newer copy of each file was kept; older copies are kept in the backups (" + backupFolderName + " in OpenCloud, and on this computer)."
 		}
 	}
 	return out
@@ -129,9 +129,17 @@ func folderNoteText(kind string, fs []FolderStatus) note {
 			detail("Open Settings ▸ Folders and choose Repair. " + list), "folders"}
 	case "deletion":
 		return note{plural(names, "Large deletion blocked in “%s”", "Large deletions blocked in %d folders"),
-			"More than half of the files were deleted on one side. Check, then allow the deletion or restore the files. " + ifMany(one, list), "folders"}
+			"More than half of the files were deleted " + deletionSide(fs, one) + ". Check, then allow the deletion or restore the files. " + ifMany(one, list), "folders"}
 	}
 	return note{plural(names, "Sync failed for “%s”", "Sync failed for %d folders"), detail("OpenCloud Bar tries again at the next sync. " + list), "folders"}
+}
+
+// deletionSide names where a blocked deletion happened ("on this computer", "in OpenCloud").
+func deletionSide(fs []FolderStatus, one bool) string {
+	if one && fs[0].Detail != "" {
+		return fs[0].Detail
+	}
+	return "on one side"
 }
 
 func plural(names []string, one, many string) string {
@@ -180,11 +188,11 @@ func (e *Engine) checkNotifications() {
 	notes := planNotifications(&e.notes, st, merged)
 	on := e.cfg.NotificationsOn() && e.cfgErr == nil
 	e.mu.Unlock()
+	if !on {
+		return // the update notice waits: it is shown once notifications are on again
+	}
 	if n := updateNote(st.Update, filepath.Join(appDir(), "notified-update")); n != nil {
 		notes = append(notes, *n)
-	}
-	if !on {
-		return
 	}
 	for _, n := range notes {
 		e.logLine("notification: %s", n.Title)

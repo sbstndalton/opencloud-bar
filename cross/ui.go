@@ -570,7 +570,7 @@ func (e *Engine) serveOpen(w http.ResponseWriter, r *http.Request) {
 	case "release":
 		// Only this project's release page, as GitHub reported it (checked in fetchLatestRelease).
 		u := e.Status().Update.URL
-		if u == "" {
+		if !strings.HasPrefix(u, releasesPagePrefix) { // also checked when saved; never open anything else
 			u = releasesPagePrefix + "latest"
 		}
 		if err := openURL(u); err != nil {

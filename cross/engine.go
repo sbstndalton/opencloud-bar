@@ -210,7 +210,7 @@ func (e *Engine) refreshStatusLocked() {
 				saved = e.loadLastSuccess()
 			}
 			s.LastSuccess = saved[f.StateName]
-			if r := e.needsRepairReason(f); r != "" {
+			if r := readReason(e.cfg.statePath(f, ".needs-repair")); r != "" {
 				s.State, s.Detail = StNeedsRepair, r
 			}
 			e.status[f.Path] = s
@@ -323,12 +323,13 @@ func (e *Engine) logLine(format string, a ...any) {
 	}
 }
 
-func (e *Engine) env() []string {
+// envFor is the environment for rclone with these settings.
+func envFor(cfg Config) []string {
 	env := os.Environ()
-	if e.cfg.RcloneConfig != "" {
-		env = append(env, "RCLONE_CONFIG="+expand(e.cfg.RcloneConfig))
+	if cfg.RcloneConfig != "" {
+		env = append(env, "RCLONE_CONFIG="+expand(cfg.RcloneConfig))
 	}
-	if e.cfg.OIDC() {
+	if cfg.OIDC() {
 		// rclone runs this at start and again after a 401; see accessToken in auth.go.
 		env = append(env, "RCLONE_WEBDAV_BEARER_TOKEN_COMMAND="+tokenCommand())
 	}
@@ -373,14 +374,15 @@ func (e *Engine) startTunnelLocked() {
 }
 
 func (e *Engine) waitForTunnel() bool {
-	if !e.cfg.Tunnel() {
+	cfg := e.config()
+	if !cfg.Tunnel() {
 		return true
 	}
 	for i := 0; i < 20; i++ {
 		e.mu.Lock()
 		ok := e.tunnelOurs()
 		e.mu.Unlock()
-		if ok && portOpen(e.cfg.LocalPort) {
+		if ok && portOpen(cfg.LocalPort) {
 			return true
 		}
 		time.Sleep(time.Second)
@@ -390,7 +392,9 @@ func (e *Engine) waitForTunnel() bool {
 
 // MARK: drive
 
-func (e *Engine) mountTarget() string { return expand(e.cfg.MountPoint) }
+// mountTarget is where the drive appears. mountTargetLocked is the same for callers holding e.mu.
+func (e *Engine) mountTarget() string       { return expand(e.config().MountPoint) }
+func (e *Engine) mountTargetLocked() string { return expand(e.cfg.MountPoint) }
 
 // isDriveLetter is true for a Windows drive letter mount point like "O:".
 func isDriveLetter(t string) bool { return driveRe.MatchString(t) }
@@ -400,7 +404,15 @@ func driveLetterInUse(t string) string {
 }
 
 func (e *Engine) startMountLocked() {
-	target := e.mountTarget()
+	if p := mountProblem(); p != "" {
+		if e.message != p {
+			e.logLine("drive: %s", p)
+		}
+		e.message = p
+		e.mountRetryAt = time.Now().Add(time.Minute)
+		return
+	}
+	target := e.mountTargetLocked()
 	if isMounted(target) {
 		if isDriveLetter(target) {
 			// Our drive isn't running, so something else has this letter (a USB stick, a
@@ -413,7 +425,7 @@ func (e *Engine) startMountLocked() {
 		e.mountRetryAt = time.Now().Add(10 * time.Second)
 		return
 	}
-	if strings.HasPrefix(e.message, "Drive letter ") {
+	if strings.HasPrefix(e.message, "Drive letter ") || strings.HasPrefix(e.message, "The drive needs WinFsp") {
 		e.message = ""
 	}
 	if runtime.GOOS != "windows" || len(target) > 2 {
@@ -433,7 +445,7 @@ func (e *Engine) startMountLocked() {
 	args = append(args, mountExtraArgs()...)
 	cmd := exec.Command(e.cfg.Rclone(), args...)
 	// The rc login goes in the environment, not the command line, so other users can't read it.
-	cmd.Env = append(e.env(), "RCLONE_RC_USER="+e.rcUser, "RCLONE_RC_PASS="+e.rcPass)
+	cmd.Env = append(envFor(e.cfg), "RCLONE_RC_USER="+e.rcUser, "RCLONE_RC_PASS="+e.rcPass)
 	hideWindow(cmd)
 	if f := e.logFile("drive.log"); f != nil {
 		cmd.Stdout, cmd.Stderr = f, f
@@ -588,17 +600,29 @@ func (e *Engine) Eject() error {
 
 // MARK: sync
 
+func (c Config) statePath(f KeptFolder, suffix string) string {
+	return filepath.Join(expand(c.StateDir), f.StateName+suffix)
+}
+func (c Config) workPath(f KeptFolder) string {
+	return filepath.Join(expand(c.StateDir), "work", f.StateName)
+}
+func (c Config) filtersPath(f KeptFolder) string {
+	return filepath.Join(expand(c.StateDir), "filters-"+f.StateName+".txt")
+}
+
+// stateFile, workDir and filtersFile read the settings themselves: don't call them holding e.mu.
 func (e *Engine) stateFile(f KeptFolder, suffix string) string {
-	return filepath.Join(expand(e.cfg.StateDir), f.StateName+suffix)
+	return e.config().statePath(f, suffix)
 }
-func (e *Engine) workDir(f KeptFolder) string {
-	return filepath.Join(expand(e.cfg.StateDir), "work", f.StateName)
-}
-func (e *Engine) filtersFile(f KeptFolder) string {
-	return filepath.Join(expand(e.cfg.StateDir), "filters-"+f.StateName+".txt")
-}
+func (e *Engine) workDir(f KeptFolder) string     { return e.config().workPath(f) }
+func (e *Engine) filtersFile(f KeptFolder) string { return e.config().filtersPath(f) }
+
 func (e *Engine) needsRepairReason(f KeptFolder) string {
-	b, err := os.ReadFile(e.stateFile(f, ".needs-repair"))
+	return readReason(e.stateFile(f, ".needs-repair"))
+}
+
+func readReason(file string) string {
+	b, err := os.ReadFile(file)
 	if err != nil {
 		return ""
 	}
@@ -622,6 +646,7 @@ func (e *Engine) setState(f KeptFolder, state, detail string) {
 	e.notify()
 }
 
+// lastSuccessFile: the caller holds e.mu.
 func (e *Engine) lastSuccessFile() string {
 	return filepath.Join(expand(e.cfg.StateDir), "last-success.json")
 }
@@ -668,6 +693,13 @@ func (e *Engine) markNeedsRepair(f KeptFolder, reason string) {
 	e.logLine("%s: needs repair: %s", f.Path, reason)
 }
 
+// parkDrift marks a folder whose listings keep drifting. It still waits for Repair, but each
+// sync interval tries a plain sync (no merge); once that succeeds the folder is fine again.
+func (e *Engine) parkDrift(f KeptFolder, reason string) {
+	_ = os.WriteFile(e.stateFile(f, ".drift-parked"), nil, 0o600)
+	e.markNeedsRepair(f, reason)
+}
+
 // SyncNow syncs every kept folder now (not while paused). It reads each folder's repair state
 // from disk, so a folder repaired meanwhile isn't skipped because of what the app remembered,
 // and it tries a blocked large deletion again (it is blocked again if nothing changed).
@@ -707,7 +739,11 @@ func (e *Engine) startSyncAllLocked(manual bool) {
 				continue
 			}
 			if r := e.needsRepairReason(f); r != "" {
-				e.setState(f, StNeedsRepair, r)
+				if exists(e.stateFile(f, ".drift-parked")) {
+					e.syncFolder(f, modeDriftRetry)
+				} else {
+					e.setState(f, StNeedsRepair, r)
+				}
 				continue
 			}
 			if state == StBigDeletion && !manual {
@@ -719,12 +755,13 @@ func (e *Engine) startSyncAllLocked(manual bool) {
 }
 
 func (e *Engine) serverTooBusy() string {
+	cfg := e.config()
 	// The memory check runs over ssh, so it only applies with the tunnel.
-	if !e.cfg.Tunnel() || e.cfg.MinServerAvailableMiB <= 0 {
+	if !cfg.Tunnel() || cfg.MinServerAvailableMiB <= 0 {
 		return ""
 	}
-	out, err := e.run(20*time.Second, nil, e.cfg.SSH(), "-n", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-		e.cfg.SSHHost, "grep MemAvailable /proc/meminfo")
+	out, err := e.run(20*time.Second, nil, cfg.SSH(), "-n", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+		cfg.SSHHost, "grep MemAvailable /proc/meminfo")
 	// Look for "MemAvailable:   12345678 kB"; ssh may add warning lines (stdout and stderr are combined).
 	// No quotes or $ in the remote command: Windows ssh mangles them.
 	var mib int
@@ -746,7 +783,7 @@ func (e *Engine) serverTooBusy() string {
 		e.setMessage("Server unreachable; sync skipped")
 		return "server unreachable"
 	}
-	if mib < e.cfg.MinServerAvailableMiB {
+	if mib < cfg.MinServerAvailableMiB {
 		e.setMessage(fmt.Sprintf("Server low on memory (%d MiB); sync skipped", mib))
 		return "server busy"
 	}
@@ -766,12 +803,14 @@ const (
 	modeNormal syncMode = iota
 	modeRepair
 	modeAllowBigDeletion
+	modeDriftRetry // a folder parked after drift: a plain sync, no merge
 )
 
 func exists(p string) bool { _, err := os.Stat(p); return err == nil }
 
 // folderRun is one kept folder's paths for a sync.
 type folderRun struct {
+	cfg                              Config // the settings when the sync started (a copy)
 	f                                KeptFolder
 	local, work, filters, serverFile string
 	marker                           string
@@ -782,6 +821,7 @@ type folderRun struct {
 // per folder per 24 hours; after that the user decides).
 func (e *Engine) syncFolder(f KeptFolder, mode syncMode) bool {
 	e.mu.Lock()
+	cfg := e.cfg // this sync's settings: a Reload or settings change meanwhile doesn't touch them
 	e.activeName, e.activeFiles = f.DisplayName(), 0
 	single := e.activeN == 0 // Repair, Stop Keeping…: one folder on its own
 	if single {
@@ -796,90 +836,144 @@ func (e *Engine) syncFolder(f KeptFolder, mode syncMode) bool {
 		}
 		e.mu.Unlock()
 	}()
+	parkedReason := ""
+	if mode == modeDriftRetry {
+		parkedReason = readReason(cfg.statePath(f, ".needs-repair"))
+	}
 	e.setState(f, StSyncing, "")
-	marker := e.stateFile(f, ".initialised")
+	marker := cfg.statePath(f, ".initialised")
 	initialised := exists(marker)
 	first := !initialised || mode == modeRepair
-	local := e.cfg.Local(f)
+	local := cfg.Local(f)
 
 	if mode == modeNormal {
-		if r := e.needsRepairReason(f); r != "" {
+		if r := readReason(cfg.statePath(f, ".needs-repair")); r != "" {
 			e.setState(f, StNeedsRepair, r)
 			return false
 		}
 	}
-	if initialised && f.LocalPath == "" && !exists(expand(e.cfg.LocalRoot)) {
-		e.setState(f, StFailed, e.cfg.LocalRoot+" is missing")
+	if mode == modeDriftRetry && (!initialised || parkedReason == "") {
+		_ = os.Remove(cfg.statePath(f, ".drift-parked"))
+		if parkedReason != "" {
+			e.setState(f, StNeedsRepair, parkedReason)
+		} else {
+			e.setState(f, StIdle, "")
+		}
 		return false
+	}
+	// stillParked keeps a parked folder waiting for Repair whatever stopped this try.
+	stillParked := func() bool {
+		if mode == modeDriftRetry {
+			e.setState(f, StNeedsRepair, parkedReason)
+		}
+		return false
+	}
+	if initialised && f.LocalPath == "" && !exists(expand(cfg.LocalRoot)) {
+		e.setState(f, StFailed, cfg.LocalRoot+" is missing")
+		return stillParked()
 	}
 	if initialised && !exists(local) {
-		e.setState(f, StFailed, "folder is missing on this computer")
-		return false
+		e.setState(f, StFailed, missingLocalText(f.DisplayName()))
+		return stillParked()
 	}
-	work := e.workDir(f)
+	work := cfg.workPath(f)
 	serverFile := filepath.Join(work, "server.txt")
 	if initialised && mode != modeRepair {
-		if b, err := os.ReadFile(serverFile); err == nil && string(b) != e.cfg.ServerIdentity() {
+		if b, err := os.ReadFile(serverFile); err == nil && string(b) != cfg.ServerIdentity() {
 			e.markNeedsRepair(f, "server or account settings changed")
 			return false
 		}
 	}
 	if !e.waitForTunnel() {
 		e.setState(f, StFailed, "no connection to server")
-		return false
+		return stillParked()
 	}
 	if first {
 		_ = os.MkdirAll(local, 0o700)
 	}
 	_ = os.MkdirAll(work, 0o700)
 	if !exists(serverFile) {
-		_ = os.WriteFile(serverFile, []byte(e.cfg.ServerIdentity()), 0o600)
+		_ = os.WriteFile(serverFile, []byte(cfg.ServerIdentity()), 0o600)
 	}
-	filters := e.filtersFile(f)
-	text := strings.Join(append(append([]string{}, f.ExtraFilters...), e.cfg.CommonFilters...), "\n") + "\n"
-	if b, _ := os.ReadFile(filters); string(b) != text {
-		_ = os.WriteFile(filters, []byte(text), 0o600)
+	filters := cfg.filtersPath(f)
+	if b, _ := os.ReadFile(filters); string(b) != filtersText(cfg, f) {
+		_ = os.WriteFile(filters, []byte(filtersText(cfg, f)), 0o600)
 	}
-	r := folderRun{f: f, local: local, work: work, filters: filters, serverFile: serverFile, marker: marker}
+	r := folderRun{cfg: cfg, f: f, local: local, work: work, filters: filters, serverFile: serverFile, marker: marker}
 
 	if first {
 		kind := "merge (first sync)"
 		if mode == modeRepair {
 			kind = "merge (repair)"
 		}
-		return e.merge(r, kind, "")
+		ok, _ := e.merge(r, kind, "")
+		return ok
 	}
 	var extra []string
 	if mode == modeAllowBigDeletion {
+		// Check both sides again: an emptied copy (an unplugged disk, a server folder that
+		// vanished) must never be "applied" to the other side.
+		if localMissingOrEmpty(local) {
+			e.setState(f, StFailed, missingLocalText(f.DisplayName()))
+			return false
+		}
+		if e.remoteMissingOrEmpty(cfg, f) {
+			e.setState(f, StFailed, missingRemoteText)
+			return false
+		}
 		extra = []string{"--force"}
 	}
 	out, err := e.bisync(r, "sync", extra...)
 	if err == nil {
+		if mode == modeDriftRetry {
+			e.logLine("%s: syncs again without a merge; no repair needed", f.Path)
+		}
 		e.syncSucceeded(r)
 		return true
 	}
 	res := classifyBisync(out, err == context.DeadlineExceeded)
+	if mode == modeDriftRetry {
+		// Still not settled: it keeps waiting for Repair, and the next interval tries again.
+		e.logLine("%s: still needs repair (plain sync failed)", f.Path)
+		return stillParked()
+	}
 	if res.outcome != outcomeDrift {
 		e.syncFailed(r, res, out)
 		return false
 	}
 	// The two sides' listings disagree. bisync won't continue (and --recover just falls back
 	// to listings that disagree the same way); a newer-wins merge brings both sides together.
-	auto := e.stateFile(f, ".auto-merge")
+	auto := cfg.statePath(f, ".auto-merge")
 	if !canAutoMerge(auto, time.Now()) {
-		e.markNeedsRepair(f, driftReason(res.path, "already merged automatically today; choose Repair"))
+		e.parkDrift(f, driftReason(res.path, "already merged automatically today; choose Repair"))
 		return false
 	}
-	_ = recordAutoMerge(auto, time.Now())
+	// The once-a-day limit only holds if it is on disk: no record, no automatic merge.
+	if err := recordAutoMerge(auto, time.Now()); err != nil {
+		e.logLine("%s: couldn't record the automatic merge (%v); not merging", f.Path, err)
+		e.markNeedsRepair(f, driftReason(res.path, "choose Repair"))
+		return false
+	}
 	e.logLine("%s: out of sync (%s); merging automatically, newer copy wins", f.Path, orText(res.path, "listings differ"))
-	if !e.merge(r, "automatic merge (out of sync)", "the automatic merge didn't settle it; choose Repair") {
+	ok, outcome := e.merge(r, "automatic merge (out of sync)", "the automatic merge didn't settle it; choose Repair")
+	if !ok {
+		if outcome == outcomeInterrupted {
+			_ = os.Remove(auto) // it didn't happen: the next sync may merge
+		}
 		return false
 	}
-	e.setMessage(fmt.Sprintf("“%s” was out of sync and was merged automatically (the newer copy of each file was kept)", f.DisplayName()))
+	e.setMessage(fmt.Sprintf("“%s” was out of sync and was merged automatically (the newer copy of each file was kept; older copies are in the backups)", f.DisplayName()))
 	e.mu.Lock()
 	e.autoMerged = append(e.autoMerged, f.DisplayName())
 	e.mu.Unlock()
 	return true
+}
+
+// filtersText is the folder's filters file: its own excludes, the common ones, and the
+// backup folder.
+func filtersText(cfg Config, f KeptFolder) string {
+	lines := append(append(append([]string{}, f.ExtraFilters...), cfg.CommonFilters...), backupFilter)
+	return strings.Join(lines, "\n") + "\n"
 }
 
 func orText(s, alt string) string {
@@ -889,40 +983,49 @@ func orText(s, alt string) string {
 	return s
 }
 
-// merge runs `bisync --resync --resync-mode newer`: for each file the newer copy wins and
-// nothing is deleted. --check-sync stays on, so a merge that didn't bring both sides together
-// fails now instead of breaking the next sync. Files that change during the merge make that
-// check fail; one more pass usually settles them.
-func (e *Engine) merge(r folderRun, kind, driftNote string) bool {
+// merge runs `bisync --resync --resync-mode newer`: for each file the newer copy wins and no
+// file is deleted. Every copy a merge overwrites is moved to a dated backup folder first (on
+// this computer under the state folder, in OpenCloud under .opencloud-bar-backups).
+// --check-sync stays on, so a merge that didn't bring both sides together fails now instead of
+// breaking the next sync. Files that change during the merge make that check fail; one more
+// pass usually settles them. It also returns how the last run ended.
+func (e *Engine) merge(r folderRun, kind, driftNote string) (bool, syncOutcome) {
 	if driftNote == "" {
 		driftNote = "choose Repair when it's quiet"
 	}
-	var out string
-	var err error
+	now := time.Now()
+	pruneBackups(r.cfg.StateDir, r.f.StateName, now)
+	backups := backupArgs(r.cfg, r.f, backupStamp(now))
 	for pass := 1; pass <= 2; pass++ {
-		out, err = e.bisync(r, kind, "--resync", "--resync-mode", "newer")
+		out, err := e.bisync(r, kind, append([]string{"--resync", "--resync-mode", "newer"}, backups...)...)
 		if err == nil {
 			e.syncSucceeded(r)
-			return true
+			return true, outcomeOK
 		}
 		res := classifyBisync(out, err == context.DeadlineExceeded)
 		if res.outcome != outcomeDrift || pass == 2 {
 			if res.outcome == outcomeDrift {
-				e.markNeedsRepair(r.f, driftReason(res.path, driftNote))
+				e.parkDrift(r.f, driftReason(res.path, driftNote))
 			} else {
 				e.syncFailed(r, res, out)
 			}
-			return false
+			return false, res.outcome
 		}
 		e.logLine("%s: files changed during the merge (%s); merging once more", r.f.Path, orText(res.path, "listings differ"))
 		kind = "merge (second pass)"
 	}
-	return false
+	return false, outcomeFailed
+}
+
+// backupArgs sends the copies a merge overwrites to this computer's and OpenCloud's backup folders.
+func backupArgs(cfg Config, f KeptFolder, stamp string) []string {
+	return []string{"--backup-dir1", localBackupDir(cfg.StateDir, f.StateName, stamp),
+		"--backup-dir2", remoteBackupDir(cfg.RemoteSpec(), f.StateName, stamp)}
 }
 
 // bisync runs one rclone bisync for the folder with the common flags plus extra.
 func (e *Engine) bisync(r folderRun, kind string, extra ...string) (string, error) {
-	tr, ck := e.cfg.Transfers, e.cfg.Checkers
+	tr, ck := r.cfg.Transfers, r.cfg.Checkers
 	if tr <= 0 {
 		tr = 4
 	}
@@ -933,7 +1036,7 @@ func (e *Engine) bisync(r folderRun, kind string, extra ...string) (string, erro
 	if kind != "sync" {
 		level = "INFO" // merges are rare: log every copy so a merge can be checked afterwards
 	}
-	args := []string{"bisync", r.local, e.cfg.RemoteSpec() + r.f.Path,
+	args := []string{"bisync", r.local, r.cfg.RemoteSpec() + r.f.Path,
 		"--workdir", r.work, "--filters-file", r.filters,
 		"--create-empty-src-dirs", "--compare", "size,modtime",
 		"--resilient", "--recover", "--max-lock", "10m",
@@ -959,13 +1062,14 @@ func (e *Engine) bisync(r folderRun, kind string, extra ...string) (string, erro
 	e.mu.Lock()
 	e.activeFiles = 0
 	e.mu.Unlock()
-	return e.run(syncTimeout, sf, e.cfg.Rclone(), args...)
+	return e.run(syncTimeout, sf, r.cfg.Rclone(), args...)
 }
 
 func (e *Engine) syncSucceeded(r folderRun) {
 	_ = os.WriteFile(r.marker, nil, 0o600)
-	_ = os.Remove(e.stateFile(r.f, ".needs-repair"))
-	_ = os.WriteFile(r.serverFile, []byte(e.cfg.ServerIdentity()), 0o600)
+	_ = os.Remove(r.cfg.statePath(r.f, ".needs-repair"))
+	_ = os.Remove(r.cfg.statePath(r.f, ".drift-parked"))
+	_ = os.WriteFile(r.serverFile, []byte(r.cfg.ServerIdentity()), 0o600)
 	e.setState(r.f, StOK, "")
 }
 
@@ -974,7 +1078,7 @@ func (e *Engine) syncFailed(r folderRun, res bisyncResult, out string) {
 	f := r.f
 	switch res.outcome {
 	case outcomeSignedOut:
-		if e.cfg.OIDC() {
+		if r.cfg.OIDC() {
 			// The token command said the sign-in is gone; don't show rclone's raw error.
 			e.markSignedOut()
 			e.setState(f, StFailed, "signed out")
@@ -991,21 +1095,26 @@ func (e *Engine) syncFailed(r folderRun, res bisyncResult, out string) {
 			e.setState(f, StSkipped, "interrupted; continues with the next sync")
 		}
 	case outcomeBigChange:
-		if res.side != "Path1" && e.remoteMissingOrEmpty(f) {
+		// An emptied copy isn't a deletion the user made: never offer to apply it to the other side.
+		if res.side != "Path2" && localMissingOrEmpty(r.local) {
+			e.setState(f, StFailed, missingLocalText(f.DisplayName()))
+			return
+		}
+		if res.side != "Path1" && e.remoteMissingOrEmpty(r.cfg, f) {
 			e.setState(f, StFailed, missingRemoteText)
 			return
 		}
-		e.setState(f, StBigDeletion, "")
+		e.setState(f, StBigDeletion, bigDeletionSide(res.side))
 	case outcomeNeedsResync:
-		if strings.Contains(out, "directory not found") && e.remoteMissingOrEmpty(f) {
+		if strings.Contains(out, "directory not found") && e.remoteMissingOrEmpty(r.cfg, f) {
 			e.setState(f, StFailed, missingRemoteText)
 			return
 		}
 		e.markNeedsRepair(f, "sync history is out of date")
 	case outcomeDrift:
-		e.markNeedsRepair(f, driftReason(res.path, "choose Repair when it's quiet"))
+		e.parkDrift(f, driftReason(res.path, "choose Repair when it's quiet"))
 	default:
-		if strings.Contains(out, "directory not found") && e.remoteMissingOrEmpty(f) {
+		if strings.Contains(out, "directory not found") && e.remoteMissingOrEmpty(r.cfg, f) {
 			e.setState(f, StFailed, missingRemoteText)
 			return
 		}
@@ -1016,18 +1125,30 @@ func (e *Engine) syncFailed(r folderRun, res bisyncResult, out string) {
 // remoteMissingOrEmpty is true when the folder is gone from OpenCloud or holds nothing. A
 // "safety abort" then means the server copy vanished, not that the user deleted files: the
 // large-deletion override must not be offered, or it would empty this computer's copy too.
-func (e *Engine) remoteMissingOrEmpty(f KeptFolder) bool {
-	out, err := e.run(time.Minute, nil, e.cfg.Rclone(), "lsf", "--max-depth", "1", e.cfg.RemoteSpec()+f.Path)
+func (e *Engine) remoteMissingOrEmpty(cfg Config, f KeptFolder) bool {
+	out, err := e.run(time.Minute, nil, cfg.Rclone(), "lsf", "--max-depth", "1", "--exclude", ".DS_Store", cfg.RemoteSpec()+f.Path)
 	if err != nil {
 		return strings.Contains(out, "directory not found") || strings.Contains(out, "not found")
 	}
 	return strings.TrimSpace(out) == ""
 }
 
+// bigDeletionSide is where the files were deleted, for the folder's detail text.
+func bigDeletionSide(side string) string {
+	switch side {
+	case "Path1":
+		return "on this computer"
+	case "Path2":
+		return "in OpenCloud"
+	}
+	return ""
+}
+
 // run executes a command, optionally teeing output to a log, and tracks it so Shutdown can stop it.
 func (e *Engine) run(timeout time.Duration, logTo io.Writer, name string, args ...string) (string, error) {
+	cfg := e.config()
 	cmd := exec.Command(name, args...)
-	cmd.Env = e.env()
+	cmd.Env = envFor(cfg)
 	hideWindow(cmd)
 	var buf bytes.Buffer
 	var w io.Writer = &buf
@@ -1040,7 +1161,7 @@ func (e *Engine) run(timeout time.Duration, logTo io.Writer, name string, args .
 	if err := cmd.Start(); err != nil {
 		return "", err
 	}
-	tracked := name == e.cfg.Rclone() && len(args) > 0 && args[0] == "bisync"
+	tracked := name == cfg.Rclone() && len(args) > 0 && args[0] == "bisync"
 	if tracked {
 		e.mu.Lock()
 		e.currentSync = cmd
@@ -1100,6 +1221,7 @@ func (e *Engine) Repair(path string) error {
 		_ = os.Remove(e.stateFile(f, ".needs-repair"))
 		// A repair the user chose also resets the daily automatic-merge allowance.
 		_ = os.Remove(e.stateFile(f, ".auto-merge"))
+		_ = os.Remove(e.stateFile(f, ".drift-parked"))
 		e.syncFolder(f, modeRepair)
 	})
 }
@@ -1132,12 +1254,20 @@ func (e *Engine) SetPaused(paused bool) error {
 	if e.cfg.Paused == paused {
 		return nil
 	}
-	next := e.cfg
-	next.Paused = paused
-	if err := saveConfig(next); err != nil {
+	// Only "paused" changes in the file; everything else stays as it is there.
+	if _, err := editConfig(func(raw map[string]json.RawMessage) error {
+		if paused {
+			raw["paused"] = mustJSON(true)
+		} else {
+			delete(raw, "paused") // the default, as the macOS app writes it
+		}
+		return nil
+	}); err != nil {
 		return err
 	}
-	e.cfg = next
+	cfg := e.cfg
+	cfg.Paused = paused
+	e.cfg = cfg
 	if !paused {
 		e.nextSyncAt = time.Time{} // sync right away
 	}
@@ -1172,20 +1302,37 @@ func (e *Engine) Keep(path, localPath string) error {
 		}
 	}
 	f := KeptFolder{Path: path, StateName: makeStateName(path), LocalPath: localPath}
-	for _, g := range e.cfg.Kept {
-		if g.StateName == f.StateName {
+	// Add one entry to the file's kept list; the other entries (and their keys this version
+	// doesn't know) stay as they are.
+	next, err := editConfig(func(raw map[string]json.RawMessage) error {
+		kept, err := rawKept(raw)
+		if err != nil {
+			return err
+		}
+		taken := map[string]bool{}
+		for _, g := range e.cfg.Kept {
+			taken[g.StateName] = true
+		}
+		for _, k := range kept {
+			if p := rawString(k, "path"); overlaps(path, p) {
+				return fmt.Errorf("%q overlaps %q, which is already kept", path, p)
+			}
+			taken[rawString(k, "stateName")] = true
+		}
+		for taken[f.StateName] {
 			f.StateName += "x"
 		}
-	}
-	next := e.cfg
-	next.Kept = append(append([]KeptFolder{}, e.cfg.Kept...), f)
-	if err := next.Validate(); err != nil {
+		var entry map[string]json.RawMessage
+		_ = json.Unmarshal(mustJSON(f), &entry)
+		raw["kept"] = mustJSON(append(kept, entry))
+		return nil
+	})
+	if err != nil {
 		return err
 	}
-	if err := saveConfig(next); err != nil {
-		return err
-	}
-	e.cfg = next
+	cfg := e.cfg
+	cfg.Kept = next.Kept
+	e.cfg = cfg
 	e.refreshStatusLocked()
 	e.nextSyncAt = time.Time{}
 	return nil
@@ -1197,9 +1344,10 @@ func (e *Engine) UnsyncedCount(path string) int {
 	if !ok || !exists(e.filtersFile(f)) {
 		return -1
 	}
-	local := e.cfg.Local(f)
-	all, err1 := e.run(5*time.Minute, nil, e.cfg.Rclone(), "lsf", "-R", "--files-only", local)
-	synced, err2 := e.run(5*time.Minute, nil, e.cfg.Rclone(), "lsf", "-R", "--files-only", "--filters-file", e.filtersFile(f), local)
+	cfg := e.config()
+	local := cfg.Local(f)
+	all, err1 := e.run(5*time.Minute, nil, cfg.Rclone(), "lsf", "-R", "--files-only", local)
+	synced, err2 := e.run(5*time.Minute, nil, cfg.Rclone(), "lsf", "-R", "--files-only", "--filters-file", e.filtersFile(f), local)
 	if err1 != nil || err2 != nil {
 		return -1
 	}
@@ -1224,26 +1372,35 @@ func (e *Engine) Unkeep(path string, result func(error)) error {
 			result(fmt.Errorf("couldn't sync %q; nothing was removed", f.DisplayName()))
 			return
 		}
-		if err := moveToTrash(e.cfg.Local(f)); err != nil {
+		if err := moveToTrash(e.config().Local(f)); err != nil {
 			result(fmt.Errorf("couldn't move it to %s: %w", trashName(), err))
 			return
 		}
 		_ = os.RemoveAll(e.workDir(f))
-		for _, s := range []string{".initialised", ".needs-repair", ".auto-merge"} {
+		for _, s := range []string{".initialised", ".needs-repair", ".auto-merge", ".drift-parked"} {
 			_ = os.Remove(e.stateFile(f, s))
 		}
 		_ = os.Remove(e.filtersFile(f))
 		e.mu.Lock()
-		next := e.cfg
-		next.Kept = nil
-		for _, g := range e.cfg.Kept {
-			if g.Path != f.Path {
-				next.Kept = append(next.Kept, g)
+		// Remove just this entry from the file's kept list.
+		next, err := editConfig(func(raw map[string]json.RawMessage) error {
+			kept, err := rawKept(raw)
+			if err != nil {
+				return err
 			}
-		}
-		err := saveConfig(next)
+			rest := []map[string]json.RawMessage{}
+			for _, k := range kept {
+				if foldKey(rawString(k, "path")) != foldKey(f.Path) {
+					rest = append(rest, k)
+				}
+			}
+			raw["kept"] = mustJSON(rest)
+			return nil
+		})
 		if err == nil {
-			e.cfg = next
+			cfg := e.cfg
+			cfg.Kept = next.Kept
+			e.cfg = cfg
 			e.refreshStatusLocked()
 		}
 		e.mu.Unlock()
@@ -1336,7 +1493,7 @@ func (e *Engine) Status() Status {
 	st := Status{Message: e.message, Syncing: e.syncing, DriveWanted: e.mountWanted && e.cfg.Mounting()}
 	st.UseTunnel, st.SignedOut = e.cfg.Tunnel(), e.cfg.OIDC() && e.signedOut
 	st.TunnelUp = !e.cfg.Tunnel() || (e.tunnelOurs() && portOpen(e.cfg.LocalPort))
-	st.DriveMounted = e.cfg.Mounting() && isMounted(e.mountTarget())
+	st.DriveMounted = e.cfg.Mounting() && isMounted(e.mountTargetLocked())
 	st.Paused = e.cfg.Paused
 	st.Update = e.updates.State()
 	if e.cfgErr != nil {
@@ -1400,6 +1557,9 @@ func attentionReason(f FolderStatus) string {
 		}
 		return "needs repair"
 	case StBigDeletion:
+		if f.Detail != "" {
+			return "large deletion blocked (" + f.Detail + ")"
+		}
 		return "large deletion blocked"
 	case StFailed:
 		if f.Detail != "" {

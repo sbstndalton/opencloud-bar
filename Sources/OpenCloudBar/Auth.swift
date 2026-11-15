@@ -229,7 +229,7 @@ enum Auth {
     /// The whole setup: browser sign-in, keep the credentials, record them in config.json.
     static func signIn(serverURL: String) async throws -> String {
         let r = try await login(serverURL: serverURL)
-        try store(r)
+        try await store(r)
         try Config.applySetup(serverURL: r.serverURL, username: r.username)
         Log.line("signed in as \(r.username) on \(r.serverURL)")
         return r.username
@@ -300,7 +300,11 @@ enum Auth {
         _ = try FileManager.default.replaceItemAt(authURL, withItemAt: tmp)
     }
 
-    private static func store(_ r: LoginResult) throws {
+    /// Under the sign-in lock, so a refresh running in a `--token` process can't write its
+    /// (older account's) state over the new sign-in, or delete the new refresh token.
+    private static func store(_ r: LoginResult) async throws {
+        try await lock()
+        defer { unlock() }
         let s = AuthState(serverURL: r.serverURL, issuer: r.issuer, username: r.username, tokenEndpoint: r.tokenEndpoint,
                           accessToken: r.access, expiry: r.expiry)
         try writeRefresh(r.refresh)   // replaces any earlier account's token
@@ -371,10 +375,16 @@ enum Auth {
             try writeState(st)
             return r.access
         } catch let e as OAuthError where e.code == "invalid_grant" {
+            // Still under the lock. Only forget what was rejected: if a new sign-in stored another
+            // token meanwhile (stale lock taken over), it stays.
             Log.line("refresh token rejected (invalid_grant); signed out")
-            try? FileManager.default.removeItem(at: refreshURL)
-            st.accessToken = nil; st.expiry = nil
-            try? writeState(st)
+            if readRefresh() == refresh {
+                try? FileManager.default.removeItem(at: refreshURL)
+                if var cur = readState(), cur.serverURL == want {
+                    cur.accessToken = nil; cur.expiry = nil
+                    try? writeState(cur)
+                }
+            }
             throw AuthError.signedOut
         } catch let e as AuthError {
             throw e

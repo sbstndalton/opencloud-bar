@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 
 	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
@@ -259,6 +260,8 @@ func pathProblem(p string) string {
 		return "path can't contain a single quote"
 	case len(p) > 90:
 		return "path is longer than about 90 characters (an rclone bisync limit)"
+	case foldKey(strings.SplitN(p, "/", 2)[0]) == foldKey(backupFolderName):
+		return backupFolderName + " holds the app's backup copies; it can't be kept"
 	}
 	for _, part := range strings.Split(p, "/") {
 		if part == ".." || part == "." {
@@ -391,6 +394,8 @@ func loadConfig() (Config, error) {
 // saveConfig writes c to config.json. Keys in the existing file that this version doesn't know
 // about are kept, so the Go app and the macOS app (and hand edits) don't wipe each other's settings.
 func saveConfig(c Config) error {
+	configMu.Lock()
+	defer configMu.Unlock()
 	fresh, err := json.Marshal(c)
 	if err != nil {
 		return err
@@ -424,6 +429,74 @@ func saveConfig(c Config) error {
 		}
 	}
 	return writeConfigBytes(data)
+}
+
+// configMu serialises every change to config.json (settings page, Pause, Keep, Stop Keeping,
+// sign-in), so one writer never overwrites another's change with an older copy.
+var configMu sync.Mutex
+
+// readConfigRaw reads config.json as generic JSON (the defaults if there is none yet).
+// The caller holds configMu.
+func readConfigRaw() (map[string]json.RawMessage, error) {
+	raw := map[string]json.RawMessage{}
+	data, err := os.ReadFile(configFile())
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		d, _ := json.Marshal(defaultConfig())
+		_ = json.Unmarshal(d, &raw)
+	case err != nil:
+		return nil, err
+	default:
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return nil, fmt.Errorf("the settings file can't be read (%v); fix it, then reload the settings", err)
+		}
+	}
+	return raw, nil
+}
+
+// editConfig changes only the keys edit touches: it reads config.json fresh, applies edit and
+// writes it back, all under configMu. What another writer (or a hand edit) changed meanwhile,
+// and keys this version doesn't know, inside kept folders too, survive. It returns the new
+// settings as a whole, already checked.
+func editConfig(edit func(raw map[string]json.RawMessage) error) (Config, error) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	raw, err := readConfigRaw()
+	if err != nil {
+		return Config{}, err
+	}
+	if err := edit(raw); err != nil {
+		return Config{}, err
+	}
+	next := defaultConfig()
+	if err := json.Unmarshal(mustJSON(raw), &next); err != nil {
+		return Config{}, fmt.Errorf("those settings don't fit the settings file: %w", err)
+	}
+	if err := next.Validate(); err != nil {
+		return Config{}, err
+	}
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return Config{}, err
+	}
+	return next, writeConfigBytes(out)
+}
+
+// rawKept is config.json's kept list with every key of every entry.
+func rawKept(raw map[string]json.RawMessage) ([]map[string]json.RawMessage, error) {
+	var kept []map[string]json.RawMessage
+	if b, ok := raw["kept"]; ok && string(b) != "null" {
+		if err := json.Unmarshal(b, &kept); err != nil {
+			return nil, fmt.Errorf("couldn't read the kept folders: %w", err)
+		}
+	}
+	return kept, nil
+}
+
+func rawString(m map[string]json.RawMessage, k string) string {
+	var s string
+	_ = json.Unmarshal(m[k], &s)
+	return s
 }
 
 // knownConfigKeys lists the JSON keys of the Config struct.
@@ -460,6 +533,8 @@ func davPathFor(username string) string {
 // this version doesn't know about (and everything else the user set) are preserved. Without
 // an sshHost the tunnel is off; with one, useTunnel is kept as the user had it.
 func applySetup(serverURL, username string) error {
+	configMu.Lock()
+	defer configMu.Unlock()
 	raw := map[string]json.RawMessage{}
 	data, err := os.ReadFile(configFile())
 	switch {

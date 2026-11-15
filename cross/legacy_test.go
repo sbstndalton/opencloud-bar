@@ -36,7 +36,7 @@ func TestLegacyConfigsUnchanged(t *testing.T) {
 			t.Errorf("%s: identity %q, want %q", name, got, want)
 		}
 		e := &Engine{cfg: c}
-		for _, kv := range e.env() {
+		for _, kv := range envFor(e.cfg) {
 			if strings.HasPrefix(kv, "RCLONE_WEBDAV_BEARER_TOKEN_COMMAND=") && !strings.Contains(strings.Join(os.Environ(), "\n"), kv) {
 				t.Errorf("%s: legacy env must not add a token command", name)
 			}

@@ -39,6 +39,9 @@ struct KeptFolder: Codable, Hashable, Identifiable {
         if path.hasPrefix("/") { return "path must be relative to the drive" }
         if path.split(separator: "/").contains(where: { $0 == ".." || $0 == "." }) { return "path can't contain . or .." }
         if path.contains("'") { return "path can't contain a single quote" }
+        if let top = path.split(separator: "/").first, Config.foldKey(String(top)) == Config.foldKey(Backups.folderName) {
+            return "\(Backups.folderName) holds the app's backup copies; it can't be kept"
+        }
         return nil
     }
 }

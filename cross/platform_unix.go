@@ -24,6 +24,9 @@ func mountCommand() string {
 
 func mountExtraArgs() []string { return nil }
 
+// mountProblem says why the drive can't start, or "" (Windows checks for WinFsp).
+func mountProblem() string { return "" }
+
 func hideWindow(*exec.Cmd) {}
 
 func interrupt(c *exec.Cmd) {

@@ -152,18 +152,11 @@ func (p configPatch) validate(next Config, current Config) error {
 // kept), validates the result with Config.Validate, and writes it. It doesn't touch the running
 // app; the caller calls Engine.Reload.
 func applyConfigPatch(p configPatch) (restartPort bool, err error) {
-	raw := map[string]json.RawMessage{}
-	data, rerr := os.ReadFile(configFile())
-	switch {
-	case errors.Is(rerr, os.ErrNotExist):
-		d, _ := json.Marshal(defaultConfig())
-		_ = json.Unmarshal(d, &raw)
-	case rerr != nil:
-		return false, rerr
-	default:
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return false, fmt.Errorf("couldn't read %s: %w", configFile(), err)
-		}
+	configMu.Lock()
+	defer configMu.Unlock()
+	raw, err := readConfigRaw()
+	if err != nil {
+		return false, err
 	}
 	current := defaultConfig()
 	if err := json.Unmarshal(mustJSON(raw), &current); err != nil {
@@ -229,11 +222,9 @@ func applyConfigPatch(p configPatch) (restartPort bool, err error) {
 		set("notifications", *p.Notifications)
 	}
 	if p.KeptFilters != nil {
-		var kept []map[string]json.RawMessage // per-folder unknown keys survive too
-		if b, ok := raw["kept"]; ok {
-			if err := json.Unmarshal(b, &kept); err != nil {
-				return false, fmt.Errorf("couldn't read the kept folders: %w", err)
-			}
+		kept, err := rawKept(raw) // per-folder unknown keys survive too
+		if err != nil {
+			return false, err
 		}
 		for path, lines := range p.KeptFilters {
 			f, err := checkFilters("Excludes", lines)

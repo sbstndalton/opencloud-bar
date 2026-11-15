@@ -149,6 +149,12 @@ function ago(iso) {
   if (m < 48 * 60) return Math.round(m / 60) + " h ago";
   return Math.round(m / 1440) + " days ago";
 }
+// deletionPrompt explains a blocked large deletion, naming the side it happened on.
+function deletionPrompt(side) {
+  const where = side === "on this computer" ? "on this computer" : side === "in OpenCloud" ? "in OpenCloud" : "on one side";
+  const other = side === "on this computer" ? "OpenCloud" : side === "in OpenCloud" ? "this computer" : "the other side";
+  return "More than half of this folder's files were deleted " + where + ". If that was on purpose, the deletion will be applied to " + other + " too.";
+}
 // stateLook: dot colour, short status, and (for problems) why, in plain words.
 function stateLook(f) {
   switch (f.state) {
@@ -157,7 +163,7 @@ function stateLook(f) {
     case "skipped": return ["warn", "Skipped", f.detail || ""];
     case "failed": return ["bad", "Sync failed", f.detail || ""];
     case "needs-repair": return ["bad", "Needs repair", f.detail || ""];
-    case "large-deletion": return ["warn", "Large deletion blocked", "More than half of the files were deleted on one side. Check, then allow it or restore the files."];
+    case "large-deletion": return ["warn", "Large deletion blocked", "More than half of the files were deleted " + (f.detail || "on one side") + ". Check, then allow it or restore the files."];
   }
   return ["", "Waiting", ""];
 }
@@ -262,10 +268,10 @@ function folderDetail(f, busy) {
   const acts = [
     h("button", { class: "btn", onclick: () => act(() => post("open", { kind: "folder", path: f.path })) }, "Open Folder")];
   if (f.state === "needs-repair") acts.push(h("button", { class: "btn", disabled: busy, onclick: () => {
-    if (confirm("Repair " + f.name + "?\n\nThis merges this computer's copy with OpenCloud. For each file the newer copy wins, and nothing is deleted. Files deleted since the last good sync will come back.")) act(() => post("repair", { path: f.path }), "Repair started");
+    if (confirm("Repair " + f.name + "?\n\nThis merges this computer's copy with OpenCloud. For each file the newer copy wins; the older copies are kept in the backups (.opencloud-bar-backups in OpenCloud, and on this computer). Files deleted since the last good sync will come back.")) act(() => post("repair", { path: f.path }), "Repair started");
   } }, "Repair (Merge Both Sides)…"));
   if (f.state === "large-deletion") acts.push(h("button", { class: "btn", disabled: busy, onclick: () => {
-    if (confirm("Allow a large deletion in " + f.name + "?\n\nMore than half of this folder's files were deleted on one side. If that was on purpose, the deletion will be applied to the other side too.")) act(() => post("allow-delete", { path: f.path }), "Started");
+    if (confirm("Allow a large deletion in " + f.name + "?\n\n" + deletionPrompt(f.detail))) act(() => post("allow-delete", { path: f.path }), "Started");
   } }, "Allow Large Deletion…"));
   acts.push(h("button", { class: "btn danger", disabled: busy, onclick: () => stopKeeping(f) }, "Stop Keeping Here…"));
   return h("div", { class: "card" },

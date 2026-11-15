@@ -145,7 +145,7 @@ func main() {
 		fmt.Println("started; see `opencloud-bar status`")
 	case "repair":
 		path := needPath()
-		fmt.Println("Repair merges both sides: the newer copy of each file wins, nothing is deleted, and files deleted since the last good sync come back.")
+		fmt.Println("Repair merges both sides: the newer copy of each file wins (the older copy is kept in .opencloud-bar-backups in OpenCloud, or in the backups folder on this computer), and files deleted since the last good sync come back.")
 		if askYes() {
 			if err := call("POST", "/repair", url.Values{"path": {path}}, nil); err != nil {
 				fail(err)
@@ -289,9 +289,9 @@ func serveAPI(e *Engine, stop func()) error {
 	if err != nil {
 		return fmt.Errorf("api token: %w", err)
 	}
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", e.cfg.APIPort()))
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", e.config().APIPort()))
 	if err != nil {
-		return fmt.Errorf("opencloud-bar is already running (control port %d is in use)", e.cfg.APIPort())
+		return fmt.Errorf("opencloud-bar is already running (control port %d is in use)", e.config().APIPort())
 	}
 	settingsUI.setPort(ln.Addr().(*net.TCPAddr).Port)
 	go func() { _ = http.Serve(ln, apiHandler(e, stop, tok, settingsUI)) }()

@@ -11,11 +11,31 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/windows/registry"
 )
 
 var errNoOSUnmount = errors.New("no OS unmount")
 
 func mountCommand() string { return "mount" } // needs WinFsp (https://winfsp.dev)
+
+// mountProblem says why the drive can't start, or "". rclone's drive letter needs WinFsp; it
+// is found the way rclone (cgofuse) finds it: InstallDir under HKLM\SOFTWARE\WinFsp in the 32-bit
+// registry view (the 64-bit view too, in case), with the DLL present.
+func mountProblem() string {
+	for _, view := range []uint32{registry.WOW64_32KEY, registry.WOW64_64KEY} {
+		k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\WinFsp`, registry.QUERY_VALUE|view)
+		if err != nil {
+			continue
+		}
+		dir, _, err := k.GetStringValue("InstallDir")
+		k.Close()
+		if err == nil && exists(filepath.Join(dir, "bin", "winfsp-x64.dll")) {
+			return ""
+		}
+	}
+	return "The drive needs WinFsp, which isn't installed. Run the OpenCloud Bar installer again (it installs WinFsp), or get it from winfsp.dev. Kept folders still sync."
+}
 
 // Show the drive in Explorer like a network drive.
 func mountExtraArgs() []string { return []string{"--network-mode"} }

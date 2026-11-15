@@ -317,7 +317,7 @@ struct SyncPage: View {
                              disabledReason: model.syncing ? "Wait for the running sync to finish to change excludes." : nil,
                              restoreDefaults: Config().commonFilters) { lines in
                     guard model.confirm("Change the excludes for all folders?",
-                                        "After this, rclone needs a one-time Repair of each kept folder before it syncs again. A Repair merges both sides: the newer copy of each file wins and nothing is deleted.",
+                                        "After this, rclone needs a one-time Repair of each kept folder before it syncs again. A Repair merges both sides: the newer copy of each file wins, and the older copy is kept in the backups.",
                                         button: "Change Excludes") else { return nil }
                     return await model.updateConfig { $0.commonFilters = lines }
                 }

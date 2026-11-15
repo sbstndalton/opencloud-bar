@@ -8,7 +8,9 @@ Restart=on-failure
 RestartSec=30
 KillSignal=SIGTERM
 TimeoutStopSec=180
-MemoryMax=256M
+# No MemoryMax: rclone's memory grows with the size of the kept folders (bisync holds the
+# listings in memory). A hard limit made systemd kill the service mid-sync; see
+# packaging/linux/opencloud-bar.service.
 
 [Install]
 WantedBy=default.target

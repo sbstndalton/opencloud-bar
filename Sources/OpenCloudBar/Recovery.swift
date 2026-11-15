@@ -71,8 +71,10 @@ enum AutoMerge {
         return now.timeIntervalSince(t) >= window || t.timeIntervalSince(now) > window
     }
 
-    static func record(_ marker: URL, now: Date = Date()) {
-        try? ISO8601DateFormatter().string(from: now).write(to: marker, atomically: true, encoding: .utf8)
+    /// Throws when the record can't be written: then there is no automatic merge, or the
+    /// once-a-day limit wouldn't hold.
+    static func record(_ marker: URL, now: Date = Date()) throws {
+        try ISO8601DateFormatter().string(from: now).write(to: marker, atomically: true, encoding: .utf8)
     }
 
     /// The needs-repair text when the sides stay out of sync; `note` says what to do.
@@ -81,6 +83,69 @@ enum AutoMerge {
             ?? "files keep changing on both sides"
         return "\(what); \(note)"
     }
+}
+
+// MARK: - Merge backups and emptied folders
+
+/// Merges (first sync, Repair, automatic merge) keep every copy they overwrite: the older copy
+/// goes to a dated folder, on this Mac under the state folder and in OpenCloud under
+/// `.opencloud-bar-backups` at the top of the drive. Same layout as the Windows/Linux app.
+/// Backups on this Mac are removed after 30 days.
+enum Backups {
+    static let folderName = ".opencloud-bar-backups"
+    static let filter = "- \(folderName)/**"
+    static let keep: TimeInterval = 30 * 24 * 3600
+
+    private static func formatter() -> DateFormatter {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
+        return f
+    }
+
+    static func stamp(_ d: Date = Date()) -> String { formatter().string(from: d) }
+
+    static func localDir(_ stateURL: URL, _ stateName: String, _ stamp: String) -> URL {
+        stateURL.appendingPathComponent("backups/\(stateName)/\(stamp)")
+    }
+
+    /// On the folder's own remote, outside the folder (rclone requires both).
+    static func remoteDir(_ remoteSpec: String, _ stateName: String, _ stamp: String) -> String {
+        remoteSpec + "\(folderName)/\(stateName)/\(stamp)"
+    }
+
+    static func args(_ stateURL: URL, _ remoteSpec: String, _ stateName: String, _ stamp: String) -> [String] {
+        ["--backup-dir1", localDir(stateURL, stateName, stamp).path,
+         "--backup-dir2", remoteDir(remoteSpec, stateName, stamp)]
+    }
+
+    /// Removes this Mac's backups of a folder older than 30 days (by the date in their name).
+    static func prune(_ stateURL: URL, _ stateName: String, now: Date = Date()) {
+        let dir = stateURL.appendingPathComponent("backups/\(stateName)")
+        let fm = FileManager.default
+        let f = formatter()
+        for name in (try? fm.contentsOfDirectory(atPath: dir.path)) ?? [] {
+            if let t = f.date(from: name), now.timeIntervalSince(t) > keep {
+                try? fm.removeItem(at: dir.appendingPathComponent(name))
+            }
+        }
+    }
+}
+
+/// True when the folder doesn't exist or holds no files (empty folders and .DS_Store don't
+/// count). Stops at the first real file.
+func localMissingOrEmpty(_ dir: URL) -> Bool {
+    let fm = FileManager.default
+    var isDir: ObjCBool = false
+    guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { return true }
+    guard let e = fm.enumerator(at: dir, includingPropertiesForKeys: [.isDirectoryKey], options: [],
+                                errorHandler: { _, _ in true }) else { return true }
+    for case let u as URL in e {
+        if u.lastPathComponent == ".DS_Store" { continue }
+        if (try? u.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == false { return false }
+    }
+    return true
 }
 
 /// "just now", "5 min ago", "3 h ago", "2 days ago": the same words as the Windows/Linux app.
@@ -167,6 +232,12 @@ enum Updates {
 
     static func save(_ s: UpdateState) {
         if let d = try? JSONEncoder().encode(s) { UserDefaults.standard.set(d, forKey: defaultsKey) }
+    }
+
+    /// The wait after the nth failed check in a row: 15 min, doubling, at most 6 h. A failed
+    /// check isn't the daily check, so without this it would be retried on every tick.
+    static func retryDelay(_ failures: Int) -> TimeInterval {
+        min(15 * 60 * pow(2, Double(max(0, failures - 1))), 6 * 3600)
     }
 
     static func due(_ s: UpdateState, now: Date = Date()) -> Bool {

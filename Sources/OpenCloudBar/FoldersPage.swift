@@ -21,7 +21,7 @@ extension FolderStatus.State {
         case .skipped(let why): return "Skipped (\(why))"
         case .failed(let why): return "Failed: \(why)"
         case .needsRepair(let why): return "Needs repair (\(why))"
-        case .bigDeletion: return "Large deletion blocked"
+        case .bigDeletion(let side): return side.isEmpty ? "Large deletion blocked" : "Large deletion blocked (\(side))"
         }
     }
 }
@@ -244,7 +244,7 @@ struct FoldersPage: View {
                              disabledReason: model.syncing ? "Wait for the running sync to finish to change excludes." : nil,
                              restoreDefaults: nil) { lines in
                     guard model.confirm("Change the excludes for “\(f.displayName)”?",
-                                        "After this, rclone needs a one-time Repair of this folder before it syncs again. A Repair merges both sides: the newer copy of each file wins and nothing is deleted.",
+                                        "After this, rclone needs a one-time Repair of this folder before it syncs again. A Repair merges both sides: the newer copy of each file wins, and the older copy is kept in the backups.",
                                         button: "Change Excludes") else { return nil }
                     return await model.updateConfig { c in
                         if let i = c.kept.firstIndex(where: { $0.path == f.path }) { c.kept[i].extraFilters = lines }

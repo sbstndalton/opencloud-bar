@@ -73,7 +73,7 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 			message.Hide()
 		}
 		systray.SetTooltip("OpenCloud Bar — " + st.Summary)
-		configured := e.cfg.Configured()
+		configured := e.config().Configured()
 		needSignIn := !configured || st.SignedOut
 		show(setup, needSignIn)
 		if st.Update.Available {
@@ -88,7 +88,7 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 			pause.SetTitle("Pause Syncing")
 		}
 		enable(pause, configured && st.ConfigError == "")
-		if !e.cfg.Mounting() {
+		if !e.config().Mounting() {
 			openDrive.Hide()
 			toggleDrive.Hide()
 		} else if st.DriveMounted {
@@ -129,7 +129,7 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 	}
 	refresh()
 	// First launch (nothing set up yet): start the set-up right away.
-	if e.Status().ConfigError == "" && !e.cfg.Configured() {
+	if e.Status().ConfigError == "" && !e.config().Configured() {
 		go setUpAndSignIn(e)
 	}
 

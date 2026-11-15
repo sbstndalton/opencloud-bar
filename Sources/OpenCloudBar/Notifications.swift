@@ -58,10 +58,16 @@ struct NotePlanner {
         if !autoMerged.isEmpty {
             let one = autoMerged.count == 1
             out.append(Note(title: one ? "“\(autoMerged[0])” was merged automatically" : "\(autoMerged.count) folders were merged automatically",
-                            body: (one ? "It was" : "They were") + " out of sync. The newer copy of each file was kept and nothing was deleted.",
+                            body: (one ? "It was" : "They were") + " out of sync. The newer copy of each file was kept; older copies are kept in the backups (\(Backups.folderName) in OpenCloud, and on this Mac).",
                             page: .folders))
         }
         return out
+    }
+
+    /// Where a blocked deletion happened, when there is one folder and rclone said.
+    private static func side(_ fs: [(KeptFolder, FolderStatus.State)]) -> String {
+        if fs.count == 1, case .bigDeletion(let s) = fs[0].1, !s.isEmpty { return s }
+        return "on one side"
     }
 
     private static func folderNote(_ k: String, _ fs: [(KeptFolder, FolderStatus.State)]) -> Note {
@@ -87,7 +93,7 @@ struct NotePlanner {
                         body: detail("Open Settings ▸ Kept Folders and choose Repair."), page: .folders)
         case "deletion":
             return Note(title: one ? "Large deletion blocked in “\(names[0])”" : "Large deletions blocked in \(names.count) folders",
-                        body: "More than half of the files were deleted on one side. Check, then allow the deletion or restore the files." + list,
+                        body: "More than half of the files were deleted \(side(fs)). Check, then allow the deletion or restore the files." + list,
                         page: .folders)
         default:
             return Note(title: one ? "Sync failed for “\(names[0])”" : "Sync failed for \(names.count) folders",
@@ -101,8 +107,9 @@ struct NotePlanner {
 @MainActor
 final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     private weak var model: AppModel?
-    private var asked = false
-    private var allowed = false
+    /// The one permission request; every notification waits for its answer (two notes at
+    /// once used to see "already asked, not allowed yet" and drop the second).
+    private var authorization: Task<Bool, Never>?
 
     init(model: AppModel) {
         self.model = model
@@ -114,12 +121,14 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     func show(_ n: Note) {
         guard Bundle.main.bundleIdentifier != nil else { return }
         Task {
-            if !asked {
-                asked = true
-                allowed = (try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])) ?? false
-                if !allowed { Log.line("notifications not allowed; skipping them") }
+            if authorization == nil {
+                authorization = Task {
+                    let ok = (try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])) ?? false
+                    if !ok { Log.line("notifications not allowed; skipping them") }
+                    return ok
+                }
             }
-            guard allowed else { return }
+            guard await authorization?.value == true else { return }
             let c = UNMutableNotificationContent()
             c.title = n.title
             c.body = n.body
