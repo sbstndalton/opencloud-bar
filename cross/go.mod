@@ -4,6 +4,7 @@ go 1.27.4
 
 require (
 	fyne.io/systray v1.12.2
+	github.com/fsnotify/fsnotify v1.9.0
 	github.com/jchv/go-webview2 v0.0.0-20260205173254-56598839c808
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/sys v0.27.0

@@ -4,6 +4,17 @@ All notable changes to OpenCloud Bar. The format follows [Keep a Changelog](http
 
 The release workflow copies the section for a tag into that tag's GitHub release, so every version heading must stay in the form `## [X.Y.Z] - date`.
 
+## [1.5.0] - 2026-11-15
+
+### Added
+- **Live sync (preview, off by default).** **Sync local changes right away (preview)** in the Sync settings watches each kept folder's local copy (Mac: FSEvents; Windows and Linux: fsnotify, one watch per folder) and syncs a folder soon after a change: once it has been quiet for 5 seconds, at most 60 seconds after the first change. Syncs started this way are at least max(30 seconds, the folder's last sync) apart; interval syncs are unchanged and never two syncs run at once (the folder goes through the per-folder queue). The app's own writes (during a sync of that folder and 2 seconds after), rclone's temporary files, the backups folder, conflict copies and folders excluded by name are ignored. While paused, a change only marks the folder; it syncs on resume. The folder shows "Change detected, syncing soon". Watches follow keeping and unkeeping, the setting, a changed local folder and a missing local folder; the Mac starts them again after waking from sleep. On Windows and Linux a watch limit (Linux `fs.inotify.max_user_watches`, or more than 50,000 folders in one tree) puts that folder back on the interval with a one-time notice.
+- Recent Changes records what started a sync (`trigger`: "timer" or "local change") and shows "(after a local change)".
+
+### Not included
+- Changes made in OpenCloud still arrive at the interval.
+- Only excludes that leave out whole folders by name (`- **/name/**`, `- name/**`, `- /Path/**`) are applied to watching; other excludes still apply to the sync itself.
+- Windows and Linux don't restart watches after sleep (fsnotify watches stay valid). The Mac has no watch limit (FSEvents watches a tree with one stream).
+
 ## [1.4.0] - 2026-11-15
 
 ### Added

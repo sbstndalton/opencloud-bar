@@ -16,6 +16,8 @@ struct FolderStatus {
     }
     var state: State = .idle
     var lastSuccess: Date?
+    /// Live sync: a change was seen here, a sync follows soon.
+    var pending = false
 }
 
 /// Owns the three moving parts: the SSH tunnel, the on-demand drive (rclone nfsmount)
@@ -62,6 +64,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var activeFolder: String?
     /// The key of the folder being synced right now.
     @Published private(set) var activeKey: String?
+    /// Live sync (preview): watches the kept folders (LiveSync.swift).
+    private(set) lazy var live = LiveSync(model: self)
+    /// What started each folder's running sync ("timer" or "local change"), for Recent Changes.
+    private var runTrigger: [String: String] = [:]
     /// Recent Changes (oldest first), from activity.json in the sync state folder.
     @Published private(set) var recentChanges: [Change] = []
     private var changesURL: URL { config.stateURL.appendingPathComponent("activity.json") }
@@ -214,6 +220,21 @@ final class AppModel: ObservableObject {
         let paths = Set(config.kept.map(\.key))
         for k in status.keys where !paths.contains(k) { status[k] = nil }
         for k in conflicts.keys where !paths.contains(k) { conflicts[k] = nil }
+        live.update()
+    }
+
+    /// Live sync: show or clear "Change detected, syncing soon".
+    func setPending(_ key: String, _ on: Bool) {
+        if status[key]?.pending != on { status[key]?.pending = on }
+    }
+
+    /// Live sync: these folders changed and settled; sync them (after the running sync, if any).
+    func queueLiveSync(_ keys: [String]) {
+        queuedKeys.formUnion(keys)
+        guard !syncing, !config.paused else { return }
+        let q = queuedKeys
+        queuedKeys = []
+        startSyncAll(manual: false, only: q)
     }
 
     // MARK: - Supervisor
@@ -563,6 +584,9 @@ final class AppModel: ObservableObject {
     /// listings drifted apart (one automatic merge per folder per 24 hours; then the user decides).
     @discardableResult
     private func syncFolder(_ f: KeptFolder, mode: SyncMode) async -> Bool {
+        let began = Date()
+        runTrigger[f.key] = live.ownStart(f.key)
+        defer { live.ownEnd(f.key, began: began); runTrigger[f.key] = nil }
         activeFolder = f.displayName
         activeKey = f.key
         activeFiles = 0
@@ -754,7 +778,11 @@ final class AppModel: ObservableObject {
         Log.append("\n=== \(Date()) \(kind) of \(run.f.path)\n", to: log)
         let changes = ChangeCollector()   // fed off the main thread, line by line
         let r = await runTracked(config.rclone, args, log: log, onLine: { changes.line($0) })
-        if r.status == 0 { addChanges(changes.result(kind: kind, folder: run.f, now: Date())) }
+        if r.status == 0 {
+            var list = changes.result(kind: kind, folder: run.f, now: Date())
+            if kind == "sync" { for i in list.indices { list[i].trigger = runTrigger[run.f.key] ?? "timer" } }
+            addChanges(list)
+        }
         return r
     }
 
@@ -1627,6 +1655,7 @@ final class AppModel: ObservableObject {
             }
             quitting = true
             ticker?.invalidate()
+            live.stopAll()
             lastMessage = "Finishing sync…"
             syncTask?.cancel()
             currentSync?.interrupt()

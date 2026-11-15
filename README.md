@@ -138,6 +138,19 @@ Every sync remembers what it changed: files uploaded, downloaded, deleted on thi
 - Only for kept folders that have synced, and only for files that are in OpenCloud already; with the browser sign-in only. If the server requires a password for links, it says so.
 - The link is made with OpenCloud's libre-graph API (`createLink`, type `view`); only an https link is accepted. Manage or delete links in OpenCloud's web interface.
 
+## Live sync (preview)
+
+Off by default. Turn on **Sync local changes right away (preview)** (Mac: Settings ▸ Sync; Windows, Linux: the settings window, Sync) and OpenCloud Bar watches the local copy of each kept folder. When you change something in one, the folder shows "Change detected, syncing soon" and syncs on its own, without waiting for the interval:
+
+- A folder syncs once nothing in it has changed for 5 seconds, or 60 seconds after the first change while changes keep coming.
+- Syncs started this way are at least 30 seconds apart per folder (longer if the folder's last sync took longer). The regular interval syncs aren't affected, and there is never more than one sync at a time: the folder waits in the same queue as a newly kept folder.
+- The app's own writes don't count: everything during a sync of that folder and 2 seconds after is ignored, and so are rclone's temporary files (`.partial`, `.~tmp~`), the backups folder and conflict copies. Folders excluded by name (like `- **/node_modules/**` or `- /Old/**`) aren't watched; other excludes still apply to the sync itself.
+- While paused, changes only mark the folder; it syncs when you resume.
+- Recent Changes shows "(after a local change)" for changes made by such a sync.
+- Changes made in OpenCloud still arrive at the next interval.
+- Mac: FSEvents watches each folder (about 1 second latency), and the watches are started again after the Mac wakes from sleep. Windows and Linux: each folder in the tree is watched; on Linux, if the system's watch limit is reached (`fs.inotify.max_user_watches`) or a folder tree has more than 50,000 folders, that folder goes back to the interval and a notice says so once.
+- A kept folder whose local copy is missing isn't watched; it is watched once it is there again.
+
 ## Keeping a folder while a sync runs
 
 **Keep a Folder…** and **Keep from a Space…** work while a sync is running. The folder is added at once and its first sync starts as soon as the running sync finishes. Only the new folder syncs then; the others follow at the next interval. On the Mac, a folder's own excludes or subfolders can be changed while a sync runs, unless that sync still has to do this folder. On Windows and Linux they are saved at once and applied when the running sync finishes; the folder then syncs right after.

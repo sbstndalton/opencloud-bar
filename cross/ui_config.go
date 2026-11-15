@@ -37,6 +37,7 @@ type configPatch struct {
 	RclonePath            *string             `json:"rclonePath"`
 	CheckForUpdates       *bool               `json:"checkForUpdates"`
 	Notifications         *bool               `json:"notifications"`
+	LiveSync              *bool               `json:"liveSync"`
 	KeptFilters           map[string][]string `json:"keptFilters"` // kept folder key -> its own excludes
 	// kept folder key -> Choose Subfolders' changes (subfolder -> included), applied to the
 	// folder's excludes as they are in the file (see setSubfolders)
@@ -251,6 +252,13 @@ func applyConfigPatch(p configPatch) (restartPort bool, err error) {
 	}
 	if p.Notifications != nil {
 		set("notifications", *p.Notifications)
+	}
+	if p.LiveSync != nil {
+		if *p.LiveSync {
+			set("liveSync", true)
+		} else {
+			delete(raw, "liveSync") // off is the default: no key
+		}
 	}
 	for key, v := range map[string]*string{"bwLimitUp": p.BwLimitUp, "bwLimitDown": p.BwLimitDown} {
 		if v == nil {

@@ -40,6 +40,7 @@ type FolderStatus struct {
 	LastSuccess time.Time  `json:"lastSuccess,omitempty"`
 	Local       string     `json:"local"`
 	Conflicts   []Conflict `json:"conflicts,omitempty"` // conflict copies in the local copy (conflicts.go)
+	Pending     bool       `json:"pending,omitempty"`   // live sync: a change was seen, a sync follows soon
 }
 
 type Status struct {
@@ -70,6 +71,7 @@ type Engine struct {
 	quitting bool
 	// Folders kept while a sync ran: their first sync runs right after it (keys).
 	queued map[string]bool
+	liveS  *liveState // live sync (watch.go)
 
 	signedOut   bool      // OIDC only: no usable sign-in; nothing runs until the user signs in
 	authRetryAt time.Time // after a transient token-refresh failure, don't retry every tick
@@ -238,6 +240,7 @@ func (e *Engine) refreshStatusLocked() {
 			delete(e.status, p)
 		}
 	}
+	e.updateWatchesLocked()
 }
 
 // Run supervises everything until ctx is cancelled.
@@ -891,6 +894,7 @@ type folderRun struct {
 	f                                KeptFolder
 	local, work, filters, serverFile string
 	marker                           string
+	trigger                          string // "timer" or "local change" (Recent Changes)
 }
 
 // syncFolder runs one bisync. It never creates, recreates or resyncs a folder unless this is
@@ -899,6 +903,9 @@ type folderRun struct {
 func (e *Engine) syncFolder(f KeptFolder, mode syncMode) bool {
 	e.mu.Lock()
 	cfg := e.cfg // this sync's settings: a Reload or settings change meanwhile doesn't touch them
+	began := e.live().now()
+	trigger := e.ownSyncLocked(f.Key(), true, began)
+	defer func() { e.mu.Lock(); e.ownSyncLocked(f.Key(), false, began); e.mu.Unlock() }()
 	e.activeName, e.activeFiles = f.DisplayName(), 0
 	single := e.activeN == 0 // Repair, Stop Keeping…: one folder on its own
 	if single {
@@ -981,7 +988,7 @@ func (e *Engine) syncFolder(f KeptFolder, mode syncMode) bool {
 		}
 		_ = os.WriteFile(filters, []byte(filtersText(cfg, f)), 0o600)
 	}
-	r := folderRun{cfg: cfg, f: f, local: local, work: work, filters: filters, serverFile: serverFile, marker: marker}
+	r := folderRun{cfg: cfg, f: f, local: local, work: work, filters: filters, serverFile: serverFile, marker: marker, trigger: trigger}
 
 	if first {
 		kind := "merge (first sync)"
@@ -1182,7 +1189,13 @@ func (e *Engine) bisync(r folderRun, kind string, extra ...string) (string, erro
 	out, err := e.run(syncTimeout, sf, r.cfg.Rclone(), args...)
 	if err == nil {
 		sf.Flush()
-		addChanges(r.cfg, changes.result(kind, r.f, time.Now()))
+		list := changes.result(kind, r.f, time.Now())
+		if kind == "sync" {
+			for i := range list {
+				list[i].Trigger = r.trigger
+			}
+		}
+		addChanges(r.cfg, list)
 	}
 	return out, err
 }
@@ -1673,6 +1686,7 @@ func (e *Engine) Shutdown() {
 		return
 	}
 	e.quitting = true
+	e.stopWatchesLocked()
 	cs := e.currentSync
 	m, t, td := e.mount, e.tunnel, e.tunnelDone
 	e.mu.Unlock()

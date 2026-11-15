@@ -141,6 +141,8 @@ struct Config: Codable {
     /// "2M" = 2 MiB/s, a bare number is KiB/s). nil: no limit. Same keys as the Go app.
     var bwLimitUp: String?
     var bwLimitDown: String?
+    /// Live sync (preview): watch kept folders, sync a folder soon after a local change. nil: off.
+    var liveSync: Bool?
     var commonFilters: [String] = [
         "- *.tmp", "- .*.bundle.tmp", "- *~", "- .DS_Store", "- ._*", "- Thumbs.db",
         "- .sync_*.db", "- .sync_*.db-*", "- .OpenCloudSync.log", "- .owncloudsync.log",
@@ -180,6 +182,7 @@ struct Config: Codable {
         // Either case, as rclone takes it ("512k" is "512K").
         bwLimitUp = try c.decodeIfPresent(String.self, forKey: .bwLimitUp)?.trimmingCharacters(in: .whitespaces).uppercased()
         bwLimitDown = try c.decodeIfPresent(String.self, forKey: .bwLimitDown)?.trimmingCharacters(in: .whitespaces).uppercased()
+        liveSync = (try? c.decodeIfPresent(Bool.self, forKey: .liveSync)) == true ? true : nil
     }
 
     /// Why a bandwidth limit isn't valid (nil if fine; empty is no limit).
@@ -437,7 +440,7 @@ struct Config: Codable {
             var merged = old
             // Optional settings this app owns are left out of the encoding when nil; drop them
             // from the old file too, so clearing one actually removes it.
-            for k in ["serverURL", "auth", "useTunnel", "webdavVendor", "bwLimitUp", "bwLimitDown"] { merged.removeValue(forKey: k) }
+            for k in ["serverURL", "auth", "useTunnel", "webdavVendor", "bwLimitUp", "bwLimitDown", "liveSync"] { merged.removeValue(forKey: k) }
             let oldKept = (old["kept"] as? [[String: Any]]) ?? []
             if let newKept = new["kept"] as? [[String: Any]] {
                 new["kept"] = newKept.map { entry -> [String: Any] in

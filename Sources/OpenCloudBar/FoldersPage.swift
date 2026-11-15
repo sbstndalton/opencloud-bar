@@ -153,6 +153,10 @@ struct FoldersPage: View {
                                 .lineLimit(1)
                         }
                         .accessibilityElement(children: .combine)
+                    } else if model.status[f.key]?.pending == true {
+                        Label("Change detected, syncing soon", systemImage: "clock.arrow.circlepath")
+                            .lineLimit(1)
+                            .accessibilityLabel("Change detected, syncing soon")
                     } else {
                         Label(state(f).text, systemImage: state(f).symbol)
                             .lineLimit(1)

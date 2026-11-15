@@ -202,6 +202,7 @@ function deletionPrompt(side) {
 }
 // stateLook: dot colour, short status, and (for problems) why, in plain words.
 function stateLook(f) {
+  if (f.pending && f.state !== "syncing") return ["busy", "Change detected, syncing soon", ""];
   switch (f.state) {
     case "syncing": return ["busy", "Syncing…", ""];
     case "ok": return ["ok", "Up to date", ""];
@@ -651,6 +652,7 @@ async function syncPage(main, r) {
   main.append(h("div", { class: "card" },
     h("div", { class: "row" }, h("label", { text: "Pause syncing" }), pausedBox,
       h("span", { class: "hint", text: "Kept folders stop syncing until you resume. The drive keeps working." })),
+    checkField("Sync local changes right away (preview)", "liveSync", "Watches the kept folders and syncs a folder about 5 seconds after you change something in it, instead of waiting for the next interval. Changes in OpenCloud still arrive at the interval."),
     selectField("Sync every", "syncIntervalSeconds", [[60,"1 minute"],[300,"5 minutes"],[900,"15 minutes"],[1800,"30 minutes"],[3600,"1 hour"]]),
     textField("Local folder", "localRoot", kept ? "Can't change while folders are kept here. Stop keeping them first." : "New kept folders are placed inside this folder.", { disabled: kept }),
     numField("Parallel transfers", "transfers", "How many files copy at once (1 to 32).", 1, 32),

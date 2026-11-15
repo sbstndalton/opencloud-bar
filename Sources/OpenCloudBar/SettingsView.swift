@@ -314,6 +314,12 @@ struct SyncPage: View {
                     .disabled(model.configError != nil || !model.config.isConfigured)
                 Text("While paused, kept folders don't sync. The OpenCloud drive keeps working.")
                     .font(.caption).foregroundStyle(.secondary)
+                Toggle("Sync local changes right away (preview)", isOn: Binding(
+                    get: { model.config.liveSync == true },
+                    set: { on in Task { error = await model.updateConfig { $0.liveSync = on ? true : nil } } }))
+                    .disabled(model.configError != nil || !model.config.isConfigured)
+                Text("Watches the kept folders and syncs a folder about 5 seconds after you change something in it, instead of waiting for the next interval. Changes in OpenCloud still arrive at the interval.")
+                    .font(.caption).foregroundStyle(.secondary)
                 ChoicePicker(title: "Sync", choices: Self.intervals, current: model.config.syncIntervalSeconds,
                              customLabel: { "Every \($0) seconds" }) { v in
                     Task { error = await model.updateConfig { $0.syncIntervalSeconds = v } }

@@ -44,6 +44,8 @@ type Change struct {
 	// OpenCloud (so removed here), or summary.
 	Action string `json:"action"`
 	Text   string `json:"text,omitempty"` // a summary's words
+	// Trigger: what started the sync, "timer" or "local change" (live sync); "" for merges.
+	Trigger string `json:"trigger,omitempty"`
 }
 
 const (
@@ -303,7 +305,11 @@ func ChangeLabel(c Change) string {
 	if c.Action == actSummary {
 		return c.Text
 	}
-	return fmt.Sprintf("%s: %s %s", c.Name, c.Path, actionText(c.Action))
+	s := fmt.Sprintf("%s: %s %s", c.Name, c.Path, actionText(c.Action))
+	if c.Trigger == "local change" {
+		s += " (after a local change)"
+	}
+	return s
 }
 
 // pageChange is a change for the settings page: with its words and whether it is still there.
