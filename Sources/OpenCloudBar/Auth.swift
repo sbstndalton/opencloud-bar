@@ -177,12 +177,17 @@ enum Auth {
         let redirect = "http://127.0.0.1:\(port)/"
 
         guard var au = URLComponents(string: d.authorization_endpoint) else { throw AuthError.message("Invalid sign-in page") }
-        au.queryItems = (au.queryItems ?? []) + [
-            .init(name: "response_type", value: "code"), .init(name: "client_id", value: clientID),
-            .init(name: "redirect_uri", value: redirect), .init(name: "scope", value: scopes),
-            .init(name: "state", value: state), .init(name: "code_challenge", value: pkceChallenge(verifier)),
-            .init(name: "code_challenge_method", value: "S256"),
-        ]
+        // Encode values strictly (":" and "/" too). URLComponents leaves them as is, and a
+        // query like "redirect_uri=http://..." is rejected (403) by common reverse-proxy
+        // exploit filters, such as Nginx Proxy Manager's "Block Common Exploits".
+        var strict = CharacterSet.alphanumerics
+        strict.insert(charactersIn: "-._~")
+        func enc(_ s: String) -> String { s.addingPercentEncoding(withAllowedCharacters: strict) ?? s }
+        au.percentEncodedQueryItems = (au.percentEncodedQueryItems ?? []) + [
+            ("response_type", "code"), ("client_id", clientID), ("redirect_uri", redirect),
+            ("scope", scopes), ("state", state), ("code_challenge", pkceChallenge(verifier)),
+            ("code_challenge_method", "S256"),
+        ].map { URLQueryItem(name: $0.0, value: enc($0.1)) }
         guard let url = au.url else { throw AuthError.message("Invalid sign-in page") }
         let opened = await MainActor.run { NSWorkspace.shared.open(url) }
         if !opened { Log.line("couldn't open the browser for sign-in") }
