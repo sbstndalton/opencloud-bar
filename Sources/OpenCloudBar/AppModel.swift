@@ -60,6 +60,10 @@ final class AppModel: ObservableObject {
     private var updateFailures = 0
     /// What the running sync is doing, for the menu's first line.
     @Published private(set) var activeFolder: String?
+    /// The key of the folder being synced right now.
+    @Published private(set) var activeKey: String?
+    /// Folders kept while a sync ran: their first sync runs right after it (keys).
+    private var queuedKeys = Set<String>()
     @Published private(set) var activeFiles = 0
     private var activeIndex = 0, activeCount = 0
     private var settingsWindow: SettingsWindowController?
@@ -456,11 +460,16 @@ final class AppModel: ObservableObject {
     /// Syncs all kept folders. Each folder's repair state is read from disk, so a folder that
     /// was repaired isn't skipped because of what the app remembered. A manual sync also tries
     /// a blocked large deletion again (it is blocked again if nothing changed).
-    private func startSyncAll(manual: Bool) {
+    /// `only`: just these folders (kept while the last sync ran); a full run covers them too.
+    private func startSyncAll(manual: Bool, only: Set<String>? = nil) {
         guard !syncing, config.isConfigured, configError == nil, !signedOut else { return }
-        nextSyncAt = Date().addingTimeInterval(TimeInterval(max(60, config.syncIntervalSeconds)))
+        let folders = config.kept.filter { only?.contains($0.key) ?? true }
+        if only == nil {
+            nextSyncAt = Date().addingTimeInterval(TimeInterval(max(60, config.syncIntervalSeconds)))
+            queuedKeys = []
+        }
+        guard !folders.isEmpty else { return }
         syncing = true
-        let folders = config.kept
         syncTask = Task { [weak self] in
             guard let self else { return }
             if await self.serverTooBusy() {
@@ -485,8 +494,17 @@ final class AppModel: ObservableObject {
             }
             self.activeIndex = 0
             self.activeCount = 0
-            self.syncing = false
+            self.syncEnded()
         }
+    }
+
+    /// Ends a sync activity, then starts the first sync of folders kept meanwhile.
+    private func syncEnded() {
+        syncing = false
+        guard !queuedKeys.isEmpty, !config.paused, !quitting else { return }
+        let q = queuedKeys
+        queuedKeys = []
+        startSyncAll(manual: false, only: q)
     }
 
     /// Returns true if the server is short on memory (or unreachable) and we should not add load.
@@ -533,11 +551,13 @@ final class AppModel: ObservableObject {
     @discardableResult
     private func syncFolder(_ f: KeptFolder, mode: SyncMode) async -> Bool {
         activeFolder = f.displayName
+        activeKey = f.key
         activeFiles = 0
         let single = activeCount == 0   // Repair, Stop Keeping…: one folder on its own
         if single { activeIndex = 1; activeCount = 1 }
         defer {
             activeFolder = nil
+            activeKey = nil
             activeFiles = 0
             if single { activeIndex = 0; activeCount = 0 }
         }
@@ -935,7 +955,7 @@ final class AppModel: ObservableObject {
         syncing = true
         syncTask = Task {
             await body()
-            syncing = false
+            syncEnded()
         }
         return true
     }
@@ -1035,8 +1055,14 @@ final class AppModel: ObservableObject {
         if config.paused {
             lastMessage = "“\(folder.displayName)” downloads when you resume syncing"
         } else {
-            lastMessage = "Downloading “\(folder.displayName)”…"
-            if !syncing { syncNow() }
+            if syncing {
+                // Keeping doesn't wait for a running sync: the new folder syncs right after it.
+                queuedKeys.insert(folder.key)
+                lastMessage = "“\(folder.displayName)” downloads when the running sync finishes"
+            } else {
+                lastMessage = "Downloading “\(folder.displayName)”…"
+                syncNow()
+            }
         }
         return nil
     }
@@ -1046,7 +1072,6 @@ final class AppModel: ObservableObject {
     func keepFolder(in space: Space, path: String) async -> String? {
         if let m = settingsBrokenMessage { return m }
         guard !needsSignIn else { return "Sign in first." }
-        guard !syncing else { return "A sync is running. Try again when it finishes." }
         let rel = path.split(separator: "/").joined(separator: "/")
         if rel.isEmpty { return "Choose a folder in the space (the whole space can't be kept)." }
         if let p = KeptFolder.problem(newPath: rel) { return p.prefix(1).uppercased() + p.dropFirst() + "." }
@@ -1061,15 +1086,40 @@ final class AppModel: ObservableObject {
         } catch {
             return "Couldn't check “\(rel)” in \(space.name): \(error.localizedDescription)"
         }
-        guard !syncing else { return "A sync is running. Try again when it finishes." }
         return addKept(KeptFolder(path: rel, stateName: KeptFolder.makeStateName(for: rel, spaceID: space.id), space: space.ref))
     }
 
     /// The folders directly in `path` of a space, listed with rclone.
     func browse(_ space: Space, path: String) async -> Result<[String], Error> {
         let f = KeptFolder(path: path.split(separator: "/").joined(separator: "/"), stateName: "", space: space.ref)
-        if f.path.contains("'") { return .failure(AuthError.message("That path isn't valid.")) }
-        let r = await Shell.run(config.rclone, ["lsf", "--dirs-only", "--max-depth", "1", config.remote(for: f) + f.path], timeout: 60)
+        return await listDirs(in: f, path: f.path)
+    }
+
+    /// The text of the confirmation before a folder's excludes change (Change Excludes and
+    /// Choose Subfolders): what rclone then needs, and that it deletes nothing.
+    static let filtersChangeText = "After this, the folder needs a one-time Repair before it syncs again. A Repair merges both sides: the newer copy of each file wins, the older copy is kept in the backups, and nothing is deleted."
+
+    /// Choose Subfolders ▸ Save: asks, then applies the checklist's changes to the folder's
+    /// excludes like Change Excludes. Returns an error to show, nil when done or cancelled.
+    func saveSubfolders(_ f: KeptFolder, changes: [String: Bool]) async -> String? {
+        guard let cur = config.kept.first(where: { $0.key == f.key }) else { return "That folder isn't kept any more." }
+        let next = SubfolderRules.apply(cur.extraFilters, changes)
+        if next == cur.extraFilters { return nil }
+        let off = changes.contains { !$0.value }
+        guard confirm("Change which subfolders of “\(f.displayName)” sync?",
+                      Self.filtersChangeText + (off ? "\n\nUnchecked subfolders stay in OpenCloud. Their copy on this Mac stays where it is, no longer synced; move it to the Trash yourself if you don't need it." : ""),
+                      button: "Change Subfolders") else { return nil }
+        return await updateConfig { c in
+            if let i = c.kept.firstIndex(where: { $0.key == f.key }) { c.kept[i].extraFilters = SubfolderRules.apply(c.kept[i].extraFilters, changes) }
+        }
+    }
+
+    /// The folders directly in `path` (relative to the space root) of f's space, from the server.
+    func listDirs(in f: KeptFolder, path: String) async -> Result<[String], Error> {
+        if path.contains("'") || path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) {
+            return .failure(AuthError.message("That path isn't valid."))
+        }
+        let r = await Shell.run(config.rclone, ["lsf", "--dirs-only", "--max-depth", "1", config.remote(for: f) + path], timeout: 60)
         guard r.status == 0 else { return .failure(AuthError.message("Couldn't list that folder.")) }
         let dirs = r.output.split(separator: "\n").map(String.init).filter { $0.hasSuffix("/") }
             .map { String($0.dropLast()) }.filter { !$0.isEmpty && $0 != Backups.folderName }
@@ -1299,8 +1349,12 @@ final class AppModel: ObservableObject {
         if config.isConfigured && !c.isConfigured { return "That would leave OpenCloud Bar without a server to connect to." }
         let old = config
         let reconnect = c.connectionKey != old.connectionKey
-        let filtersChanged = c.commonFilters != old.commonFilters || c.kept.map(\.extraFilters) != old.kept.map(\.extraFilters)
-        if (reconnect || filtersChanged) && syncing { return "A sync is running. Try again when it finishes." }
+        // A folder's own excludes may change while another folder syncs: each run uses the
+        // folder as it was when the run started, and the change applies from its next sync.
+        let changedKeys = Set(c.kept.filter { n in old.kept.first { $0.key == n.key }?.extraFilters != n.extraFilters }.map(\.key))
+        if syncing && (reconnect || c.commonFilters != old.commonFilters || changedKeys.contains(activeKey ?? "")) {
+            return "A sync is running. Try again when it finishes."
+        }
         do { try c.write() } catch { return "Couldn't save the settings: \(error.localizedDescription)" }
 
         config = c

@@ -170,7 +170,7 @@ struct MenuContent: View {
             }
             if !all.isEmpty { Divider() }
             Button("Keep a Folder…") { model.keepFolder() }
-                .disabled(model.syncing || model.needsSignIn)
+                .disabled(model.needsSignIn)
             if !all.isEmpty {
                 Button("Manage Folders…") { model.openSettings(.folders) }
             }

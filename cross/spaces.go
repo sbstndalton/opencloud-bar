@@ -217,23 +217,5 @@ func (e *Engine) BrowseSpace(spaceID, path string) ([]string, error) {
 			return nil, errors.New("that space isn't available (any more)")
 		}
 	}
-	if hasControl(f.Path) || strings.Contains(f.Path, "'") {
-		return nil, errors.New("not a folder path")
-	}
-	out, err := e.run(time.Minute, nil, cfg.Rclone(), "lsf", "--dirs-only", "--max-depth", "1", cfg.RemoteFor(f)+f.Path)
-	if err != nil {
-		return nil, errors.New("couldn't list that folder")
-	}
-	var dirs []string
-	for _, l := range strings.Split(out, "\n") {
-		l = strings.TrimSpace(l)
-		if !strings.HasSuffix(l, "/") { // rclone's own messages share the output
-			continue
-		}
-		if l = strings.TrimSuffix(l, "/"); l != "" && !isBackupFolder(l) {
-			dirs = append(dirs, l)
-		}
-	}
-	sort.Slice(dirs, func(i, j int) bool { return foldKey(dirs[i]) < foldKey(dirs[j]) })
-	return dirs, nil
+	return e.listDirs(cfg, f, f.Path)
 }

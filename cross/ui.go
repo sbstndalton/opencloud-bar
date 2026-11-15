@@ -299,6 +299,7 @@ func (u *webUI) handler(e *Engine) http.Handler {
 		}
 		jsonOK(w, e.SetPaused(*b.Paused))
 	})
+	mux.HandleFunc("GET /ui/api/subfolders", e.serveSubfolders)
 	mux.HandleFunc("GET /ui/api/spaces", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
@@ -560,8 +561,6 @@ func (e *Engine) serveKeep(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case !e.config().Configured() || st.SignedOut:
 		jsonErr(w, http.StatusConflict, fmt.Errorf("sign in first"))
-	case st.Syncing:
-		jsonErr(w, http.StatusConflict, fmt.Errorf("a sync is running; try again when it finishes"))
 	case !st.DriveMounted:
 		jsonErr(w, http.StatusConflict, fmt.Errorf("folders are chosen from the drive: connect the drive first (Drive section), or type the folder's path instead"))
 	default:

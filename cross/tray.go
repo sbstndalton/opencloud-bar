@@ -124,7 +124,7 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 		} else {
 			manage.SetTitle("Manage Folders…")
 		}
-		enable(keep, !needSignIn && !st.Syncing)
+		enable(keep, !needSignIn)
 		enable(syncNow, !st.Syncing && !st.Paused && !needSignIn)
 	}
 	refresh()

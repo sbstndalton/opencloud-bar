@@ -103,6 +103,24 @@ Besides your personal files, OpenCloud has **project spaces** and folders **shar
 - They sync like personal folders, with the same sign-in; merge backups go to `.opencloud-bar-backups` at the top of that space (see [Safety](#safety)).
 - The drive still shows the personal space only.
 
+## Choose subfolders
+
+You can sync only some subfolders of a kept folder:
+
+- **Mac:** Settings ▸ Kept Folders, select the folder, then **Choose Subfolders…** (also in its Actions menu).
+- **Windows, Linux:** in the settings window, Folders, select the folder, then **Choose Subfolders…**.
+
+The list comes from OpenCloud: the folder's subfolders, and with **Show Subfolders** the ones inside those. Uncheck what you don't need here and save.
+
+- Each unchecked subfolder becomes one exclude rule in the folder's excludes, `- /<name>/**` (or `- /<name>/<name>/**`), with `* ? [ ] { } \` in names escaped. The checklist only adds and removes rules of exactly that form. Your own rules stay as they are and where they are; a rule you wrote by hand in that form shows as unchecked.
+- Saving works like changing the excludes: the folder then needs a one-time **Repair**, a merge of both sides that deletes nothing.
+- Nothing is deleted on either side. An unchecked subfolder stays in OpenCloud, and its copy on this computer stays where it is, no longer synced. Move it to the trash yourself if you don't need it. Checking it again brings it back with the Repair (the newer copy of each file wins).
+- A folder name with control characters or leading or trailing spaces can't be unchecked here; use the excludes instead.
+
+## Keeping a folder while a sync runs
+
+**Keep a Folder…** and **Keep from a Space…** work while a sync is running. The folder is added at once and its first sync starts as soon as the running sync finishes. Only the new folder syncs then; the others follow at the next interval. A folder's own excludes or subfolders can be changed while another folder syncs; only the folder being synced right now waits.
+
 ## Conflicts
 
 When a file changed on both sides between two syncs, the newer copy keeps its name and the other is saved next to it with `.conflict1` added to the whole name (`report.pdf.conflict1`; a second one is `.conflict2`). Nothing is lost, but nothing tells you either, so OpenCloud Bar looks for these copies after each sync:

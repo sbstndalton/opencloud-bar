@@ -4,6 +4,21 @@ All notable changes to OpenCloud Bar. The format follows [Keep a Changelog](http
 
 The release workflow copies the section for a tag into that tag's GitHub release, so every version heading must stay in the form `## [X.Y.Z] - date`.
 
+## [1.3.0] - 2026-11-15
+
+### Added
+- **Choose Subfolders…** for a kept folder (Mac: Settings ▸ Kept Folders and the folder's Actions menu; Windows and Linux: the folder's detail on the settings page). A checklist of the folder's subfolders in OpenCloud, two levels deep. An unchecked subfolder becomes the exclude rule `- /<name>/**` in that folder's excludes (glob characters in names are escaped). Other rules, including hand-written ones, are kept as they are and where they are.
+  - Saving asks first and works like changing the excludes: the folder then needs a one-time Repair, which deletes nothing. Unchecked subfolders stay in OpenCloud, and their copy on this computer stays there, no longer synced.
+
+### Changed
+- **Keep a Folder…** and **Keep from a Space…** no longer wait for a running sync. The folder is saved at once and syncs as soon as the running sync finishes, on its own.
+- A folder's own excludes can be changed while another folder syncs; only the folder being synced waits. Windows and Linux: **Save Excludes** for a folder now asks first, as on the Mac.
+
+### Not included
+- The checklist lists subfolders from OpenCloud only. A subfolder that exists only on this computer isn't listed.
+- The copy of an unchecked subfolder on this computer isn't moved to the trash for you.
+- Two levels only. Deeper folders need a hand-written exclude rule.
+
 ## [1.2.0] - 2026-11-15
 
 ### Added

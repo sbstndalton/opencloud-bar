@@ -147,7 +147,7 @@ struct KeepFromSpaceSheet: View {
                     }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(space == nil || path.trimmingCharacters(in: .whitespaces).isEmpty || busy || model.syncing)
+                .disabled(space == nil || path.trimmingCharacters(in: .whitespaces).isEmpty || busy)
             }
         }
         .padding(20)

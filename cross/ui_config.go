@@ -37,9 +37,12 @@ type configPatch struct {
 	RclonePath            *string             `json:"rclonePath"`
 	CheckForUpdates       *bool               `json:"checkForUpdates"`
 	Notifications         *bool               `json:"notifications"`
-	KeptFilters           map[string][]string `json:"keptFilters"` // kept folder path -> its own excludes
-	BwLimitUp             *string             `json:"bwLimitUp"`   // "" for no limit
-	BwLimitDown           *string             `json:"bwLimitDown"`
+	KeptFilters           map[string][]string `json:"keptFilters"` // kept folder key -> its own excludes
+	// kept folder key -> Choose Subfolders' changes (subfolder -> included), applied to the
+	// folder's excludes as they are in the file (see setSubfolders)
+	KeptSubfolders map[string]map[string]bool `json:"keptSubfolders"`
+	BwLimitUp      *string                    `json:"bwLimitUp"` // "" for no limit
+	BwLimitDown    *string                    `json:"bwLimitDown"`
 }
 
 var (
@@ -287,6 +290,40 @@ func applyConfigPatch(p configPatch) (restartPort bool, err error) {
 			}
 			if !found {
 				return false, fmt.Errorf("%q isn't a kept folder", path)
+			}
+		}
+		set("kept", kept)
+	}
+	if p.KeptSubfolders != nil {
+		kept, err := rawKept(raw)
+		if err != nil {
+			return false, err
+		}
+		for key, changes := range p.KeptSubfolders {
+			found := false
+			for _, k := range kept {
+				if rawKey(k) != key {
+					continue
+				}
+				found = true
+				var rules []string
+				if b, ok := k["extraFilters"]; ok && string(b) != "null" {
+					if err := json.Unmarshal(b, &rules); err != nil {
+						return false, fmt.Errorf("couldn't read the excludes of %q: %w", key, err)
+					}
+				}
+				rules, err := setSubfolders(rules, changes)
+				if err != nil {
+					return false, err
+				}
+				if len(rules) == 0 {
+					delete(k, "extraFilters")
+				} else {
+					k["extraFilters"] = mustJSON(rules)
+				}
+			}
+			if !found {
+				return false, fmt.Errorf("%q isn't a kept folder", key)
 			}
 		}
 		set("kept", kept)

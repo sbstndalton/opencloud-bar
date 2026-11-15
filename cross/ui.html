@@ -22,6 +22,7 @@ h3 { margin:22px 0 8px; font-size:14px; }
 .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px 16px; margin:12px 0; }
 .row { display:flex; gap:12px; align-items:center; margin:8px 0; flex-wrap:wrap; }
 .row > label { width:210px; flex:none; }
+.check, .row > label.check { display:flex; gap:6px; align-items:center; margin:4px 0; width:auto; }
 .hint { color:var(--muted); font-size:12.5px; margin:2px 0; }
 input[type=text], input[type=number], select, textarea { font:inherit; color:var(--text); background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:6px 8px; min-width:0; }
 input[type=text] { width:320px; max-width:100%; }
@@ -231,7 +232,7 @@ function drawFolders() {
   const busy = S.status.syncing;
   const list = S.folders;
   const bar = h("div", { class: "row" },
-    h("button", { class: "btn primary", disabled: busy || !S.config.configured || S.status.signedOut, onclick: keepFolder }, "Keep a Folder…"),
+    h("button", { class: "btn primary", disabled: !S.config.configured || S.status.signedOut, onclick: keepFolder }, "Keep a Folder…"),
     h("button", { class: "btn", disabled: busy || !S.config.configured || S.status.paused, onclick: () => act(() => post("sync"), "Sync started") }, "Sync Now"),
     h("button", { class: "btn", disabled: !S.config.configured, onclick: () => setPaused(!S.status.paused) }, S.status.paused ? "Resume Syncing" : "Pause Syncing"),
     h("button", { class: "btn", disabled: !S.config.serverURL, onclick: () => act(() => post("open", { kind: "web" })) }, "Open OpenCloud in Browser"));
@@ -284,7 +285,66 @@ function folderDetail(f, busy) {
     h("h3", { text: "Excludes for this folder only" }),
     h("p", { class: "hint", text: "One rule per line, like - *.iso (exclude) or + keep.txt (include). They apply on top of the common excludes in Sync." }),
     ta,
-    h("div", { class: "row" }, h("button", { class: "btn", onclick: () => save({ keptFilters: { [f.path]: ta.value.split("\n") } }) }, "Save Excludes")));
+    h("div", { class: "row" }, h("button", { class: "btn", onclick: () => {
+      if (confirm(filtersChangeText(f.name))) save({ keptFilters: { [f.path]: ta.value.split("\n") } });
+    } }, "Save Excludes")),
+    subfolderBox(f));
+}
+function filtersChangeText(name) {
+  return "Change what syncs in " + name + "?\n\nAfter this, the folder needs a one-time Repair before it syncs again. A Repair merges both sides: the newer copy of each file wins, the older copy is kept in the backups, and nothing is deleted.";
+}
+
+// Choose Subfolders: a checklist of the folder's subfolders in OpenCloud, two levels deep.
+// Unchecked ones get an exclude rule "- /<name>/**" (other rules stay as they are).
+let subPick = null; // { folder, items, children: { name: items }, changes: { "A" | "A/B": included } }
+async function loadSubfolders(f, name) {
+  try {
+    const r = await get("subfolders?folder=" + encodeURIComponent(f.path) + "&sub=" + encodeURIComponent(name || ""));
+    if (!subPick || subPick.folder !== f.path) subPick = { folder: f.path, items: null, children: {}, changes: {} };
+    if (name) subPick.children[name] = r.folders; else subPick.items = r.folders;
+  } catch (e) { toast(e.message, true); if (!name) subPick = null; }
+  drawFolders();
+}
+function subfolderBox(f) {
+  const box = h("div", {}, h("h3", { text: "Subfolders" }));
+  if (!subPick || subPick.folder !== f.path || !subPick.items) {
+    box.append(h("p", { class: "hint", text: "Choose which subfolders of " + f.name + " sync to this computer." }),
+      h("div", { class: "row" }, h("button", { class: "btn", onclick: () => { subPick = { folder: f.path, items: null, children: {}, changes: {} }; loadSubfolders(f, ""); } }, "Choose Subfolders…")));
+    return box;
+  }
+  const included = (rel, it) => rel in subPick.changes ? subPick.changes[rel] : !it.excluded;
+  const row = (rel, it, parentOff) => {
+    const cb = h("input", { type: "checkbox" });
+    cb.checked = !parentOff && included(rel, it);
+    cb.disabled = parentOff || !it.choosable;
+    cb.addEventListener("change", () => { subPick.changes[rel] = cb.checked; drawFolders(); });
+    return h("label", { class: "check", title: it.choosable ? "" : "This name can't be chosen here; use the excludes above" }, cb, h("span", { text: it.name + "/" }));
+  };
+  const list = h("div", { class: "card" });
+  if (!subPick.items.length) list.append("No subfolders in OpenCloud.");
+  for (const it of subPick.items) {
+    const on = included(it.name, it);
+    const kids = subPick.children[it.name];
+    list.append(h("div", { class: "row" }, row(it.name, it, false),
+      on && it.choosable && !kids ? h("button", { class: "btn", onclick: () => loadSubfolders(f, it.name) }, "Show Subfolders") : null));
+    if (kids) {
+      const inner = h("div", { style: "margin-left: 2em" });
+      if (!kids.length) inner.append(h("span", { class: "hint", text: "No subfolders." }));
+      for (const k of kids) inner.append(row(it.name + "/" + k.name, k, !on));
+      list.append(inner);
+    }
+  }
+  const changed = Object.keys(subPick.changes).length > 0;
+  box.append(h("p", { class: "hint", text: "Unchecked subfolders stop syncing. Nothing is deleted: they stay in OpenCloud, and the copy already on this computer stays where it is (no longer synced; delete it yourself if you don't need it)." }),
+    list,
+    h("div", { class: "row" },
+      h("button", { class: "btn primary", disabled: !changed, onclick: () => {
+        if (!confirm(filtersChangeText(f.name) + "\n\nUnchecked subfolders stay in OpenCloud. Their copy on this computer stays where it is, no longer synced; move it to the trash yourself if you don't need it.")) return;
+        const changes = subPick.changes; subPick = null;
+        save({ keptSubfolders: { [f.path]: changes } });
+      } }, "Save Subfolders"),
+      h("button", { class: "btn", onclick: () => { subPick = null; drawFolders(); } }, "Cancel")));
+  return box;
 }
 async function stopKeeping(f) {
   let text = "Your changes are synced to OpenCloud first. Then the copy on this computer is moved to the trash. The folder stays in OpenCloud.";
@@ -314,7 +374,7 @@ function keepBox(busy) {
       keepSpaces && !keepSpaces.length ? h("span", { class: "hint", text: "No project spaces or shares are available to you." }) : null),
     h("div", { class: "row" }, h("input", { type: "text", id: "keep-path", placeholder: "Documents/Projects" }),
       h("button", { class: "btn", onclick: browse }, "List Folders"),
-      h("button", { class: "btn", disabled: busy, onclick: () => { const p = pathOf(); if (p) act(() => post("keep", { path: p, space: keepSpace }), "Folder kept; the first sync starts shortly"); } }, "Keep")));
+      h("button", { class: "btn", onclick: () => { const p = pathOf(); if (p) act(() => post("keep", { path: p, space: keepSpace }), busy ? "Folder kept; its first sync starts when the running sync finishes" : "Folder kept; the first sync starts shortly"); } }, "Keep")));
   if (keepDirs) box.append(h("div", { class: "card" }, keepDirs.length ? keepDirs.map(d => h("button", { class: "btn", onclick: () => {
     const p = document.getElementById("keep-path"); p.value = (p.value.trim() ? p.value.trim().replace(/\/+$/, "") + "/" : "") + d; browse(); } }, d + "/")) : "No folders here."));
   return box;

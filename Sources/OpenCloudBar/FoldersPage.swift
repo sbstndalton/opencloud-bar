@@ -101,6 +101,7 @@ struct FoldersPage: View {
     @ObservedObject var store: ServerInfoStore
     @Local private var selection: KeptFolder.ID?
     @Local private var keepingFromSpace = false
+    @Local private var choosingSubfolders: KeptFolder?
 
     private var selected: KeptFolder? { model.config.kept.first { $0.id == selection } }
 
@@ -156,6 +157,9 @@ struct FoldersPage: View {
             .sheet(isPresented: $keepingFromSpace) {
                 KeepFromSpaceSheet(model: model) { keepingFromSpace = false }
             }
+            .sheet(item: $choosingSubfolders) { f in
+                ChooseSubfoldersSheet(model: model, folder: f) { choosingSubfolders = nil }
+            }
             .contextMenu(forSelectionType: KeptFolder.ID.self) { ids in
                 if let f = model.config.kept.first(where: { ids.contains($0.id) }) { actions(f) }
             } primaryAction: { ids in
@@ -187,9 +191,9 @@ struct FoldersPage: View {
             }
             HStack {
                 Button("Keep a Folder…") { model.keepFolder() }
-                    .disabled(model.syncing || model.needsSignIn)
+                    .disabled(model.needsSignIn)
                 Button("Keep from a Space…") { keepingFromSpace = true }
-                    .disabled(model.syncing || model.needsSignIn || !model.config.isOIDC)
+                    .disabled(model.needsSignIn || !model.config.isOIDC)
                     .help("Project spaces and folders shared with you")
                 Button(model.config.paused ? "Resume Syncing" : "Pause Syncing") { model.setPaused(!model.config.paused) }
                     .disabled(model.configError != nil || !model.config.isConfigured)
@@ -223,6 +227,8 @@ struct FoldersPage: View {
         default:
             EmptyView()
         }
+        Button("Choose Subfolders…") { choosingSubfolders = f }
+            .disabled(model.needsSignIn || model.activeKey == f.key)
         Divider()
         Button("Stop Keeping on This Mac…") { model.stopKeeping(f) }.disabled(model.syncing)
     }
@@ -248,14 +254,22 @@ struct FoldersPage: View {
                         Text(model.status[f.key]?.lastSuccess.map { agoText($0) } ?? "Never")
                     }
                 }
+                HStack {
+                    Text("Subfolders").font(.headline)
+                    Spacer()
+                    Button("Choose Subfolders…") { choosingSubfolders = f }
+                        .disabled(model.needsSignIn || model.activeKey == f.key)
+                }
+                Text("Choose which subfolders sync to this Mac; unchecked ones become exclude rules below.")
+                    .font(.caption).foregroundStyle(.secondary)
                 Text("Excludes for this folder").font(.headline)
                 Text("Files matching these rules are not synced, on top of the excludes under Sync. One rule per line, for example “- /Old backups/**”.")
                     .font(.caption).foregroundStyle(.secondary)
                 FilterEditor(rules: f.extraFilters,
-                             disabledReason: model.syncing ? "Wait for the running sync to finish to change excludes." : nil,
+                             disabledReason: model.activeKey == f.key ? "Wait for this folder's sync to finish to change its excludes." : nil,
                              restoreDefaults: nil) { lines in
                     guard model.confirm("Change the excludes for “\(f.displayName)”?",
-                                        "After this, rclone needs a one-time Repair of this folder before it syncs again. A Repair merges both sides: the newer copy of each file wins, and the older copy is kept in the backups.",
+                                        AppModel.filtersChangeText,
                                         button: "Change Excludes") else { return nil }
                     return await model.updateConfig { c in
                         if let i = c.kept.firstIndex(where: { $0.key == f.key }) { c.kept[i].extraFilters = lines }

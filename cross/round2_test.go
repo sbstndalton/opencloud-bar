@@ -26,7 +26,7 @@ d="` + dir + `"
 echo "$*" >> "$d/calls"
 case "$1" in
 lsf) [ -f "$d/lsf" ] && cat "$d/lsf"; exit 0 ;;
-bisync) [ -f "$d/bisync.out" ] && cat "$d/bisync.out"; [ -f "$d/bisync.code" ] && exit "$(cat "$d/bisync.code")"; exit 0 ;;
+bisync) while [ -f "$d/hold" ]; do sleep 0.05; done; [ -f "$d/bisync.out" ] && cat "$d/bisync.out"; [ -f "$d/bisync.code" ] && exit "$(cat "$d/bisync.code")"; exit 0 ;;
 esac
 exit 0
 `

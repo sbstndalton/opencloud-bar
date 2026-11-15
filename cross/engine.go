@@ -68,6 +68,8 @@ type Engine struct {
 	message  string
 	syncing  bool
 	quitting bool
+	// Folders kept while a sync ran: their first sync runs right after it (keys).
+	queued map[string]bool
 
 	signedOut   bool      // OIDC only: no usable sign-in; nothing runs until the user signs in
 	authRetryAt time.Time // after a transient token-refresh failure, don't retry every tick
@@ -771,13 +773,28 @@ func (e *Engine) SyncNow() {
 	}
 }
 
-func (e *Engine) startSyncAllLocked(manual bool) {
-	iv := time.Duration(max(60, e.cfg.SyncIntervalSeconds)) * time.Second
-	e.nextSyncAt = time.Now().Add(iv)
+func (e *Engine) startSyncAllLocked(manual bool) { e.startRunLocked(manual, nil) }
+
+// startRunLocked syncs every kept folder, or only those in only (folders kept while the last
+// sync ran). A full run covers the queued folders too.
+func (e *Engine) startRunLocked(manual bool, only map[string]bool) {
+	var folders []KeptFolder
+	for _, f := range e.cfg.Kept {
+		if only == nil || only[f.Key()] {
+			folders = append(folders, f)
+		}
+	}
+	if only == nil {
+		iv := time.Duration(max(60, e.cfg.SyncIntervalSeconds)) * time.Second
+		e.nextSyncAt = time.Now().Add(iv)
+		e.queued = nil
+	}
+	if len(folders) == 0 {
+		return
+	}
 	e.syncing = true
-	folders := append([]KeptFolder(nil), e.cfg.Kept...)
 	go func() {
-		defer func() { e.mu.Lock(); e.syncing = false; e.mu.Unlock(); e.notify() }()
+		defer e.syncFinished()
 		if reason := e.serverTooBusy(); reason != "" {
 			for _, f := range folders {
 				e.setState(f, StSkipped, reason)
@@ -1297,10 +1314,23 @@ func (e *Engine) exclusive(body func()) error {
 	e.syncing = true
 	e.mu.Unlock()
 	go func() {
-		defer func() { e.mu.Lock(); e.syncing = false; e.mu.Unlock(); e.notify() }()
+		defer e.syncFinished()
 		body()
 	}()
 	return nil
+}
+
+// syncFinished ends a sync activity, then starts the first sync of folders kept meanwhile.
+func (e *Engine) syncFinished() {
+	e.mu.Lock()
+	e.syncing = false
+	if len(e.queued) > 0 && !e.quitting && e.cfgErr == nil && e.cfg.Configured() && !e.signedOut && !e.cfg.Paused {
+		only := e.queued
+		e.queued = nil
+		e.startRunLocked(false, only)
+	}
+	e.mu.Unlock()
+	e.notify()
 }
 
 func (e *Engine) find(path string) (KeptFolder, bool) {
@@ -1402,9 +1432,6 @@ func (e *Engine) keepIn(space *SpaceRef, path, localPath string) error {
 	if e.cfgErr != nil {
 		return settingsBroken(e.cfgErr)
 	}
-	if e.syncing {
-		return fmt.Errorf("a sync is running; try again when it finishes")
-	}
 	for _, g := range e.cfg.Kept {
 		if g.spaceID() == sid && overlaps(path, g.Path) {
 			return fmt.Errorf("%q overlaps %q, which is already kept", path, g.Path)
@@ -1443,7 +1470,18 @@ func (e *Engine) keepIn(space *SpaceRef, path, localPath string) error {
 	cfg.Kept = next.Kept
 	e.cfg = cfg
 	e.refreshStatusLocked()
-	e.nextSyncAt = time.Time{}
+	if e.syncing {
+		// Keeping doesn't wait for a running sync: the new folder syncs right after it.
+		if e.queued == nil {
+			e.queued = map[string]bool{}
+		}
+		e.queued[f.Key()] = true
+		if s := e.status[f.Key()]; s != nil {
+			s.Detail = "starts when the running sync finishes"
+		}
+	} else {
+		e.nextSyncAt = time.Time{}
+	}
 	return nil
 }
 
