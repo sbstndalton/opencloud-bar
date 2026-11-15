@@ -84,7 +84,7 @@ struct FilterEditor: View {
                 }
                 .disabled(!changed || busy || disabledReason != nil)
                 .accessibilityLabel("Apply")
-                Button("Revert") { text = rules.joined(separator: "\n"); error = nil }.accessibilityLabel("Revert")
+                Button("Revert") { text = rules.joined(separator: "\n"); error = nil }
                     .disabled(!changed)
                     .accessibilityLabel("Revert")
                 if let d = restoreDefaults {
@@ -208,10 +208,10 @@ struct FoldersPage: View {
                 .background(Color.orange.opacity(0.12))
             }
             HStack {
-                Button("Keep a Folder…") { model.keepFolder() }.accessibilityLabel("Keep a Folder…")
+                Button("Keep a Folder…") { model.keepFolder() }
                     .disabled(model.needsSignIn)
                     .accessibilityLabel("Keep a Folder…")
-                Button("Keep from a Space…") { keepingFromSpace = true }.accessibilityLabel("Keep from a Space…")
+                Button("Keep from a Space…") { keepingFromSpace = true }
                     .disabled(model.needsSignIn || !model.config.isOIDC)
                     .help("Project spaces and folders shared with you")
                     .accessibilityLabel("Keep from a Space…")
@@ -251,6 +251,8 @@ struct FoldersPage: View {
         }
         Button("Choose Subfolders…") { choosingSubfolders = f }.accessibilityLabel("Choose Subfolders…")
             .disabled(model.needsSignIn || model.folderBusy(f))
+        Button("Copy Share Link…") { model.shareFrom(f) }.accessibilityLabel("Copy Share Link…")
+            .disabled(model.needsSignIn || !model.config.isOIDC)
         Divider()
         Button("Stop Keeping on This Mac…") { model.stopKeeping(f) }.disabled(model.syncing).accessibilityLabel("Stop Keeping on This Mac…")
     }
@@ -279,7 +281,7 @@ struct FoldersPage: View {
                 HStack {
                     Text("Subfolders").font(.headline)
                     Spacer()
-                    Button("Choose Subfolders…") { choosingSubfolders = f }.accessibilityLabel("Choose Subfolders…")
+                    Button("Choose Subfolders…") { choosingSubfolders = f }
                         .disabled(model.needsSignIn || model.folderBusy(f))
                         .accessibilityLabel("Choose Subfolders of \(f.displayName)…")
                 }

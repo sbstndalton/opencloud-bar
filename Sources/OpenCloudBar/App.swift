@@ -105,6 +105,9 @@ struct MenuContent: View {
         Divider()
 
         keptFoldersMenu
+        recentChangesMenu
+        Button("Share a File…") { model.shareFile() }
+            .disabled(model.needsSignIn || !model.config.isOIDC || model.config.kept.isEmpty)
         if model.conflictCount > 0 {
             Button("\(AppModel.conflictsText(model.conflictCount).prefix(1).uppercased() + AppModel.conflictsText(model.conflictCount).dropFirst())…") { model.openSettings(.conflicts) }
         }
@@ -126,6 +129,20 @@ struct MenuContent: View {
     }
 
     private static let menuLimit = 15
+
+    /// The last 10 changes; a click shows the file in Finder (not for deleted files).
+    private var recentChangesMenu: some View {
+        let last = Array(model.recentChanges.suffix(10).reversed())
+        return Menu("Recent Changes") {
+            if last.isEmpty { Text("Nothing yet") }
+            ForEach(last) { c in
+                Button("\(c.label) · \(c.time.formatted(date: .omitted, time: .shortened))") { model.reveal(c) }
+                    .disabled(!model.changeExists(c))
+            }
+            Divider()
+            Button("All Recent Changes…") { model.openSettings(.activity) }
+        }
+    }
 
     /// One compact submenu, however many folders are kept. Folders that need attention come
     /// first; past `menuLimit` folders only the most relevant ones are listed.

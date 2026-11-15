@@ -24,8 +24,8 @@ h3 { margin:22px 0 8px; font-size:14px; }
 .row > label { width:210px; flex:none; }
 .check, .row > label.check { display:flex; gap:6px; align-items:center; margin:4px 0; width:auto; }
 .hint { color:var(--muted); font-size:12.5px; margin:2px 0; }
-input[type=text], input[type=number], select, textarea { font:inherit; color:var(--text); background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:6px 8px; min-width:0; }
-input[type=text] { width:320px; max-width:100%; }
+input[type=text], input[type=password], input[type=search], input[type=number], select, textarea { font:inherit; color:var(--text); background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:6px 8px; min-width:0; }
+input[type=text], input[type=password], input[type=search] { width:320px; max-width:100%; }
 input[type=number] { width:110px; }
 textarea { width:100%; min-height:150px; font-family:ui-monospace, Menlo, Consolas, monospace; font-size:12.5px; }
 button.btn { font:inherit; color:var(--text); background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:6px 12px; cursor:pointer; }
@@ -76,7 +76,7 @@ tbody tr:focus-visible { outline-offset:-2px; }
 <script nonce="{{NONCE}}">
 "use strict";
 // Plain DOM code, no libraries. Text from the server is only ever set with textContent.
-const SECTIONS = [["folders","Folders"],["conflicts","Conflicts"],["account","Account"],["sync","Sync"],["drive","Drive"],["general","General"],["logs","Logs"],["about","About"]];
+const SECTIONS = [["folders","Folders"],["activity","Activity"],["conflicts","Conflicts"],["account","Account"],["sync","Sync"],["drive","Drive"],["general","General"],["logs","Logs"],["about","About"]];
 let S = null;            // last /ui/api/state
 let section = "folders";
 let selected = null;     // selected folder path
@@ -229,7 +229,7 @@ function go(id, focus) {
   buildNav();
   const main = document.getElementById("main");
   main.replaceChildren();
-  ({ folders, conflicts, account, sync: syncPage, drive, general, logs, about })[id](main, render);
+  ({ folders, activity, conflicts, account, sync: syncPage, drive, general, logs, about })[id](main, render);
   // A section chosen in the list: move the keyboard focus to its heading.
   const h2 = focus && main.querySelector("h2");
   if (h2) { h2.tabIndex = -1; h2.focus(); }
@@ -338,7 +338,8 @@ function folderDetail(f, busy) {
     h("div", { class: "row" }, h("button", { class: "btn", onclick: () => {
       if (confirm(filtersChangeText(f.name))) save({ keptFilters: { [f.path]: ta.value.split("\n") } });
     } }, "Save Excludes")),
-    subfolderBox(f));
+    subfolderBox(f),
+    shareBox(f));
 }
 function filtersChangeText(name) {
   return "Change what syncs in " + name + "?\n\nNothing is deleted from OpenCloud, and the copy on this computer stays where it is. " + name + " syncs again right after, comparing both sides: the newer copy of each file wins, and replaced files are kept in the backups.";
@@ -429,6 +430,99 @@ function keepBox(busy) {
   if (keepDirs) box.append(h("div", { class: "card" }, keepDirs.length ? keepDirs.map(d => h("button", { class: "btn", onclick: () => {
     const p = document.getElementById("keep-path"); p.value = (p.value.trim() ? p.value.trim().replace(/\/+$/, "") + "/" : "") + d; browse(); } }, d + "/")) : "No folders here."));
   return box;
+}
+
+// Copy Share Link: a public, read-only link to a file or folder in this kept folder.
+let sharePick = null; // { folder, sub, items, chosen, days, pw, url }; pw only in memory, until the link is made
+async function loadItems(f, sub) {
+  try {
+    const r = await get("items?folder=" + encodeURIComponent(f.path) + "&sub=" + encodeURIComponent(sub));
+    const old = sharePick && sharePick.folder === f.path ? sharePick : {};
+    sharePick = { folder: f.path, sub, items: r.items, chosen: old.chosen || "", days: old.days || "0", pw: old.pw || "", url: old.url || "" };
+  } catch (e) { toast(e.message, true); }
+  drawFolders();
+}
+function shareBox(f) {
+  const box = h("div", {}, h("h3", { text: "Share" }));
+  if (!sharePick || sharePick.folder !== f.path) {
+    box.append(h("p", { class: "hint", text: "Make a public, read-only link to a file or folder in " + f.name + " and copy it." }),
+      h("div", { class: "row" }, h("button", { class: "btn", onclick: () => { sharePick = { folder: f.path, sub: "", items: null, chosen: "" }; loadItems(f, ""); } }, "Copy Share Link…")));
+    return box;
+  }
+  if (!sharePick.items) return box;
+  const sub = sharePick.sub;
+  const list = h("div", { class: "card", role: "list", "aria-label": "Files and folders in " + (sub ? f.name + "/" + sub : f.name) });
+  if (sub) list.append(h("div", { role: "listitem" }, h("button", { class: "btn", onclick: () => loadItems(f, sub.split("/").slice(0, -1).join("/")) }, "Up")));
+  const pick = (rel) => { sharePick.chosen = rel; drawFolders(); };
+  list.append(h("label", { class: "check", role: "listitem" }, (() => { const r = h("input", { type: "radio", name: "share-item" }); r.checked = sharePick.chosen === sub; r.addEventListener("change", () => pick(sub)); return r; })(),
+    h("span", { text: (sub ? sub.split("/").pop() : f.name) + "/ (this folder)" })));
+  for (const it of sharePick.items) {
+    const rel = sub ? sub + "/" + it.name : it.name;
+    const r = h("input", { type: "radio", name: "share-item" }); r.checked = sharePick.chosen === rel;
+    r.addEventListener("change", () => pick(rel));
+    list.append(h("div", { class: "row", role: "listitem" }, h("label", { class: "check" }, r, h("span", { text: it.name + (it.dir ? "/" : "") })),
+      it.dir ? h("button", { class: "btn", "aria-label": "Open " + it.name, onclick: () => loadItems(f, rel) }, "Open") : null));
+  }
+  const days = h("select", { id: "share-days" }, [["0", "Never"], ["1", "After 1 day"], ["7", "After 7 days"], ["30", "After 30 days"]].map(([v, t]) => h("option", { value: v, text: t })));
+  days.value = sharePick.days;
+  days.addEventListener("change", () => { sharePick.days = days.value; });
+  const pw = h("input", { type: "password", id: "share-pw", autocomplete: "new-password", placeholder: "optional" });
+  pw.value = sharePick.pw;
+  pw.addEventListener("input", () => { sharePick.pw = pw.value; });
+  const out = h("input", { type: "text", id: "share-url", readonly: true, "aria-label": "Share link", placeholder: "The link appears here" });
+  out.value = sharePick.url;
+  box.append(h("p", { class: "hint", text: "Anyone with the link can view and download it, without signing in. The password, if you set one, isn't stored here." }),
+    list,
+    h("div", { class: "row" }, h("label", { text: "Link expires" }), days),
+    h("div", { class: "row" }, h("label", { text: "Password" }), pw),
+    h("div", { class: "row" },
+      h("button", { class: "btn primary", onclick: async (ev) => {
+        const btn = ev.currentTarget; btn.disabled = true;
+        const p = sharePick;
+        try {
+          const r = await post("share", { folder: f.path, path: p.chosen, days: parseInt(p.days, 10), password: p.pw });
+          p.pw = ""; p.url = r.url;
+          drawFolders();
+          try { await navigator.clipboard.writeText(r.url); toast("Link copied"); } catch (e) { const o = document.getElementById("share-url"); if (o) o.select(); toast("Link made; copy it from the field below"); }
+        } catch (e) { toast(e.message, true); }
+        btn.disabled = false;
+      } }, "Create and Copy Link"),
+      h("button", { class: "btn", onclick: () => { sharePick = null; drawFolders(); } }, "Close")),
+    h("div", { class: "row" }, out));
+  return box;
+}
+
+// ---- Activity (Recent Changes)
+
+let activityFilter = "";
+async function activity(main, r) {
+  header(main, "Activity");
+  main.append(h("p", { class: "hint", text: "What the last syncs changed, newest first (the last 500 changes). A merge, such as a first sync or a Repair, is one line." }));
+  const q = h("input", { type: "search", id: "activity-q", placeholder: "Search", "aria-label": "Search recent changes", value: activityFilter });
+  const body = h("div", { id: "activity-body" });
+  main.append(h("div", { class: "row" }, q), body);
+  let list = [];
+  const draw = () => {
+    const t = activityFilter.toLowerCase();
+    const rows = list.filter(c => !t || c.label.toLowerCase().includes(t));
+    if (!rows.length) { body.replaceChildren(h("div", { class: "card" }, list.length ? "Nothing matches." : "No changes yet. They show up here after the next sync.")); return; }
+    keepFocus(body, () => body.replaceChildren(h("table", { "aria-label": "Recent changes" },
+      h("thead", {}, h("tr", {}, h("th", { text: "When" }), h("th", { text: "Change" }), h("th", { text: "" }))),
+      h("tbody", {}, rows.slice(0, 500).map(c => h("tr", {},
+        h("td", { text: new Date(c.time).toLocaleString() }),
+        h("td", { class: c.path ? "path" : "", text: c.label }),
+        h("td", {},
+          c.exists ? h("button", { class: "btn", "aria-label": "Show " + c.path + " in its folder", onclick: () => act(() => post("open", { kind: "item", folder: c.folder, path: c.path })) }, "Show in Folder") : null,
+          c.exists && S.config.serverURL ? h("button", { class: "btn", "aria-label": "Open OpenCloud in the browser", onclick: () => act(() => post("open", { kind: "web" })) }, "Open in Browser") : null)))))));
+  };
+  q.addEventListener("input", () => { activityFilter = q.value; draw(); });
+  const load = async () => {
+    try { list = (await get("changes")).changes; } catch (e) { return; }
+    if (r !== render) return;
+    draw();
+  };
+  await load();
+  timers.push(setInterval(load, 10000));
 }
 
 // ---- Conflicts

@@ -1148,10 +1148,9 @@ func (e *Engine) bisync(r folderRun, kind string, extra ...string) (string, erro
 	if ck <= 0 {
 		ck = 6
 	}
-	level := "NOTICE"
-	if kind != "sync" {
-		level = "INFO" // merges are rare: log every copy so a merge can be checked afterwards
-	}
+	// INFO: bisync then says what it copies and deletes, for Recent Changes (changes.go), and
+	// a merge's every copy can be checked afterwards.
+	level := "INFO"
 	args := []string{"bisync", r.local, r.cfg.RemoteFor(r.f) + r.f.Path,
 		"--workdir", r.work, "--filters-file", r.filters,
 		"--create-empty-src-dirs", "--compare", "size,modtime",
@@ -1179,7 +1178,11 @@ func (e *Engine) bisync(r folderRun, kind string, extra ...string) (string, erro
 	e.mu.Lock()
 	e.activeFiles = 0
 	e.mu.Unlock()
-	return e.run(syncTimeout, sf, r.cfg.Rclone(), args...)
+	out, err := e.run(syncTimeout, sf, r.cfg.Rclone(), args...)
+	if err == nil {
+		addChanges(r.cfg, parseChanges(out, kind, r.f, time.Now()))
+	}
+	return out, err
 }
 
 func (e *Engine) syncSucceeded(r folderRun) {
@@ -1556,6 +1559,7 @@ func (e *Engine) Unkeep(path string, result func(error)) error {
 			_ = os.Remove(e.stateFile(f, s))
 		}
 		_ = os.Remove(e.filtersFile(f))
+		forgetChanges(e.config(), f.Key())
 		e.mu.Lock()
 		// Remove just this entry from the file's kept list.
 		next, err := editConfig(func(raw map[string]json.RawMessage) error {

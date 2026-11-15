@@ -62,6 +62,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var activeFolder: String?
     /// The key of the folder being synced right now.
     @Published private(set) var activeKey: String?
+    /// Recent Changes (oldest first), from activity.json in the sync state folder.
+    @Published private(set) var recentChanges: [Change] = []
+    private var changesURL: URL { config.stateURL.appendingPathComponent("activity.json") }
     /// Folders kept while a sync ran: their first sync runs right after it (keys).
     private var queuedKeys = Set<String>()
     /// The folders the running sync still has to do (from its start, server check included).
@@ -95,6 +98,7 @@ final class AppModel: ObservableObject {
         signedOut = c.isOIDC && c.isConfigured && !Auth.haveCredentials(c)
         applyEnvironment()
         refreshStatusEntries()
+        recentChanges = Changes.load(changesURL)
         startTicker()
         if signedOut && Auth.keychainMigrationPending { migrateKeychain() }
         // First launch (nothing set up yet): open the set-up window right away.
@@ -736,8 +740,9 @@ final class AppModel: ObservableObject {
     }
 
     private func bisync(_ run: FolderRun, kind: String, extra: [String]) async -> Shell.Result {
-        // Merges are rare: log every copy so a merge can be checked afterwards.
-        let level = kind == "sync" ? "NOTICE" : "INFO"
+        // INFO: bisync then says what it copies and deletes, for Recent Changes (Changes.swift),
+        // and a merge's every copy can be checked afterwards.
+        let level = "INFO"
         let args = ["bisync", run.local.path, config.remote(for: run.f) + run.f.path,
                     "--workdir", run.work.path, "--filters-file", run.filters.path,
                     "--create-empty-src-dirs", "--compare", "size,modtime",
@@ -747,7 +752,92 @@ final class AppModel: ObservableObject {
                     "--stats", "2s", "--stats-log-level", "NOTICE"] + config.bwLimitArgs + extra   // progress for the menu (StatsFilter)
         let log = Log.url("sync-\(run.f.stateName).log")
         Log.append("\n=== \(Date()) \(kind) of \(run.f.path)\n", to: log)
-        return await runTracked(config.rclone, args, log: log)
+        let r = await runTracked(config.rclone, args, log: log)
+        if r.status == 0 { addChanges(Changes.parse(r.output, kind: kind, folder: run.f)) }
+        return r
+    }
+
+    private func addChanges(_ add: [Change]) {
+        guard !add.isEmpty else { return }
+        recentChanges = Array((recentChanges + add).suffix(Changes.max))
+        Changes.save(recentChanges, to: changesURL)
+    }
+
+    /// Where a change's file is on this Mac, if its folder is still kept.
+    func changeURL(_ c: Change) -> URL? {
+        guard !c.path.isEmpty, let f = config.kept.first(where: { $0.key == c.folder }),
+              !c.path.split(separator: "/").contains(where: { $0 == ".." || $0 == "." }) else { return nil }
+        return config.localURL(f).appendingPathComponent(c.path)
+    }
+
+    func changeExists(_ c: Change) -> Bool {
+        guard !c.isDeletion, let u = changeURL(c) else { return false }
+        return FileManager.default.fileExists(atPath: u.path)
+    }
+
+    func reveal(_ c: Change) {
+        guard changeExists(c), let u = changeURL(c) else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([u])
+    }
+
+    func openWeb() {
+        guard let s = config.serverURL, let u = URL(string: s) else { return }
+        NSWorkspace.shared.open(u)
+    }
+
+    // MARK: - Share links
+
+    /// The menu's Share a File…: choose a file or folder in a kept folder.
+    func shareFile() { share(startingAt: config.localRootURL) }
+
+    /// Kept Folders ▸ Copy Share Link…: choose in this folder (or the folder itself).
+    func shareFrom(_ f: KeptFolder) { share(startingAt: config.localURL(f)) }
+
+    private func share(startingAt dir: URL) {
+        guard config.isOIDC, !needsSignIn else { alert("Sign in first", "Share links need the browser sign-in."); return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = dir
+        panel.prompt = "Share"
+        panel.message = "Choose a file or folder in a kept folder to share with a public, read-only link."
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url?.standardizedFileURL.resolvingSymlinksInPath() else { return }
+        // The kept folder it is in, and its path in there.
+        var found: (KeptFolder, String)?
+        for f in config.kept {
+            let root = config.localURL(f).standardizedFileURL.resolvingSymlinksInPath().path
+            let p = url.path
+            if Config.foldKey(p) == Config.foldKey(root) { found = (f, ""); break }
+            if Config.foldKey(p).hasPrefix(Config.foldKey(root) + "/") { found = (f, String(p.dropFirst(root.count + 1))); break }
+        }
+        guard let (f, rel) = found else {
+            alert("That isn't in a kept folder", "Choose a file or folder inside one of your kept folders.")
+            return
+        }
+        guard FileManager.default.fileExists(atPath: stateFile(f, ".initialised").path) else {
+            alert("“\(f.displayName)” hasn't synced yet", "Share it after its first sync.")
+            return
+        }
+        if Changes.skip(rel) && !rel.isEmpty { alert("That can't be shared from here", "Choose another file."); return }
+        let name = rel.isEmpty ? f.displayName : (rel as NSString).lastPathComponent
+        guard let o = SharesAPI.askOptions(for: name) else { return }
+        Task {
+            do {
+                let server = config.serverURL ?? ""
+                guard let dav = SharesAPI.davURL(config, f, rel: rel) else { throw AuthError.message("That path isn't valid.") }
+                let token = try await Auth.accessToken(serverURL: server)
+                let link = try await SharesAPI.createLink(dav, serverURL: server, token: token, o)
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(link, forType: .string)
+                Log.line("share link made for \(f.displayName)\(rel.isEmpty ? "" : "/" + rel)")   // never the password
+                lastMessage = "Link to “\(name)” copied"
+                notifier.show(Note(title: "Link copied", body: "A read-only link to “\(name)” is on the clipboard.", page: .folders))
+            } catch {
+                alert("Couldn't make the link", error.localizedDescription)
+            }
+        }
     }
 
     private func succeeded(_ run: FolderRun) {
@@ -1188,6 +1278,8 @@ final class AppModel: ObservableObject {
                 self.config = c
                 self.refreshStatusEntries()
                 self.saveLastSuccess()
+                self.recentChanges.removeAll { $0.folder == f.key }
+                Changes.save(self.recentChanges, to: self.changesURL)
                 self.lastMessage = "“\(f.displayName)” is now only in OpenCloud"
             }
         }

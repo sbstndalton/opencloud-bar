@@ -10,6 +10,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"time"
@@ -50,6 +51,15 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 	}
 	manage := kept.AddSubMenuItem("Manage Folders…", "")
 	keep := systray.AddMenuItem("Keep a Folder Here…", "")
+	recent := systray.AddMenuItem("Recent Changes", "")
+	recentSlots := make([]*systray.MenuItem, trayChangeSlots)
+	for i := range recentSlots {
+		recentSlots[i] = recent.AddSubMenuItem("", "")
+		recentSlots[i].Hide()
+	}
+	recentNone := recent.AddSubMenuItem("Nothing yet", "")
+	recentNone.Disable()
+	recentAll := recent.AddSubMenuItem("All Recent Changes…", "")
 	systray.AddSeparator()
 	syncNow := systray.AddMenuItem("Sync Now", "")
 	pause := systray.AddMenuItem("Pause Syncing", "Stop syncing kept folders; the drive keeps working")
@@ -59,7 +69,8 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 	systray.AddSeparator()
 	quitItem := systray.AddMenuItem("Quit OpenCloud Bar", "")
 
-	var shown []FolderStatus // what the slots currently stand for
+	var shownChanges []Change // what the Recent Changes slots stand for
+	var shown []FolderStatus  // what the slots currently stand for
 	var shownMu sync.Mutex
 	lockShown, unlockShown := shownMu.Lock, shownMu.Unlock
 
@@ -126,6 +137,26 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 		}
 		enable(keep, !needSignIn)
 		enable(syncNow, !st.Syncing && !st.Paused && !needSignIn)
+		changes := e.RecentChanges(len(recentSlots))
+		lockShown()
+		shownChanges = changes
+		unlockShown()
+		for i, s := range recentSlots {
+			if i >= len(changes) {
+				s.Hide()
+				continue
+			}
+			c := changes[i]
+			s.SetTitle(trayText(ChangeLabel(c), 70) + " · " + c.Time.Local().Format("15:04"))
+			if c.Path == "" || c.Action == actDeletedHere || c.Action == actDeletedRemote {
+				s.Disable()
+			} else {
+				s.Enable()
+				s.SetTooltip("Show it in its folder")
+			}
+			s.Show()
+		}
+		show(recentNone, len(changes) == 0)
 	}
 	refresh()
 	// First launch (nothing set up yet): start the set-up right away.
@@ -147,6 +178,31 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 			}
 		}
 	}()
+
+	for i := range recentSlots {
+		i, s := i, recentSlots[i]
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-s.ClickedCh:
+					lockShown()
+					var c Change
+					ok := i < len(shownChanges)
+					if ok {
+						c = shownChanges[i]
+					}
+					unlockShown()
+					if ok {
+						if p, err := e.itemLocal(c.Folder, c.Path); err == nil && exists(p) {
+							openPath(filepath.Dir(p))
+						}
+					}
+				}
+			}
+		}()
+	}
 
 	for i := range slots {
 		i, s := i, slots[i]
@@ -211,6 +267,8 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 				openSettings("")
 			case <-manage.ClickedCh:
 				openSettings("folders")
+			case <-recentAll.ClickedCh:
+				openSettings("activity")
 			case <-quitItem.ClickedCh:
 				if !confirmUploads(e, "Quit Anyway") {
 					continue
@@ -276,4 +334,16 @@ func trayIcon() []byte {
 	_ = binary.Write(&ico, binary.LittleEndian, []uint32{uint32(pngBuf.Len()), 22})
 	ico.Write(pngBuf.Bytes())
 	return ico.Bytes()
+}
+
+// trayChangeSlots: how many recent changes the tray lists.
+const trayChangeSlots = 5
+
+// trayText shortens a menu title to about n characters.
+func trayText(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-1]) + "…"
 }

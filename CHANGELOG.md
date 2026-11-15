@@ -4,6 +4,23 @@ All notable changes to OpenCloud Bar. The format follows [Keep a Changelog](http
 
 The release workflow copies the section for a tag into that tag's GitHub release, so every version heading must stay in the form `## [X.Y.Z] - date`.
 
+## [1.4.0] - 2026-11-15
+
+### Added
+- **Recent Changes.** Each sync records what it uploaded, downloaded, deleted on either side and moved, for the last 500 changes (`activity.json` in the sync state folder). Mac: a **Recent Changes** submenu with the last 10 (click to show in Finder) and a searchable **Activity** page in Settings. Windows and Linux: a tray submenu with the last 5 and an **Activity** section in the settings window. A merge (first sync, Repair, automatic merge) is one summary line; conflict copies and backups aren't listed.
+- **Share links.** **Copy Share Link…** makes a public, read-only link to a file or folder in a kept folder and copies it (Mac: **Share a File…** in the menu and the folder's Actions; Windows and Linux: the folder's detail in the settings window). Optional expiry (1, 7 or 30 days) and an optional password, which is never stored. Made with OpenCloud's libre-graph `createLink`.
+
+### Changed
+- Syncs log at rclone's INFO level, so the sync logs list every file a sync copies or deletes.
+
+### Fixed
+- Windows and Linux: a notification about conflicts opened the settings window on its first section instead of Conflicts.
+
+### Not included
+- A file renamed in the same folder shows as a new file and a deleted one (bisync doesn't report renames).
+- **Open in Browser** opens OpenCloud's web interface, not the file itself.
+- Share links can't be listed, changed or removed here; use OpenCloud's web interface. The Windows/Linux tray has no Share item (the settings window does).
+
 ## [1.3.1] - 2026-11-15
 
 ### Fixed

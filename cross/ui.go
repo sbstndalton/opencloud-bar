@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -191,7 +192,7 @@ func (u *webUI) loginURL(section string) string {
 
 func validSection(s string) bool {
 	switch s {
-	case "folders", "account", "sync", "drive", "general", "logs", "about":
+	case "folders", "conflicts", "activity", "account", "sync", "drive", "general", "logs", "about":
 		return true
 	}
 	return false
@@ -300,6 +301,32 @@ func (u *webUI) handler(e *Engine) http.Handler {
 		jsonOK(w, e.SetPaused(*b.Paused))
 	})
 	mux.HandleFunc("GET /ui/api/subfolders", e.serveSubfolders)
+	mux.HandleFunc("GET /ui/api/changes", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]any{"changes": e.changesForPage()})
+	})
+	mux.HandleFunc("GET /ui/api/items", func(w http.ResponseWriter, r *http.Request) {
+		items, err := e.ListItems(r.URL.Query().Get("folder"), r.URL.Query().Get("sub"))
+		if err != nil {
+			jsonErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"items": items})
+	})
+	mux.HandleFunc("POST /ui/api/share", func(w http.ResponseWriter, r *http.Request) {
+		var b struct {
+			Folder, Path, Password string
+			Days                   int
+		}
+		if !readJSON(w, r, &b) {
+			return
+		}
+		link, err := e.ShareLink(b.Folder, b.Path, ShareOptions{Days: b.Days, Password: b.Password})
+		if err != nil {
+			jsonErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"url": link})
+	})
 	mux.HandleFunc("GET /ui/api/spaces", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
@@ -572,12 +599,19 @@ func (e *Engine) serveKeep(w http.ResponseWriter, r *http.Request) {
 // serveOpen opens something on this computer. The page never sends a path or address: only
 // what kind of thing, resolved here from the settings.
 func (e *Engine) serveOpen(w http.ResponseWriter, r *http.Request) {
-	var b struct{ Kind, Path string }
+	var b struct{ Kind, Path, Folder string }
 	if !readJSON(w, r, &b) {
 		return
 	}
 	cfg := e.config()
 	switch b.Kind {
+	case "item": // a file or folder in a kept folder (Recent Changes): show it in its folder
+		p, err := e.itemLocal(b.Folder, b.Path)
+		if err != nil {
+			jsonErr(w, http.StatusNotFound, err)
+			return
+		}
+		openPath(filepath.Dir(p))
 	case "folder":
 		f, ok := e.find(b.Path)
 		if !ok {
