@@ -44,7 +44,7 @@ type Change struct {
 	// OpenCloud (so removed here), or summary.
 	Action string `json:"action"`
 	Text   string `json:"text,omitempty"` // a summary's words
-	// Trigger: what started the sync, "timer" or "local change" (live sync); "" for merges.
+	// Trigger: what started the sync, "timer", "local change" or "server change" (live sync); "" for merges.
 	Trigger string `json:"trigger,omitempty"`
 }
 
@@ -322,8 +322,11 @@ func ChangeLabel(c Change) string {
 		return c.Text
 	}
 	s := fmt.Sprintf("%s: %s %s", c.Name, c.Path, actionText(c.Action))
-	if c.Trigger == "local change" {
+	switch c.Trigger {
+	case "local change":
 		s += " (after a local change)"
+	case "server change":
+		s += " (after a change in OpenCloud)"
 	}
 	return s
 }

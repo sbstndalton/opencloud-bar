@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -109,7 +110,9 @@ type liveFolder struct {
 	ownOver     bool // more than liveOwnCap events, or events lost
 	ownWrote    map[string]bool
 	ownWroteAll bool      // the run's writes aren't known (a merge, too many)
-	lastLive    time.Time // when watching last started a run
+	local       bool      // pending for a change here
+	server      bool      // pending for a change in OpenCloud (remote.go)
+	lastLive    time.Time // when live sync last started a run
 	lastDur     time.Duration
 	fallback    string // the root and filters watching gave up on: timer only (until they change)
 	watch       *folderWatch
@@ -117,7 +120,9 @@ type liveFolder struct {
 
 type liveState struct {
 	folders   map[string]*liveFolder
-	triggered map[string]bool // queued by watching: their next run's changes say "local change"
+	triggered map[string]string        // queued by live sync: the next run's trigger ("local change", "server change")
+	remote    map[string]*remoteFolder // server change checks (remote.go)
+	remoteRun int                      // checks running now
 	running   bool
 	stop      chan struct{}
 	kick      chan struct{} // reconcile soon
@@ -129,14 +134,17 @@ type liveState struct {
 	callTimeout atomic.Int64
 	rmu         sync.Mutex // one reconcile at a time
 	// Hooks for tests (read under e.mu).
-	now        func() time.Time
-	newWatcher func() (fsWatcher, error)
+	now         func() time.Time
+	newWatcher  func() (fsWatcher, error)
+	remoteToken func(serverURL string) (string, error)
+	remoteETag  func(ctx context.Context, davURL, tok string) (string, int, error)
 }
 
 func (e *Engine) live() *liveState {
 	if e.liveS == nil {
-		e.liveS = &liveState{folders: map[string]*liveFolder{}, triggered: map[string]bool{},
-			kick: make(chan struct{}, 1), now: time.Now, newWatcher: newRealWatcher}
+		e.liveS = &liveState{folders: map[string]*liveFolder{}, triggered: map[string]string{}, remote: map[string]*remoteFolder{},
+			kick: make(chan struct{}, 1), now: time.Now, newWatcher: newRealWatcher,
+			remoteToken: accessToken, remoteETag: davETag}
 		e.liveS.maxDirs.Store(defaultWatchCap())
 		e.liveS.callTimeout.Store(int64(5 * time.Second))
 	}
@@ -772,6 +780,7 @@ func (e *Engine) noteLocked(key string, lf *liveFolder, rels []string, full bool
 	if !lf.pending {
 		lf.pending, lf.first = true, now
 	}
+	lf.local = true
 	lf.last = now
 	if full {
 		lf.last = now.Add(-liveQuiet) // settled: sync as soon as the gap allows
@@ -816,6 +825,7 @@ func (e *Engine) liveTick() {
 			if !lf.pending {
 				lf.pending, lf.first = true, now
 			}
+			lf.local = true
 			lf.last = now.Add(-liveQuiet)
 			if lf.lastLive.Before(lf.ownBegan) {
 				lf.lastLive = lf.ownBegan // one follow-up, after the gap
@@ -839,7 +849,12 @@ func (e *Engine) liveTick() {
 			continue
 		}
 		lf.pending = false
-		l.triggered[key] = true
+		trig := "local change"
+		if lf.server && !lf.local {
+			trig = "server change"
+		}
+		lf.local, lf.server = false, false
+		l.triggered[key] = trig
 		e.queueLocked(key)
 		started = true
 	}
@@ -879,6 +894,7 @@ func (e *Engine) liveLoop(stop chan struct{}) {
 			}
 		case <-t.C:
 			e.liveTick()
+			e.remoteTick()
 			if n++; n%60 == 0 && !reconcile() { // now and then: folders that appeared, roots that changed
 				return
 			}
@@ -893,14 +909,15 @@ func (e *Engine) ownSyncLocked(key string, start bool, began time.Time) string {
 	lf := l.folders[key]
 	if start {
 		trigger := "timer"
-		if l.triggered[key] {
-			trigger = "local change"
+		if t, ok := l.triggered[key]; ok {
+			trigger = t
 			delete(l.triggered, key)
 			if lf != nil {
 				lf.lastLive = l.now()
 			}
 		}
 		if lf != nil {
+			lf.local, lf.server = false, false
 			lf.own, lf.ownBegan = true, began
 			lf.pending = false // this run picks up what changed so far
 			if !lf.ownCheck {  // a check still waiting: this run takes its events too

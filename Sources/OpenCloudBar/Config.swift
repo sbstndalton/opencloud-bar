@@ -141,7 +141,7 @@ struct Config: Codable {
     /// "2M" = 2 MiB/s, a bare number is KiB/s). nil: no limit. Same keys as the Go app.
     var bwLimitUp: String?
     var bwLimitDown: String?
-    /// Live sync (preview): watch kept folders, sync a folder soon after a local change. nil: off.
+    /// Live sync (preview): watch kept folders, sync a folder soon after a change here or in OpenCloud. nil: off.
     var liveSync: Bool?
     var commonFilters: [String] = [
         "- *.tmp", "- .*.bundle.tmp", "- *~", "- .DS_Store", "- ._*", "- Thumbs.db",

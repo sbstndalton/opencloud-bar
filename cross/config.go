@@ -148,7 +148,7 @@ type Config struct {
 	CheckForUpdates *bool `json:"checkForUpdates,omitempty"`
 	// Notifications: desktop notifications for problems, automatic merges and updates (default on).
 	Notifications *bool `json:"notifications,omitempty"`
-	// LiveSync (preview): watch kept folders and sync a folder soon after a local change.
+	// LiveSync (preview): watch kept folders and sync a folder soon after a change here or in OpenCloud.
 	LiveSync bool `json:"liveSync,omitempty"`
 	// BwLimitUp / BwLimitDown: upload / download limits for syncs and the drive, in rclone's
 	// units ("512K" = 512 KiB/s, "2M" = 2 MiB/s, a bare number is KiB/s). Empty: no limit.

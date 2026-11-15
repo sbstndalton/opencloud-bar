@@ -140,18 +140,25 @@ Every sync remembers what it changed: files uploaded, downloaded, deleted on thi
 
 ## Live sync (preview)
 
-Off by default. Turn on **Sync local changes right away (preview)** (Mac: Settings ▸ Sync; Windows, Linux: the settings window, Sync) and OpenCloud Bar watches the local copy of each kept folder. When you change something in one, the folder shows "Change detected, syncing soon" and syncs on its own, without waiting for the interval:
+Off by default. Turn on **Sync changes right away (preview)** (Mac: Settings ▸ Sync; Windows, Linux: the settings window, Sync) and OpenCloud Bar syncs a kept folder soon after something changes in it, on this computer or in OpenCloud, without waiting for the interval. The folder shows "Change detected, syncing soon".
+
+Changes on this computer: the local copy of each kept folder is watched.
 
 - A folder syncs once nothing in it has changed for 5 seconds, or 60 seconds after the first change while changes keep coming.
 - Syncs started this way are at least 30 seconds apart per folder (longer if the folder's last sync took longer). The regular interval syncs aren't affected, and there is never more than one sync at a time: the folder waits in the same queue as a newly kept folder.
 - The app's own writes don't count. Changes seen while the app syncs a folder are kept aside; when the sync is over, the files it downloaded or deleted here are taken out, and if anything else is left (a change you made meanwhile), the folder syncs once more after the 30 seconds.
 - Noise doesn't count: rclone's temporary files (`.partial`, `.~tmp~`), the backups folder, conflict copies, `.DS_Store`, `Thumbs.db`, `desktop.ini`, `._*`, `*~`, `*.tmp`, `.sync_*.db`, Office lock files (`~$*`), LibreOffice lock files (`.~lock.*#`) and the simple file names in your excludes (like `- *.bak`). Folders excluded by name (like `- **/node_modules/**` or `- /Old/**`) aren't watched; other excludes still apply to the sync itself.
 - While paused, changes only mark the folder; it syncs when you resume.
-- Recent Changes shows "(after a local change)" for changes made by such a sync.
-- Changes made in OpenCloud still arrive at the next interval.
+- Recent Changes shows "(after a local change)" or "(after a change in OpenCloud)" for changes made by such a sync.
 - Mac: FSEvents watches each folder (about 1 second latency). Watches start again after the Mac wakes from sleep, when a folder's excludes change, and when its folder is moved or replaced. Windows and Linux: each folder in the tree is watched. If the system's watch limit is reached (Linux `fs.inotify.max_user_watches`), or the kept folders have more than 2,000 folders in all on Windows (each watch takes memory there) or 20,000 on Linux, that kept folder goes back to the interval and a notice says so once.
 - If watching fails or loses events, or the kept folder itself is moved, removed or replaced, the folder syncs and watching starts over. A local folder that is a symbolic link is watched where it leads.
 - A kept folder whose local copy is missing isn't watched; it is watched once it is there again.
+
+Changes in OpenCloud (with the browser sign-in):
+
+- About every 30 seconds, each kept folder (from your personal space or a project space) is asked for its ETag, one small WebDAV request (`PROPFIND`, `Depth: 0`, only `getetag`; no listing). OpenCloud updates a folder's ETag whenever anything below it changes, so a changed ETag means the folder changed; it syncs as soon as the 30-second gap and the queue allow.
+- The last ETag is kept per folder (`<folder>.server-etag` in the sync state folder). The first check after the app starts only records it, and after each sync the ETag is read again, so the app's own uploads don't start another sync.
+- If the server can't be reached or answers with an error, that folder is checked less often (up to every 5 minutes), without notifications. No checks while paused, signed out, or (Mac) asleep; at most 4 at a time. The sign-in token is only sent to your server: redirects aren't followed.
 
 ## Keeping a folder while a sync runs
 

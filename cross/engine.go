@@ -894,18 +894,27 @@ type folderRun struct {
 	f                                KeptFolder
 	local, work, filters, serverFile string
 	marker                           string
-	trigger                          string // "timer" or "local change" (Recent Changes)
+	trigger                          string // "timer", "local change" or "server change" (Recent Changes)
 }
 
 // syncFolder runs one bisync. It never creates, recreates or resyncs a folder unless this is
 // its first sync, the user chose repair, or the listings drifted apart (one automatic merge
 // per folder per 24 hours; after that the user decides).
-func (e *Engine) syncFolder(f KeptFolder, mode syncMode) bool {
+func (e *Engine) syncFolder(f KeptFolder, mode syncMode) (ok bool) {
 	e.mu.Lock()
 	cfg := e.cfg // this sync's settings: a Reload or settings change meanwhile doesn't touch them
 	began := e.live().now()
 	trigger := e.ownSyncLocked(f.Key(), true, began)
-	defer func() { e.mu.Lock(); e.ownSyncLocked(f.Key(), false, began); e.mu.Unlock() }()
+	e.remoteSyncStartedLocked(f.Key())
+	defer func() {
+		e.mu.Lock()
+		e.ownSyncLocked(f.Key(), false, began)
+		job := e.remoteSyncEndedLocked(f, ok)
+		e.mu.Unlock()
+		if job != nil {
+			go e.remoteBaseline(*job) // the app's own changes are the new baseline
+		}
+	}()
 	e.activeName, e.activeFiles = f.DisplayName(), 0
 	single := e.activeN == 0 // Repair, Stop Keeping…: one folder on its own
 	if single {

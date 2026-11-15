@@ -18,14 +18,15 @@ struct Change: Codable, Hashable, Identifiable {
     /// uploaded, downloaded, deleted here, deleted in OpenCloud, or summary.
     var action: String
     var text: String?
-    /// What started the sync: "timer" or "local change" (live sync); nil for merges.
+    /// What started the sync: "timer", "local change" or "server change" (live sync); nil for merges.
     var trigger: String?
     var id: String { "\(time.timeIntervalSince1970)|\(folder)|\(path)|\(action)|\(text ?? "")" }
 
     var isDeletion: Bool { action == "deleted here" || action == "deleted in OpenCloud" }
     var label: String {
         action == "summary" ? (text ?? "")
-            : "\(name): \(path) \(Changes.words(action))" + (trigger == "local change" ? " (after a local change)" : "")
+            : "\(name): \(path) \(Changes.words(action))"
+                + (trigger == "local change" ? " (after a local change)" : trigger == "server change" ? " (after a change in OpenCloud)" : "")
     }
 }
 

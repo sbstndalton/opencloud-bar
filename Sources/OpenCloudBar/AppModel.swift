@@ -66,7 +66,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var activeKey: String?
     /// Live sync (preview): watches the kept folders (LiveSync.swift).
     private(set) lazy var live = LiveSync(model: self)
-    /// What started each folder's running sync ("timer" or "local change"), for Recent Changes.
+    /// What started each folder's running sync ("timer", "local change", "server change"), for Recent Changes.
     private var runTrigger: [String: String] = [:]
     /// Recent Changes (oldest first), from activity.json in the sync state folder.
     @Published private(set) var recentChanges: [Change] = []
@@ -462,7 +462,7 @@ final class AppModel: ObservableObject {
 
     // MARK: - Kept folders (two-way sync)
 
-    private func stateFile(_ f: KeptFolder, _ suffix: String) -> URL {
+    func stateFile(_ f: KeptFolder, _ suffix: String) -> URL {
         config.stateURL.appendingPathComponent("\(f.stateName)\(suffix)")
     }
     private func workDir(_ f: KeptFolder) -> URL { config.stateURL.appendingPathComponent("work/\(f.stateName)") }
@@ -584,6 +584,13 @@ final class AppModel: ObservableObject {
     /// listings drifted apart (one automatic merge per folder per 24 hours; then the user decides).
     @discardableResult
     private func syncFolder(_ f: KeptFolder, mode: SyncMode) async -> Bool {
+        live.remoteSyncStarted(f.key)   // server checks running now don't count
+        let ok = await syncFolderRun(f, mode: mode)
+        live.remoteSyncEnded(f, ok: ok)   // the ETag after the sync is the new baseline
+        return ok
+    }
+
+    private func syncFolderRun(_ f: KeptFolder, mode: SyncMode) async -> Bool {
         let began = Date()
         runTrigger[f.key] = live.ownStart(f.key)
         defer { live.ownEnd(f.key, began: began); runTrigger[f.key] = nil }

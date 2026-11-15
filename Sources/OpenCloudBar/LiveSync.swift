@@ -21,6 +21,14 @@ import Foundation
 ///   the excludes leave out by name ("- **/node_modules/**", "- /Old/**").
 /// Streams are made again after the Mac wakes from sleep, when the folder's excludes change,
 /// and when its root is moved or replaced.
+///
+/// Changes in OpenCloud (v1.6): every 30 s (± 5 s) each kept folder's root is asked for its
+/// ETag (PROPFIND, Depth 0, getetag), which OpenCloud propagates up from any change below. A
+/// changed ETag syncs the folder the same way (gap, queue; trigger "server change"). The first
+/// check after launch only records it; after each successful sync the ETag is read again as
+/// the new baseline (the app's own uploads). Errors back off up to 5 minutes, quietly. No
+/// checks while paused, signed out, asleep, or without the browser sign-in; at most 4 at once.
+/// The token goes only to the server (no redirects). Same as cross/remote.go, which has the tests.
 @MainActor
 final class LiveSync {
     static let quiet: TimeInterval = 5, maxWait: TimeInterval = 60, minGap: TimeInterval = 30, tail: TimeInterval = 2
@@ -40,6 +48,7 @@ final class LiveSync {
         var ownOver = false
         var ownWrote = Set<String>()
         var ownWroteAll = false
+        var local = false, server = false   // what the pending change is
         var lastLive = Date.distantPast
         var lastDur: TimeInterval = 0
         var sig = ""                    // root and filters the stream was made for
@@ -49,16 +58,22 @@ final class LiveSync {
 
     private unowned let model: AppModel
     private var folders: [String: Folder] = [:]
-    private var triggered = Set<String>()
+    private var triggered: [String: String] = [:]   // queued by live sync: the run's trigger
     private var timer: Timer?
     private var wakeObserver: NSObjectProtocol?
+    private var sleepObserver: NSObjectProtocol?
+    private var asleep = false
     private var generation = 0
 
     init(model: AppModel) {
         self.model = model
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.restartStreams() }
+            MainActor.assumeIsolated { self?.asleep = false; self?.restartStreams() }
+        }
+        sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.asleep = true }
         }
     }
 
@@ -75,7 +90,8 @@ final class LiveSync {
                 want[f.key] = (root, filters, root.path + "\u{0}" + filters.joined(separator: "\u{0}"))
             }
         }
-        triggered.formIntersection(want.keys)
+        triggered = triggered.filter { want[$0.key] != nil }
+        remote = remote.filter { want[$0.key] != nil }
         for (key, var lf) in folders {
             if let s = lf.stream, want[key]?.2 != lf.sig || !s.stillValid() { s.stop(); lf.stream = nil; folders[key] = lf }
             if want[key] == nil { folders[key] = nil }
@@ -140,6 +156,7 @@ final class LiveSync {
         if real {
             let now = Date()
             if !lf.pending { lf.pending = true; lf.first = now }
+            lf.local = true
             lf.last = full ? now.addingTimeInterval(-Self.quiet) : now
             model.setPending(key, true)
         }
@@ -155,6 +172,7 @@ final class LiveSync {
             lf.ownPaths = []; lf.ownOver = false; lf.ownWrote = []; lf.ownWroteAll = false
             if left {   // one follow-up, after the gap from that run's start
                 if !lf.pending { lf.pending = true; lf.first = now }
+                lf.local = true
                 lf.last = now.addingTimeInterval(-Self.quiet)
                 if lf.lastLive < lf.ownBegan { lf.lastLive = lf.ownBegan }
                 model.setPending(key, true)
@@ -168,22 +186,25 @@ final class LiveSync {
             let gapOK = now.timeIntervalSince(lf.lastLive) >= max(Self.minGap, lf.lastDur)
             guard settled, gapOK else { continue }
             lf.pending = false
+            triggered[key] = lf.server && !lf.local ? "server change" : "local change"
+            lf.local = false; lf.server = false
             folders[key] = lf
-            triggered.insert(key)
             due.append(key)
         }
         if !due.isEmpty { model.queueLiveSync(due) }
+        remoteTick()
     }
 
     /// The app starts syncing a folder: its events are kept aside until the run's own writes
     /// are known. Returns the run's trigger for Recent Changes.
     func ownStart(_ key: String) -> String {
         var trigger = "timer"
-        if triggered.remove(key) != nil {
-            trigger = "local change"
+        if let t = triggered.removeValue(forKey: key) {
+            trigger = t
             folders[key]?.lastLive = Date()
         }
         if var lf = folders[key] {
+            lf.local = false; lf.server = false
             lf.own = true
             lf.ownBegan = Date()
             lf.pending = false
@@ -220,6 +241,104 @@ final class LiveSync {
         lf.lastDur = Date().timeIntervalSince(began)
         lf.stream?.flush()
         folders[key] = lf
+    }
+
+    // MARK: - Changes in OpenCloud
+
+    static let remoteEvery: TimeInterval = 30, remoteJitter: TimeInterval = 5, remoteMaxBackoff: TimeInterval = 300
+    static let remoteParallel = 4
+
+    private struct Remote {
+        var etag = ""
+        var known = false, loaded = false
+        var nextAt = Date.distantPast
+        var fails = 0
+        var busy = false, pending = false
+        var gen = 0
+    }
+    private var remote: [String: Remote] = [:]
+    private var remoteRunning = 0
+
+    private var remoteOn: Bool {
+        let c = model.config
+        return c.liveSync == true && model.configError == nil && !model.needsSignIn && !c.paused && c.isOIDC
+            && !asleep && !model.quitting
+    }
+
+    private struct RemoteJob { let key: String, url: URL, server: String, state: URL, gen: Int, load: Bool, baseline: Bool }
+
+    private func remoteTick() {
+        guard remoteOn else { return }
+        let now = Date(), c = model.config
+        for f in c.kept where remoteRunning < Self.remoteParallel {
+            var r = remote[f.key] ?? Remote()
+            defer { remote[f.key] = r }
+            guard !r.busy, !r.pending, now >= r.nextAt, folders[f.key]?.own != true else { continue }
+            guard let url = SharesAPI.davURL(c, f, rel: "") else { r.nextAt = now.addingTimeInterval(Self.remoteMaxBackoff); continue }
+            r.busy = true
+            remoteRunning += 1
+            let job = RemoteJob(key: f.key, url: url, server: c.serverURL ?? "", state: model.stateFile(f, ".server-etag"),
+                                gen: r.gen, load: !r.loaded, baseline: false)
+            Task { await self.remoteCheck(job) }
+        }
+    }
+
+    private func remoteCheck(_ j: RemoteJob) async {
+        let stored = j.load ? (try? String(contentsOf: j.state, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "" : ""
+        var etag: String?
+        if let tok = try? await Auth.accessToken(serverURL: j.server) {
+            etag = await RemoteETag.fetch(j.url, token: tok)
+        }
+        remoteRunning -= 1
+        guard var r = remote[j.key] else { return }
+        defer { remote[j.key] = r }
+        r.busy = false
+        let now = Date()
+        if j.load, !r.loaded {
+            r.loaded = true
+            if !stored.isEmpty, !r.known { r.etag = stored; r.known = true }
+        }
+        guard let etag else {   // network, 401, 5xx, a redirect: back off, quietly
+            r.fails += 1
+            r.nextAt = now.addingTimeInterval(min(Self.remoteEvery * pow(2, Double(r.fails - 1)), Self.remoteMaxBackoff))
+            if j.baseline { r.known = false }
+            return
+        }
+        r.fails = 0
+        r.nextAt = now.addingTimeInterval(Self.remoteEvery + Double.random(in: -Self.remoteJitter...Self.remoteJitter))
+        guard j.gen == r.gen else { return }   // a sync started or ended meanwhile
+        if j.baseline || j.load || !r.known {   // after a sync, or the first check after launch: record
+            if !r.known || r.etag != etag { try? Data((etag + "\n").utf8).write(to: j.state, options: .atomic) }
+            r.etag = etag; r.known = true
+            return
+        }
+        guard etag != r.etag else { return }
+        r.etag = etag
+        try? Data((etag + "\n").utf8).write(to: j.state, options: .atomic)
+        if var lf = folders[j.key] {
+            if !lf.pending { lf.pending = true; lf.first = now }
+            lf.server = true
+            lf.last = now.addingTimeInterval(-Self.quiet)
+            folders[j.key] = lf
+            model.setPending(j.key, true)
+        }
+    }
+
+    func remoteSyncStarted(_ key: String) { remote[key]?.gen += 1 }
+
+    func remoteSyncEnded(_ f: KeptFolder, ok: Bool) {
+        guard var r = remote[f.key] ?? (remoteOn ? Remote() : nil) else { return }
+        defer { remote[f.key] = r }
+        r.gen += 1
+        guard ok, remoteOn, let url = SharesAPI.davURL(model.config, f, rel: "") else {
+            r.known = r.known && ok   // a failed sync: the next check only records
+            return
+        }
+        r.busy = true
+        remoteRunning += 1
+        let job = RemoteJob(key: f.key, url: url, server: model.config.serverURL ?? "", state: model.stateFile(f, ".server-etag"),
+                            gen: r.gen, load: !r.loaded, baseline: true)
+        Task { await self.remoteCheck(job) }
     }
 
     // MARK: - What doesn't count
@@ -361,4 +480,39 @@ final class FolderEventStream {
     }
 
     deinit { stop() }
+}
+
+/// The ETag request: no redirects (the token stays with the server), no cookies, no cache.
+enum RemoteETag {
+    private final class NoRedirect: NSObject, URLSessionTaskDelegate {
+        func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+            completionHandler(nil)
+        }
+    }
+    private static let session: URLSession = {
+        let c = URLSessionConfiguration.ephemeral
+        c.httpCookieStorage = nil
+        c.urlCache = nil
+        c.timeoutIntervalForRequest = 20
+        return URLSession(configuration: c, delegate: NoRedirect(), delegateQueue: nil)
+    }()
+
+    /// The resource's ETag, or nil for any failure.
+    static func fetch(_ url: URL, token: String) async -> String? {
+        var req = URLRequest(url: url)
+        req.httpMethod = "PROPFIND"
+        req.timeoutInterval = 20
+        req.setValue("0", forHTTPHeaderField: "Depth")
+        req.setValue("application/xml", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.httpBody = Data(#"<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:getetag/></d:prop></d:propfind>"#.utf8)
+        guard let (data, resp) = try? await session.data(for: req), (resp as? HTTPURLResponse)?.statusCode == 207 else { return nil }
+        let text = String(decoding: data.prefix(1 << 20), as: UTF8.self)
+        guard let r = text.range(of: #"<([A-Za-z0-9]+:)?getetag>[^<]+</"#, options: .regularExpression) else { return nil }
+        let tag = text[r]
+        guard let open = tag.firstIndex(of: ">"), let close = tag.range(of: "</", options: .backwards) else { return nil }
+        let etag = String(tag[tag.index(after: open)..<close.lowerBound]).trimmingCharacters(in: .whitespaces)
+        return etag.isEmpty ? nil : etag
+    }
 }
