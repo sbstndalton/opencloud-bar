@@ -39,8 +39,8 @@ struct NotePlanner {
         for (f, s) in folders {
             seen.insert(f.path)
             guard case .some(let k) = Self.kind(s) else { continue }
-            if let k, kinds[f.path] != k, seeded { fresh[k, default: []].append((f, s)) }
-            kinds[f.path] = k ?? ""
+            if let k, kinds[f.key] != k, seeded { fresh[k, default: []].append((f, s)) }
+            kinds[f.key] = k ?? ""
         }
         for p in kinds.keys where !seen.contains(p) { kinds[p] = nil }
         let wasOut = wasSignedOut

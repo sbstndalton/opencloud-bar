@@ -32,7 +32,8 @@ const (
 )
 
 type FolderStatus struct {
-	Path        string     `json:"path"`
+	Path        string     `json:"path"`            // KeptFolder.Key(): the path, or "<space id>:<path>"
+	Space       string     `json:"space,omitempty"` // the space's name; empty for the personal space
 	Name        string     `json:"name"`
 	State       string     `json:"state"`
 	Detail      string     `json:"detail,omitempty"`
@@ -213,9 +214,12 @@ func (e *Engine) refreshStatusLocked() {
 	keep := map[string]bool{}
 	var saved map[string]time.Time
 	for _, f := range e.cfg.Kept {
-		keep[f.Path] = true
-		if e.status[f.Path] == nil {
-			s := &FolderStatus{Path: f.Path, Name: f.DisplayName(), State: StIdle, Local: e.cfg.Local(f)}
+		keep[f.Key()] = true
+		if e.status[f.Key()] == nil {
+			s := &FolderStatus{Path: f.Key(), Name: f.DisplayName(), State: StIdle, Local: e.cfg.Local(f)}
+			if f.Space != nil {
+				s.Space = f.Space.Name
+			}
 			if saved == nil {
 				saved = e.loadLastSuccess()
 			}
@@ -224,7 +228,7 @@ func (e *Engine) refreshStatusLocked() {
 			if r := readReason(e.cfg.statePath(f, ".needs-repair")); r != "" {
 				s.State, s.Detail = StNeedsRepair, r
 			}
-			e.status[f.Path] = s
+			e.status[f.Key()] = s
 		}
 	}
 	for p := range e.status {
@@ -688,7 +692,7 @@ func readReason(file string) string {
 func (e *Engine) setState(f KeptFolder, state, detail string) {
 	e.mu.Lock()
 	ok := false
-	if s := e.status[f.Path]; s != nil {
+	if s := e.status[f.Key()]; s != nil {
 		s.State, s.Detail = state, detail
 		if state == StOK {
 			s.LastSuccess = time.Now()
@@ -731,7 +735,7 @@ func (e *Engine) saveLastSuccess() {
 	e.mu.Lock()
 	raw := map[string]string{}
 	for _, f := range e.cfg.Kept {
-		if s := e.status[f.Path]; s != nil && !s.LastSuccess.IsZero() {
+		if s := e.status[f.Key()]; s != nil && !s.LastSuccess.IsZero() {
 			raw[f.StateName] = s.LastSuccess.UTC().Format(time.RFC3339)
 		}
 	}
@@ -785,7 +789,7 @@ func (e *Engine) startSyncAllLocked(manual bool) {
 			e.mu.Lock()
 			e.activeIndex, e.activeN = i+1, len(folders)
 			q := e.quitting
-			s := e.status[f.Path]
+			s := e.status[f.Key()]
 			state := ""
 			if s != nil {
 				state = s.State
@@ -935,7 +939,7 @@ func (e *Engine) syncFolder(f KeptFolder, mode syncMode) bool {
 	work := cfg.workPath(f)
 	serverFile := filepath.Join(work, "server.txt")
 	if initialised && mode != modeRepair {
-		if b, err := os.ReadFile(serverFile); err == nil && string(b) != cfg.ServerIdentity() {
+		if b, err := os.ReadFile(serverFile); err == nil && string(b) != cfg.ServerIdentityFor(f) {
 			e.markNeedsRepair(f, "server or account settings changed")
 			return false
 		}
@@ -949,7 +953,7 @@ func (e *Engine) syncFolder(f KeptFolder, mode syncMode) bool {
 	}
 	_ = os.MkdirAll(work, 0o700)
 	if !exists(serverFile) {
-		_ = os.WriteFile(serverFile, []byte(cfg.ServerIdentity()), 0o600)
+		_ = os.WriteFile(serverFile, []byte(cfg.ServerIdentityFor(f)), 0o600)
 	}
 	filters := cfg.filtersPath(f)
 	if b, err := os.ReadFile(filters); string(b) != filtersText(cfg, f) {
@@ -1113,7 +1117,7 @@ func (e *Engine) merge(r folderRun, kind, driftNote string) (bool, syncOutcome) 
 // backupArgs sends the copies a merge overwrites to this computer's and OpenCloud's backup folders.
 func backupArgs(cfg Config, f KeptFolder, stamp string) []string {
 	return []string{"--backup-dir1", localBackupDir(cfg.StateDir, f.StateName, stamp),
-		"--backup-dir2", remoteBackupDir(cfg.RemoteSpec(), f.StateName, stamp)}
+		"--backup-dir2", remoteBackupDir(cfg.RemoteFor(f), f.StateName, stamp)} // the folder's own space
 }
 
 // bisync runs one rclone bisync for the folder with the common flags plus extra.
@@ -1129,7 +1133,7 @@ func (e *Engine) bisync(r folderRun, kind string, extra ...string) (string, erro
 	if kind != "sync" {
 		level = "INFO" // merges are rare: log every copy so a merge can be checked afterwards
 	}
-	args := []string{"bisync", r.local, r.cfg.RemoteSpec() + r.f.Path,
+	args := []string{"bisync", r.local, r.cfg.RemoteFor(r.f) + r.f.Path,
 		"--workdir", r.work, "--filters-file", r.filters,
 		"--create-empty-src-dirs", "--compare", "size,modtime",
 		"--resilient", "--recover", "--max-lock", "10m",
@@ -1164,7 +1168,7 @@ func (e *Engine) syncSucceeded(r folderRun) {
 	_ = os.Remove(r.cfg.statePath(r.f, ".needs-repair"))
 	_ = os.Remove(r.cfg.statePath(r.f, ".drift-parked"))
 	_ = os.Remove(r.cfg.statePath(r.f, ".filters-upgraded"))
-	_ = os.WriteFile(r.serverFile, []byte(r.cfg.ServerIdentity()), 0o600)
+	_ = os.WriteFile(r.serverFile, []byte(r.cfg.ServerIdentityFor(r.f)), 0o600)
 	e.updateConflicts(r.cfg, r.f)
 	e.setState(r.f, StOK, "")
 }
@@ -1224,7 +1228,7 @@ func (e *Engine) syncFailed(r folderRun, res bisyncResult, out string) {
 // "safety abort" then means the server copy vanished, not that the user deleted files: the
 // large-deletion override must not be offered, or it would empty this computer's copy too.
 func (e *Engine) remoteMissingOrEmpty(cfg Config, f KeptFolder) bool {
-	out, err := e.run(time.Minute, nil, cfg.Rclone(), "lsf", "--max-depth", "1", "--exclude", ".DS_Store", cfg.RemoteSpec()+f.Path)
+	out, err := e.run(time.Minute, nil, cfg.Rclone(), "lsf", "--max-depth", "1", "--exclude", ".DS_Store", cfg.RemoteFor(f)+f.Path)
 	if err != nil {
 		return strings.Contains(out, "directory not found") || strings.Contains(out, "not found")
 	}
@@ -1303,7 +1307,7 @@ func (e *Engine) find(path string) (KeptFolder, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, f := range e.cfg.Kept {
-		if foldKey(f.Path) == foldKey(path) {
+		if foldKey(f.Key()) == foldKey(path) {
 			return f, true
 		}
 	}
@@ -1332,7 +1336,7 @@ func (e *Engine) AllowBigDeletion(path string) error {
 		return fmt.Errorf("%q isn't a kept folder", path)
 	}
 	e.mu.Lock()
-	s := e.status[f.Path]
+	s := e.status[f.Key()]
 	blocked := s != nil && s.State == StBigDeletion
 	e.mu.Unlock()
 	if !blocked {
@@ -1381,10 +1385,17 @@ func (e *Engine) CheckForUpdates(ctx context.Context) UpdateState {
 }
 
 // Keep adds a kept folder. localPath is optional (absolute).
-func (e *Engine) Keep(path, localPath string) error {
+func (e *Engine) Keep(path, localPath string) error { return e.keepIn(nil, path, localPath) }
+
+// keepIn adds a kept folder in space (nil: the personal space).
+func (e *Engine) keepIn(space *SpaceRef, path, localPath string) error {
 	path = normalizeKeptPath(path)
 	if p := newPathProblem(path); p != "" {
 		return fmt.Errorf("%s", p)
+	}
+	sid := ""
+	if space != nil {
+		sid = space.ID
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -1395,11 +1406,11 @@ func (e *Engine) Keep(path, localPath string) error {
 		return fmt.Errorf("a sync is running; try again when it finishes")
 	}
 	for _, g := range e.cfg.Kept {
-		if overlaps(path, g.Path) {
+		if g.spaceID() == sid && overlaps(path, g.Path) {
 			return fmt.Errorf("%q overlaps %q, which is already kept", path, g.Path)
 		}
 	}
-	f := KeptFolder{Path: path, StateName: makeStateName(path), LocalPath: localPath}
+	f := KeptFolder{Path: path, StateName: makeStateNameIn(sid, path), LocalPath: localPath, Space: space}
 	// Add one entry to the file's kept list; the other entries (and their keys this version
 	// doesn't know) stay as they are.
 	next, err := editConfig(func(raw map[string]json.RawMessage) error {
@@ -1412,7 +1423,7 @@ func (e *Engine) Keep(path, localPath string) error {
 			taken[g.StateName] = true
 		}
 		for _, k := range kept {
-			if p := rawString(k, "path"); overlaps(path, p) {
+			if p := rawString(k, "path"); rawSpaceID(k) == sid && overlaps(path, p) {
 				return fmt.Errorf("%q overlaps %q, which is already kept", path, p)
 			}
 			taken[rawString(k, "stateName")] = true
@@ -1494,7 +1505,7 @@ func (e *Engine) Unkeep(path string, result func(error)) error {
 			}
 			rest := []map[string]json.RawMessage{}
 			for _, k := range kept {
-				if foldKey(rawString(k, "path")) != foldKey(f.Path) {
+				if foldKey(rawKey(k)) != foldKey(f.Key()) {
 					rest = append(rest, k)
 				}
 			}
@@ -1611,7 +1622,7 @@ func (e *Engine) Status() Status {
 	all := true
 	var problems []FolderStatus
 	for _, f := range e.cfg.Kept {
-		s := e.status[f.Path]
+		s := e.status[f.Key()]
 		if s == nil {
 			continue
 		}

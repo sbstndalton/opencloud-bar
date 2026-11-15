@@ -129,7 +129,7 @@ func (e *Engine) updateConflicts(cfg Config, f KeptFolder) []Conflict {
 		_ = os.WriteFile(file, b, 0o600)
 	}
 	e.mu.Lock()
-	if s := e.status[f.Path]; s != nil {
+	if s := e.status[f.Key()]; s != nil {
 		s.Conflicts = list
 	}
 	if len(fresh) > 0 {
@@ -238,7 +238,7 @@ func (e *Engine) ConflictAction(folder, file, action string) error {
 		return fmt.Errorf("a sync is running; try again when it finishes")
 	}
 	var list []Conflict
-	if s := e.status[f.Path]; s != nil {
+	if s := e.status[f.Key()]; s != nil {
 		list = s.Conflicts
 	}
 	cfg := e.cfg

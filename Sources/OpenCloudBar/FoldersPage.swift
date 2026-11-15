@@ -100,14 +100,15 @@ struct FoldersPage: View {
     @ObservedObject var model: AppModel
     @ObservedObject var store: ServerInfoStore
     @Local private var selection: KeptFolder.ID?
+    @Local private var keepingFromSpace = false
 
     private var selected: KeptFolder? { model.config.kept.first { $0.id == selection } }
 
     private func localPath(_ f: KeptFolder) -> String {
-        (model.config.localRootURL.appendingPathComponent(f.path).path as NSString).abbreviatingWithTildeInPath
+        (model.config.localURL(f).path as NSString).abbreviatingWithTildeInPath
     }
 
-    private func state(_ f: KeptFolder) -> FolderStatus.State { model.status[f.path]?.state ?? .idle }
+    private func state(_ f: KeptFolder) -> FolderStatus.State { model.status[f.key]?.state ?? .idle }
 
     private var browserURL: URL? {
         if let w = store.account?.webURL, let u = URL(string: w) { return u }
@@ -119,7 +120,11 @@ struct FoldersPage: View {
         VStack(alignment: .leading, spacing: 0) {
             Table(model.config.kept, selection: $selection) {
                 TableColumn("Name") { f in
-                    Text(f.displayName).lineLimit(1)
+                    if let s = f.space {
+                        (Text(f.displayName) + Text("  in \(s.name)").foregroundStyle(.secondary)).lineLimit(1)
+                    } else {
+                        Text(f.displayName).lineLimit(1)
+                    }
                 }
                 TableColumn("On This Mac") { f in
                     Text(localPath(f)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
@@ -140,13 +145,16 @@ struct FoldersPage: View {
                 }
                 TableColumn("Last Synced") { f in
                     TimelineView(.periodic(from: .now, by: 30)) { _ in
-                        if let t = model.status[f.path]?.lastSuccess {
+                        if let t = model.status[f.key]?.lastSuccess {
                             Text(AppModel.relative(t))
                         } else {
                             Text("Never").foregroundStyle(.secondary)
                         }
                     }
                 }
+            }
+            .sheet(isPresented: $keepingFromSpace) {
+                KeepFromSpaceSheet(model: model) { keepingFromSpace = false }
             }
             .contextMenu(forSelectionType: KeptFolder.ID.self) { ids in
                 if let f = model.config.kept.first(where: { ids.contains($0.id) }) { actions(f) }
@@ -180,6 +188,9 @@ struct FoldersPage: View {
             HStack {
                 Button("Keep a Folder…") { model.keepFolder() }
                     .disabled(model.syncing || model.needsSignIn)
+                Button("Keep from a Space…") { keepingFromSpace = true }
+                    .disabled(model.syncing || model.needsSignIn || !model.config.isOIDC)
+                    .help("Project spaces and folders shared with you")
                 Button(model.config.paused ? "Resume Syncing" : "Pause Syncing") { model.setPaused(!model.config.paused) }
                     .disabled(model.configError != nil || !model.config.isConfigured)
                 Spacer()
@@ -222,7 +233,7 @@ struct FoldersPage: View {
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
                     GridRow {
                         Text("On this Mac").foregroundStyle(.secondary)
-                        Text(model.config.localRootURL.appendingPathComponent(f.path).path).textSelection(.enabled)
+                        Text(model.config.localURL(f).path).textSelection(.enabled)
                     }
                     GridRow {
                         Text("In OpenCloud").foregroundStyle(.secondary)
@@ -234,7 +245,7 @@ struct FoldersPage: View {
                     }
                     GridRow {
                         Text("Last synced").foregroundStyle(.secondary)
-                        Text(model.status[f.path]?.lastSuccess.map { agoText($0) } ?? "Never")
+                        Text(model.status[f.key]?.lastSuccess.map { agoText($0) } ?? "Never")
                     }
                 }
                 Text("Excludes for this folder").font(.headline)
@@ -247,7 +258,7 @@ struct FoldersPage: View {
                                         "After this, rclone needs a one-time Repair of this folder before it syncs again. A Repair merges both sides: the newer copy of each file wins, and the older copy is kept in the backups.",
                                         button: "Change Excludes") else { return nil }
                     return await model.updateConfig { c in
-                        if let i = c.kept.firstIndex(where: { $0.path == f.path }) { c.kept[i].extraFilters = lines }
+                        if let i = c.kept.firstIndex(where: { $0.key == f.key }) { c.kept[i].extraFilters = lines }
                     }
                 }
                 .id(f.id)

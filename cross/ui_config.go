@@ -275,9 +275,7 @@ func applyConfigPatch(p configPatch) (restartPort bool, err error) {
 			}
 			found := false
 			for _, k := range kept {
-				var kp string
-				_ = json.Unmarshal(k["path"], &kp)
-				if kp != path {
+				if rawKey(k) != path { // the page sends KeptFolder.Key()
 					continue
 				}
 				found = true

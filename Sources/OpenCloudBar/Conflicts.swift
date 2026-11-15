@@ -122,7 +122,7 @@ struct ConflictsPage: View {
     @ObservedObject var model: AppModel
 
     private var rows: [(KeptFolder, ConflictItem)] {
-        model.config.kept.flatMap { f in (model.conflicts[f.path] ?? []).map { (f, $0) } }
+        model.config.kept.flatMap { f in (model.conflicts[f.key] ?? []).map { (f, $0) } }
     }
 
     var body: some View {

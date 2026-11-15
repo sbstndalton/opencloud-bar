@@ -118,34 +118,38 @@ func folderLabel(f FolderStatus) string {
 }
 
 func folderLabelAt(f FolderStatus, now time.Time) string {
+	name := f.Name
+	if f.Space != "" {
+		name += " (" + f.Space + ")"
+	}
 	switch f.State { // short: the full reason is the item's tooltip and the menu's first line
 	case StNeedsRepair:
-		return "⚠ " + f.Name + " — needs repair"
+		return "⚠ " + name + " — needs repair"
 	case StBigDeletion:
-		return "⚠ " + f.Name + " — large deletion blocked"
+		return "⚠ " + name + " — large deletion blocked"
 	case StFailed:
 		if f.Detail == missingRemoteText {
-			return "⚠ " + f.Name + " — missing or empty in OpenCloud"
+			return "⚠ " + name + " — missing or empty in OpenCloud"
 		}
-		return "⚠ " + f.Name + " — sync failed"
+		return "⚠ " + name + " — sync failed"
 	}
 	switch f.State {
 	case StSyncing:
-		return f.Name + " — syncing…"
+		return name + " — syncing…"
 	case StSkipped:
-		s := f.Name + " — skipped"
+		s := name + " — skipped"
 		if f.Detail != "" {
 			s += " (" + f.Detail + ")"
 		}
 		return s
 	}
 	if n := len(f.Conflicts); n > 0 {
-		return "⚠ " + f.Name + " — " + conflictsText(n)
+		return "⚠ " + name + " — " + conflictsText(n)
 	}
 	if !f.LastSuccess.IsZero() {
-		return f.Name + " — synced " + agoAt(f.LastSuccess, now)
+		return name + " — synced " + agoAt(f.LastSuccess, now)
 	}
-	return f.Name + " — waiting for first sync"
+	return name + " — waiting for first sync"
 }
 
 // confirmUploads asks before quitting or signing out while files may still be uploading.

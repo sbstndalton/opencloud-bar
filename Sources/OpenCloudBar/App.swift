@@ -131,20 +131,20 @@ struct MenuContent: View {
         var shown = attention + all.filter { !model.hasProblem($0) }
         if all.count > Self.menuLimit {
             let rest = all.filter { !model.hasProblem($0) }
-                .sorted { (model.status[$0.path]?.lastSuccess ?? .distantPast) > (model.status[$1.path]?.lastSuccess ?? .distantPast) }
+                .sorted { (model.status[$0.key]?.lastSuccess ?? .distantPast) > (model.status[$1.key]?.lastSuccess ?? .distantPast) }
             shown = Array((attention + rest).prefix(Self.menuLimit))
         }
         let names = Dictionary(grouping: all, by: \.displayName).mapValues(\.count)
         return Menu("Kept Folders (\(all.count))") {
             ForEach(shown) { f in
                 let name = (names[f.displayName] ?? 0) > 1 ? f.path : f.displayName
-                let symbol = (model.status[f.path]?.state ?? .idle).symbol
+                let symbol = (model.status[f.key]?.state ?? .idle).symbol
                 if let why = model.attentionReason(f) {
                     // A folder that needs the user: say why, and offer the fix right here.
                     Menu {
                         Text(why.prefix(1).uppercased() + why.dropFirst())
                         Divider()
-                        switch model.status[f.path]?.state {
+                        switch model.status[f.key]?.state {
                         case .needsRepair:
                             Button("Repair (Merge Both Sides)…") { model.repair(f) }.disabled(model.syncing)
                         case .bigDeletion:

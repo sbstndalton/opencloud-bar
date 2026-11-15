@@ -16,6 +16,7 @@ package main
 //   - Access and refresh tokens never reach the page; log text is scrubbed of anything that looks like one.
 
 import (
+	"context"
 	"crypto/rand"
 	_ "embed"
 	"encoding/base64"
@@ -298,6 +299,28 @@ func (u *webUI) handler(e *Engine) http.Handler {
 		}
 		jsonOK(w, e.SetPaused(*b.Paused))
 	})
+	mux.HandleFunc("GET /ui/api/spaces", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		sp, err := listSpaces(ctx, e.config())
+		if err != nil {
+			jsonErr(w, http.StatusConflict, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"spaces": append([]Space{}, sp...)})
+	})
+	mux.HandleFunc("POST /ui/api/browse", func(w http.ResponseWriter, r *http.Request) {
+		var b struct{ Space, Path string }
+		if !readJSON(w, r, &b) {
+			return
+		}
+		dirs, err := e.BrowseSpace(b.Space, b.Path)
+		if err != nil {
+			jsonErr(w, http.StatusConflict, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"folders": append([]string{}, dirs...)})
+	})
 	mux.HandleFunc("POST /ui/api/conflict", func(w http.ResponseWriter, r *http.Request) {
 		var b struct{ Folder, File, Action string }
 		if readJSON(w, r, &b) {
@@ -442,7 +465,8 @@ func (e *Engine) uiState() map[string]any {
 	for _, f := range st.Folders {
 		uf := uiFolder{FolderStatus: f, Remote: f.Path, ExtraFilters: []string{}}
 		for _, k := range cfg.Kept {
-			if k.Path == f.Path {
+			if k.Key() == f.Path {
+				uf.Remote = k.Path
 				uf.ExtraFilters = append(uf.ExtraFilters, k.ExtraFilters...)
 			}
 		}
@@ -514,9 +538,18 @@ func orDefault(v, d int) int {
 
 func (e *Engine) serveKeep(w http.ResponseWriter, r *http.Request) {
 	var b struct {
-		Path string `json:"path"` // empty: choose with the folder dialog
+		Path  string `json:"path"`  // empty: choose with the folder dialog
+		Space string `json:"space"` // a space's id; empty for the personal space
 	}
 	if !readJSON(w, r, &b) {
+		return
+	}
+	if b.Space != "" {
+		if strings.TrimSpace(b.Path) == "" {
+			jsonErr(w, http.StatusBadRequest, errors.New("choose a folder in the space (the whole space can't be kept)"))
+			return
+		}
+		jsonOK(w, e.KeepInSpace(b.Space, b.Path, ""))
 		return
 	}
 	if b.Path != "" {

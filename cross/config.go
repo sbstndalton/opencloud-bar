@@ -27,9 +27,59 @@ type KeptFolder struct {
 	StateName    string   `json:"stateName"` // unique; names the bisync state
 	ExtraFilters []string `json:"extraFilters,omitempty"`
 	LocalPath    string   `json:"localPath,omitempty"` // optional: absolute local folder instead of localRoot/path
+	// Space is the OpenCloud space the folder is in (a project space or a share); nil is the
+	// personal space, as in every config before 1.2. Path is then relative to that space's root.
+	Space *SpaceRef `json:"space,omitempty"`
+}
+
+// SpaceRef names a space other than the personal one. DavPath is the WebDAV path of its root
+// as the server reported it (root.webDavUrl), e.g. "/dav/spaces/<id>"; it is used like davPath.
+type SpaceRef struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	DavPath string `json:"davPath"`
 }
 
 func (f KeptFolder) DisplayName() string { return filepath.Base(f.Path) }
+
+// Key identifies a kept folder: its path in the personal space (unchanged from earlier
+// versions), else "<space id>:<path>", so the same path can be kept from two spaces.
+func (f KeptFolder) Key() string {
+	if f.Space == nil {
+		return f.Path
+	}
+	return f.Space.ID + ":" + f.Path
+}
+
+func (f KeptFolder) spaceID() string {
+	if f.Space == nil {
+		return ""
+	}
+	return f.Space.ID
+}
+
+// spaceDirName is a space's folder name under localRoot: its name, made safe for a folder.
+func spaceDirName(s *SpaceRef) string {
+	name := strings.Map(func(r rune) rune {
+		if r == '/' || r == '\\' || r == ':' || unicode.IsControl(r) {
+			return '-'
+		}
+		return r
+	}, strings.TrimSpace(s.Name))
+	name = strings.TrimRight(name, " .")
+	if name == "" || name == "." || name == ".." {
+		name = "Space " + strings.Map(func(r rune) rune {
+			if unicode.IsLetter(r) || unicode.IsDigit(r) {
+				return r
+			}
+			return -1
+		}, s.ID)
+		if len(name) > 14 {
+			name = name[:14]
+		}
+	}
+	return name
+}
 
 // Config uses the same JSON format as the macOS app; unknown keys are ignored and
 // missing keys keep their defaults.
@@ -268,7 +318,28 @@ func (c Config) Local(f KeptFolder) string {
 	if f.LocalPath != "" {
 		return expand(f.LocalPath)
 	}
+	if f.Space != nil {
+		// <localRoot>/<space name>/<path>: apart from the personal folders' copies.
+		return filepath.Join(expand(c.LocalRoot), spaceDirName(f.Space), filepath.FromSlash(f.Path))
+	}
 	return filepath.Join(expand(c.LocalRoot), filepath.FromSlash(f.Path))
+}
+
+// RemoteFor is the rclone remote of the folder's space (the personal one: RemoteSpec). Spaces
+// use the same on-the-fly WebDAV remote with that space's path, so the sign-in applies.
+func (c Config) RemoteFor(f KeptFolder) string {
+	if f.Space == nil {
+		return c.RemoteSpec()
+	}
+	return fmt.Sprintf(":webdav,vendor=%s,url='%s%s':", c.Vendor(), c.BaseURL(), f.Space.DavPath)
+}
+
+// ServerIdentityFor is what a folder's sync history was made with (personal: ServerIdentity).
+func (c Config) ServerIdentityFor(f KeptFolder) string {
+	if f.Space == nil {
+		return c.ServerIdentity()
+	}
+	return c.ServerIdentity() + "|space|" + f.Space.DavPath
 }
 func (c Config) SSH() string {
 	if c.SSHPath != "" {
@@ -282,13 +353,38 @@ func foldKey(p string) string { return cases.Fold().String(norm.NFC.String(p)) }
 
 var slugRe = regexp.MustCompile(`[^A-Za-z0-9]+`)
 
-func makeStateName(path string) string {
+func makeStateName(path string) string { return makeStateNameIn("", path) }
+
+// makeStateNameIn: a space's folders hash the space id too, so the same path in two spaces
+// gets two names. The personal space's names are unchanged.
+func makeStateNameIn(spaceID, path string) string {
 	slug := strings.ToLower(strings.Trim(slugRe.ReplaceAllString(path, "-"), "-"))
 	if len(slug) > 40 {
 		slug = slug[:40]
 	}
-	sum := sha256.Sum256([]byte(foldKey(path)))
+	key := foldKey(path)
+	if spaceID != "" {
+		key = spaceID + "\x00" + key
+	}
+	sum := sha256.Sum256([]byte(key))
 	return slug + "-" + hex.EncodeToString(sum[:4])
+}
+
+// spaceRefProblem checks a kept folder's space (hand edits included).
+func (c Config) spaceRefProblem(f KeptFolder) error {
+	s := f.Space
+	if s == nil {
+		return nil
+	}
+	switch {
+	case !c.OIDC():
+		return fmt.Errorf("kept folder %q: spaces need the browser sign-in (serverURL)", f.Path)
+	case s.ID == "" || hasControl(s.ID) || hasControl(s.Name):
+		return fmt.Errorf("kept folder %q: its space needs an id (and no control characters)", f.Path)
+	case !strings.HasPrefix(s.DavPath, "/") || strings.ContainsAny(s.DavPath, "' ") || hasControl(s.DavPath):
+		return fmt.Errorf("kept folder %q: its space's davPath must start with / (no quotes or spaces)", f.Path)
+	}
+	return nil
 }
 
 // normalizeKeptPath is how a kept folder's path is stored: forward slashes, no leading,
@@ -378,9 +474,19 @@ func (c Config) Validate() error {
 			return fmt.Errorf("kept folder %q needs a unique stateName", f.Path)
 		}
 		states[f.StateName] = true
+		if err := c.spaceRefProblem(f); err != nil {
+			return err
+		}
 		for _, g := range c.Kept[:i] {
-			if overlaps(f.Path, g.Path) {
+			if f.spaceID() == g.spaceID() && overlaps(f.Path, g.Path) {
 				return fmt.Errorf("kept folders %q and %q overlap", f.Path, g.Path)
+			}
+			// Folders from different spaces must not share a local folder either.
+			if f.spaceID() != g.spaceID() && f.LocalPath == "" && g.LocalPath == "" {
+				a, b := filepath.Clean(c.Local(f)), filepath.Clean(c.Local(g))
+				if samePath(a, b) || within(a, b) || within(b, a) {
+					return fmt.Errorf("kept folder %q would share its folder on this computer (%s) with %q", f.Key(), a, g.Key())
+				}
 			}
 		}
 		if err := c.localPathProblem(f, i); err != nil {
@@ -629,6 +735,22 @@ func rawKept(raw map[string]json.RawMessage) ([]map[string]json.RawMessage, erro
 		}
 	}
 	return kept, nil
+}
+
+// rawSpaceID and rawKey read a raw kept entry's space id and KeptFolder.Key().
+func rawSpaceID(m map[string]json.RawMessage) string {
+	var s struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(m["space"], &s)
+	return s.ID
+}
+
+func rawKey(m map[string]json.RawMessage) string {
+	if id := rawSpaceID(m); id != "" {
+		return id + ":" + rawString(m, "path")
+	}
+	return rawString(m, "path")
 }
 
 func rawString(m map[string]json.RawMessage, k string) string {

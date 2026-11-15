@@ -239,7 +239,7 @@ function drawFolders() {
     h("tbody", {}, list.map(f => {
       const [cls, text, why] = stateLook(f);
       return h("tr", { class: f.path === selected ? "sel" : "", onclick: () => { selected = f.path; drawFolders(); } },
-        h("td", { text: f.name }), h("td", { class: "path", text: f.local }),
+        h("td", {}, f.name, f.space ? h("span", { class: "why", text: "in " + f.space }) : null), h("td", { class: "path", text: f.local }),
         h("td", {}, h("span", { class: "dot " + cls }), text, why ? h("span", { class: "why", text: why }) : null),
         h("td", { text: ago(f.lastSuccess) }));
     })));
@@ -247,18 +247,17 @@ function drawFolders() {
   parts.push(list.length ? tbl : h("div", { class: "card" }, "Nothing is kept on this computer yet. Choose Keep a Folder… to start."));
   const f = list.find(x => x.path === selected);
   if (f) parts.push(folderDetail(f, busy));
-  parts.push(h("details", {}, h("summary", { text: "Keep a folder by typing its path" }),
-    h("p", { class: "hint", text: "Use this if the folder dialog isn't available. The path is inside your OpenCloud drive, for example Documents/Projects." }),
-    h("div", { class: "row" }, h("input", { type: "text", id: "keep-path", placeholder: "Documents/Projects" }),
-      h("button", { class: "btn", disabled: busy, onclick: () => { const p = document.getElementById("keep-path").value.trim(); if (p) act(() => post("keep", { path: p }), "Folder kept; the first sync starts shortly"); } }, "Keep"))));
+  parts.push(keepBox(busy));
   const old = body.querySelector("textarea"); // don't wipe unsaved exclude edits on the 3 s refresh
   const keepText = old && old.dataset.path === selected ? old.value : null;
   const keepFocus = old && document.activeElement === old;
   const typed = body.querySelector("#keep-path"), typedVal = typed ? typed.value : "";
+  const wasOpen = !!(body.querySelector("details.keep") || {}).open;
   body.replaceChildren(...parts);
   const ta = body.querySelector("textarea");
   if (ta && keepText != null) { ta.value = keepText; if (keepFocus) ta.focus(); }
   if (typedVal) body.querySelector("#keep-path").value = typedVal;
+  if (wasOpen) body.querySelector("details.keep").open = true;
 }
 function keepFolder() {
   act(() => post("keep", {}), "Choose the folder in the dialog on your desktop");
@@ -292,6 +291,32 @@ async function stopKeeping(f) {
   if (f.state === "failed" && (f.detail || "").includes("is empty or missing")) text = "The copy on this computer is missing or empty, so there is nothing to sync or move to the trash. OpenCloud Bar just stops keeping it here. The folder stays in OpenCloud.";
   try { const u = await get("unsynced?path=" + encodeURIComponent(f.path)); if (u.unsynced > 0) text += "\n\n" + u.unsynced + " file(s) in it are never synced (build folders, excluded items) and exist only here. They move with it."; } catch (e) { /* ignore */ }
   if (confirm("Stop keeping " + f.name + " here?\n\n" + text)) act(() => post("unkeep", { path: f.path }), "Started; see the status above");
+}
+
+// Keep a folder by path, from the personal space or another space (project spaces, shares).
+let keepSpaces = null, keepSpace = "", keepDirs = null, keepSpacesErr = "";
+function keepBox(busy) {
+  const sel = h("select", {});
+  for (const [id, name] of [["", "Personal"]].concat((keepSpaces || []).map(s => [s.id, s.name + (s.type === "mountpoint" ? " (shared with you)" : "")]))) {
+    const o = h("option", { value: id, text: name }); if (id === keepSpace) o.selected = true; sel.append(o);
+  }
+  sel.addEventListener("change", () => { keepSpace = sel.value; keepDirs = null; const p = document.getElementById("keep-path"); if (p) p.value = ""; drawFolders(); });
+  const pathOf = () => document.getElementById("keep-path").value.trim();
+  const browse = async () => {
+    try { keepDirs = (await post("browse", { space: keepSpace, path: pathOf() })).folders; } catch (e) { toast(e.message, true); keepDirs = null; }
+    drawFolders();
+  };
+  const box = h("details", { class: "keep" }, h("summary", { text: "Keep a folder by its path, or from another space" }),
+    h("p", { class: "hint", text: "Choose the space (Personal, a project space, or a folder shared with you), then type the folder's path in it or pick it from the list. Folders from other spaces go to " + (S.config.localRoot || "the local folder") + "/<space name>/…. Read-only folders can't be kept. The drive shows the personal space only." }),
+    h("div", { class: "row" }, h("label", { text: "Space" }), sel,
+      keepSpaces === null ? h("button", { class: "btn", onclick: async () => { try { keepSpaces = (await get("spaces")).spaces; keepSpacesErr = ""; } catch (e) { keepSpaces = []; keepSpacesErr = e.message; } drawFolders(); } }, "Load Spaces") : null,
+      keepSpacesErr ? h("span", { class: "inline-err", text: keepSpacesErr }) : null),
+    h("div", { class: "row" }, h("input", { type: "text", id: "keep-path", placeholder: "Documents/Projects" }),
+      h("button", { class: "btn", onclick: browse }, "List Folders"),
+      h("button", { class: "btn", disabled: busy, onclick: () => { const p = pathOf(); if (p) act(() => post("keep", { path: p, space: keepSpace }), "Folder kept; the first sync starts shortly"); } }, "Keep")));
+  if (keepDirs) box.append(h("div", { class: "card" }, keepDirs.length ? keepDirs.map(d => h("button", { class: "btn", onclick: () => {
+    const p = document.getElementById("keep-path"); p.value = (p.value.trim() ? p.value.trim().replace(/\/+$/, "") + "/" : "") + d; browse(); } }, d + "/")) : "No folders here."));
+  return box;
 }
 
 // ---- Conflicts

@@ -9,12 +9,18 @@ struct KeptFolder: Codable, Hashable, Identifiable {
     var stateName: String
     /// Extra rclone filter lines for this folder only, e.g. "- /Old backups/**".
     var extraFilters: [String] = []
+    /// The OpenCloud space the folder is in (a project space or a share); nil is the personal
+    /// space, as in every config before 1.2. `path` is then relative to that space's root.
+    var space: SpaceRef?
 
-    var id: String { path }
+    /// Identifies the folder: its path in the personal space (as before 1.2), else
+    /// "<space id>:<path>", so the same path can be kept from two spaces. Same as the Go app.
+    var key: String { space.map { "\($0.id):\(path)" } ?? path }
+    var id: String { key }
     var displayName: String { (path as NSString).lastPathComponent }
 
-    init(path: String, stateName: String, extraFilters: [String] = []) {
-        self.path = path; self.stateName = stateName; self.extraFilters = extraFilters
+    init(path: String, stateName: String, extraFilters: [String] = [], space: SpaceRef? = nil) {
+        self.path = path; self.stateName = stateName; self.extraFilters = extraFilters; self.space = space
     }
 
     init(from d: Decoder) throws {
@@ -22,13 +28,16 @@ struct KeptFolder: Codable, Hashable, Identifiable {
         path = try c.decode(String.self, forKey: .path)
         stateName = try c.decode(String.self, forKey: .stateName)
         extraFilters = try c.decodeIfPresent([String].self, forKey: .extraFilters) ?? []
+        space = try c.decodeIfPresent(SpaceRef.self, forKey: .space)
     }
 
-    /// Unique, filesystem-safe state name: readable slug plus a hash of the case-folded path.
-    static func makeStateName(for path: String) -> String {
+    /// Unique, filesystem-safe state name: readable slug plus a hash of the case-folded path
+    /// (and, in another space, of the space id too: the personal space's names are unchanged).
+    static func makeStateName(for path: String, spaceID: String? = nil) -> String {
         let slug = path.replacingOccurrences(of: "[^A-Za-z0-9]+", with: "-", options: .regularExpression)
             .trimmingCharacters(in: CharacterSet(charactersIn: "-")).lowercased()
-        let key = Config.foldKey(path)
+        var key = Config.foldKey(path)
+        if let s = spaceID, !s.isEmpty { key = s + "\u{0}" + key }
         let hash = SHA256.hash(data: Data(key.utf8)).prefix(4).map { String(format: "%02x", $0) }.joined()
         return "\(slug.prefix(40))-\(hash)"
     }
@@ -65,6 +74,24 @@ struct KeptFolder: Codable, Hashable, Identifiable {
             if part.hasSuffix(".") { return "folder name “\(part)” ends with a dot" }
         }
         return nil
+    }
+}
+
+/// A space other than the personal one. davPath is the WebDAV path of its root as the server
+/// reported it (root.webDavUrl), e.g. "/dav/spaces/<id>"; it is used like Config.davPath.
+struct SpaceRef: Codable, Hashable {
+    var id: String
+    var name: String
+    var davPath: String
+
+    /// The space's folder under localRoot: its name, made safe for a folder name.
+    var dirName: String {
+        var n = String(name.trimmingCharacters(in: .whitespaces).unicodeScalars.map {
+            "/\\:".unicodeScalars.contains($0) || CharacterSet.controlCharacters.contains($0) ? "-" : Character($0)
+        })
+        while n.hasSuffix(" ") || n.hasSuffix(".") { n.removeLast() }
+        if n.isEmpty || n == "." || n == ".." { n = "Space " + String(id.filter { $0.isLetter || $0.isNumber }.prefix(8)) }
+        return n
     }
 }
 
@@ -182,15 +209,27 @@ struct Config: Codable {
 
     /// Problems that make the config unsafe to run with (nil if none).
     func validationError() -> String? {
-        var states = Set<String>(), keys = [String]()
+        var states = Set<String>(), keys = [(space: String, path: String)](), locals = [(String, String)]()
         for f in kept {
             if let p = KeptFolder.problem(with: f.path) { return "kept folder “\(f.path)”: \(p)" }
             if !states.insert(f.stateName).inserted { return "two kept folders share stateName “\(f.stateName)”" }
-            let k = Config.foldKey(f.path)
-            if let other = keys.first(where: { k == $0 || k.hasPrefix($0 + "/") || $0.hasPrefix(k + "/") }) {
-                return "kept folders “\(f.path)” and “\(other)” overlap"
+            if let s = f.space {
+                if !isOIDC { return "kept folder “\(f.path)”: spaces need the browser sign-in (serverURL)" }
+                if s.id.isEmpty || !s.davPath.hasPrefix("/") || s.davPath.contains("'") || s.davPath.contains(" ") {
+                    return "kept folder “\(f.path)”: its space needs an id and a davPath starting with /"
+                }
             }
-            keys.append(k)
+            let sid = f.space?.id ?? "", k = Config.foldKey(f.path)
+            if let other = keys.first(where: { $0.space == sid && (k == $0.path || k.hasPrefix($0.path + "/") || $0.path.hasPrefix(k + "/")) }) {
+                return "kept folders “\(f.path)” and “\(other.path)” overlap"
+            }
+            keys.append((sid, k))
+            // Folders from different spaces must not share a local folder either.
+            let l = Config.foldKey((localURL(f).path as NSString).standardizingPath)
+            if let other = locals.first(where: { l == $0.0 || l.hasPrefix($0.0 + "/") || $0.0.hasPrefix(l + "/") }) {
+                return "kept folder “\(f.key)” would share its folder on this Mac with “\(other.1)”"
+            }
+            locals.append((l, f.key))
         }
         if davPath.contains("'") { return "davPath can't contain a single quote" }
         if (serverURL ?? "").contains("'") { return "serverURL can't contain a single quote" }
@@ -241,6 +280,22 @@ struct Config: Codable {
     var rcPort: Int { localPort + 100 }
     /// rclone remote for the space root. Legacy: the named remote (credentials in rclone.conf).
     /// OIDC: an on-the-fly webdav remote; the bearer token comes from the environment (AppModel).
+    /// The kept folder's copy on this Mac: <localRoot>/<path>, or <localRoot>/<space name>/<path>.
+    func localURL(_ f: KeptFolder) -> URL {
+        guard let s = f.space else { return localRootURL.appendingPathComponent(f.path) }
+        return localRootURL.appendingPathComponent(s.dirName).appendingPathComponent(f.path)
+    }
+    /// The rclone remote of the folder's space (personal: remoteSpec): the same on-the-fly WebDAV
+    /// remote pointed at the space, so the sign-in applies.
+    func remote(for f: KeptFolder) -> String {
+        guard let s = f.space else { return remoteSpec }
+        return ":webdav,vendor=\(vendor),url='\(baseURL)\(s.davPath)':"
+    }
+    func serverIdentity(for f: KeptFolder) -> String {
+        guard let s = f.space else { return serverIdentity }
+        return serverIdentity + "|space|" + s.davPath
+    }
+
     var remoteSpec: String {
         isOIDC ? ":webdav,vendor=\(vendor),url='\(baseURL)\(davPath)':" : "\(rcloneRemote),url='\(baseURL)\(davPath)':"
     }
@@ -352,8 +407,10 @@ struct Config: Codable {
             let oldKept = (old["kept"] as? [[String: Any]]) ?? []
             if let newKept = new["kept"] as? [[String: Any]] {
                 new["kept"] = newKept.map { entry -> [String: Any] in
+                    // Same folder: same path in the same space (keys the Go app adds survive).
+                    func spaceID(_ e: [String: Any]) -> String { ((e["space"] as? [String: Any])?["id"] as? String) ?? "" }
                     guard let path = entry["path"] as? String,
-                          var base = oldKept.first(where: { ($0["path"] as? String) == path }) else { return entry }
+                          var base = oldKept.first(where: { ($0["path"] as? String) == path && spaceID($0) == spaceID(entry) }) else { return entry }
                     base.merge(entry) { _, n in n }
                     return base
                 }

@@ -178,7 +178,7 @@ final class AppModel: ObservableObject {
         let f = ISO8601DateFormatter()
         var out: [String: String] = [:]
         for k in config.kept {
-            if let d = status[k.path]?.lastSuccess { out[k.stateName] = f.string(from: d) }
+            if let d = status[k.key]?.lastSuccess { out[k.stateName] = f.string(from: d) }
         }
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -189,15 +189,15 @@ final class AppModel: ObservableObject {
 
     private func refreshStatusEntries() {
         var saved: [String: Date]?
-        for f in config.kept where status[f.path] == nil {
+        for f in config.kept where status[f.key] == nil {
             var s = FolderStatus()
             if saved == nil { saved = loadLastSuccess() }
             s.lastSuccess = saved?[f.stateName]
             if let reason = needsRepairReason(f) { s.state = .needsRepair(reason) }
-            status[f.path] = s
-            conflicts[f.path] = Conflicts.load(stateFile(f, ".conflicts.json"))
+            status[f.key] = s
+            conflicts[f.key] = Conflicts.load(stateFile(f, ".conflicts.json"))
         }
-        let paths = Set(config.kept.map(\.path))
+        let paths = Set(config.kept.map(\.key))
         for k in status.keys where !paths.contains(k) { status[k] = nil }
         for k in conflicts.keys where !paths.contains(k) { conflicts[k] = nil }
     }
@@ -437,7 +437,7 @@ final class AppModel: ObservableObject {
     }
     private func markNeedsRepair(_ f: KeptFolder, _ reason: String) {
         try? reason.write(to: stateFile(f, ".needs-repair"), atomically: true, encoding: .utf8)
-        status[f.path]?.state = .needsRepair(reason)
+        status[f.key]?.state = .needsRepair(reason)
         Log.line("\(f.path): needs repair: \(reason)")
     }
     /// A folder whose listings keep drifting. It still waits for Repair, but each sync interval
@@ -464,22 +464,22 @@ final class AppModel: ObservableObject {
         syncTask = Task { [weak self] in
             guard let self else { return }
             if await self.serverTooBusy() {
-                for f in folders { self.status[f.path]?.state = .skipped("server busy") }
+                for f in folders { self.status[f.key]?.state = .skipped("server busy") }
             } else {
                 for (i, f) in folders.enumerated() where !Task.isCancelled && !self.quitting {
                     self.activeIndex = i + 1
                     self.activeCount = folders.count
                     // skip folders removed while this run was waiting
-                    guard self.config.kept.contains(where: { $0.path == f.path }) else { continue }
+                    guard self.config.kept.contains(where: { $0.key == f.key }) else { continue }
                     if let reason = self.needsRepairReason(f) {
                         if FileManager.default.fileExists(atPath: self.stateFile(f, ".drift-parked").path) {
                             _ = await self.syncFolder(f, mode: .driftRetry)
                         } else {
-                            self.status[f.path]?.state = .needsRepair(reason)
+                            self.status[f.key]?.state = .needsRepair(reason)
                         }
                         continue
                     }
-                    if case .bigDeletion = self.status[f.path]?.state, !manual { continue }
+                    if case .bigDeletion = self.status[f.key]?.state, !manual { continue }
                     _ = await self.syncFolder(f, mode: .normal)
                 }
             }
@@ -543,47 +543,47 @@ final class AppModel: ObservableObject {
         }
         let fm = FileManager.default
         let parkedReason = mode == .driftRetry ? needsRepairReason(f) : nil
-        status[f.path]?.state = .syncing
+        status[f.key]?.state = .syncing
         let marker = stateFile(f, ".initialised")
         let initialised = fm.fileExists(atPath: marker.path)
         let first = !initialised || mode == .repair
 
         if mode == .normal, let reason = needsRepairReason(f) {
-            status[f.path]?.state = .needsRepair(reason); return false
+            status[f.key]?.state = .needsRepair(reason); return false
         }
         if mode == .driftRetry, !initialised || parkedReason == nil {
             try? fm.removeItem(at: stateFile(f, ".drift-parked"))
-            status[f.path]?.state = parkedReason.map { .needsRepair($0) } ?? .idle
+            status[f.key]?.state = parkedReason.map { .needsRepair($0) } ?? .idle
             return false
         }
         /// A parked folder keeps waiting for Repair whatever stopped this try.
         func stillParked() -> Bool {
-            if mode == .driftRetry, let r = parkedReason { status[f.path]?.state = .needsRepair(r) }
+            if mode == .driftRetry, let r = parkedReason { status[f.key]?.state = .needsRepair(r) }
             return false
         }
         guard fm.fileExists(atPath: config.localRootURL.path) || !initialised else {
-            status[f.path]?.state = .failed("\(config.localRoot) is missing"); return stillParked()
+            status[f.key]?.state = .failed("\(config.localRoot) is missing"); return stillParked()
         }
-        let local = config.localRootURL.appendingPathComponent(f.path)
+        let local = config.localURL(f)
         if initialised && !fm.fileExists(atPath: local.path) {
-            status[f.path]?.state = .failed(Self.missingLocalText(f.displayName)); return stillParked()
+            status[f.key]?.state = .failed(Self.missingLocalText(f.displayName)); return stillParked()
         }
         // Sync history is only valid for the server and account it was made with.
         let work = workDir(f)
         let serverFile = work.appendingPathComponent("server.txt")
         if initialised, mode != .repair,
            let saved = try? String(contentsOf: serverFile, encoding: .utf8),
-           saved != config.serverIdentity {
+           saved != config.serverIdentity(for: f) {
             markNeedsRepair(f, "server or account settings changed"); return false
         }
         guard await waitForTunnel() else {
-            status[f.path]?.state = .failed("no connection to server"); return stillParked()
+            status[f.key]?.state = .failed("no connection to server"); return stillParked()
         }
 
         if first { try? fm.createDirectory(at: local, withIntermediateDirectories: true) }
         try? fm.createDirectory(at: work, withIntermediateDirectories: true)
         if !fm.fileExists(atPath: serverFile.path) {
-            try? config.serverIdentity.write(to: serverFile, atomically: true, encoding: .utf8)
+            try? config.serverIdentity(for: f).write(to: serverFile, atomically: true, encoding: .utf8)
         }
         let filters = stateFile(f, "").deletingLastPathComponent().appendingPathComponent("filters-\(f.stateName).txt")
         let filterText = (f.extraFilters + config.commonFilters + [Backups.filter]).joined(separator: "\n") + "\n"
@@ -607,10 +607,10 @@ final class AppModel: ObservableObject {
             // Check both sides again: an emptied copy (an unplugged disk, a server folder that
             // vanished) must never be "applied" to the other side.
             if localMissingOrEmpty(local) {
-                status[f.path]?.state = .failed(Self.missingLocalText(f.displayName)); return false
+                status[f.key]?.state = .failed(Self.missingLocalText(f.displayName)); return false
             }
             if await remoteMissingOrEmpty(f) {
-                status[f.path]?.state = .failed(Self.missingRemoteText); return false
+                status[f.key]?.state = .failed(Self.missingRemoteText); return false
             }
             extra = ["--force"]
         }
@@ -661,10 +661,10 @@ final class AppModel: ObservableObject {
     private func filtersUpgradeMerge(_ run: FolderRun) async -> Bool {
         let f = run.f
         if localMissingOrEmpty(run.local) {
-            status[f.path]?.state = .failed(Self.missingLocalText(f.displayName)); return false
+            status[f.key]?.state = .failed(Self.missingLocalText(f.displayName)); return false
         }
         if await remoteMissingOrEmpty(f) {
-            status[f.path]?.state = .failed(Self.missingRemoteText); return false
+            status[f.key]?.state = .failed(Self.missingRemoteText); return false
         }
         let marker = stateFile(f, ".filters-upgraded")
         try? FileManager.default.removeItem(at: marker)   // once: if it fails, Repair as usual
@@ -687,7 +687,7 @@ final class AppModel: ObservableObject {
         for pass in 1...2 {
             // Each pass gets its own backup folder: a file the second pass replaces again must
             // not overwrite the first pass's backup of it.
-            let backups = Backups.args(config.stateURL, config.remoteSpec, run.f.stateName, pass == 1 ? stamp : "\(stamp)-\(pass)")
+            let backups = Backups.args(config.stateURL, config.remote(for: run.f), run.f.stateName, pass == 1 ? stamp : "\(stamp)-\(pass)")
             let r = await bisync(run, kind: kind, extra: ["--resync", "--resync-mode", "newer"] + backups)
             if r.status == 0 { succeeded(run); return (true, nil) }
             let res = BisyncResult.classify(r.output, timedOut: r.status == 124)
@@ -708,7 +708,7 @@ final class AppModel: ObservableObject {
     private func bisync(_ run: FolderRun, kind: String, extra: [String]) async -> Shell.Result {
         // Merges are rare: log every copy so a merge can be checked afterwards.
         let level = kind == "sync" ? "NOTICE" : "INFO"
-        let args = ["bisync", run.local.path, config.remoteSpec + run.f.path,
+        let args = ["bisync", run.local.path, config.remote(for: run.f) + run.f.path,
                     "--workdir", run.work.path, "--filters-file", run.filters.path,
                     "--create-empty-src-dirs", "--compare", "size,modtime",
                     "--resilient", "--recover", "--max-lock", "10m",
@@ -726,9 +726,9 @@ final class AppModel: ObservableObject {
         try? fm.removeItem(at: stateFile(run.f, ".needs-repair"))
         try? fm.removeItem(at: stateFile(run.f, ".drift-parked"))
         try? fm.removeItem(at: stateFile(run.f, ".filters-upgraded"))
-        try? config.serverIdentity.write(to: run.serverFile, atomically: true, encoding: .utf8)
-        status[run.f.path]?.state = .ok
-        status[run.f.path]?.lastSuccess = Date()
+        try? config.serverIdentity(for: run.f).write(to: run.serverFile, atomically: true, encoding: .utf8)
+        status[run.f.key]?.state = .ok
+        status[run.f.key]?.lastSuccess = Date()
         saveLastSuccess()
         rescanConflicts(run.f)
     }
@@ -737,19 +737,19 @@ final class AppModel: ObservableObject {
 
     /// Looks for conflict copies in a folder (off the main thread) and remembers the list.
     func rescanConflicts(_ f: KeptFolder) {
-        let local = config.localRootURL.appendingPathComponent(f.path)
+        let local = config.localURL(f)
         let filters = f.extraFilters + config.commonFilters
         let file = stateFile(f, ".conflicts.json")
-        let gen = (conflictScanGen[f.path] ?? 0) + 1
-        conflictScanGen[f.path] = gen
+        let gen = (conflictScanGen[f.key] ?? 0) + 1
+        conflictScanGen[f.key] = gen
         Task {
             let list = await Task.detached { Conflicts.scan(local, filters: filters) }.value
-            guard self.conflictScanGen[f.path] == gen,
-                  self.config.kept.contains(where: { $0.path == f.path }) else { return }
+            guard self.conflictScanGen[f.key] == gen,
+                  self.config.kept.contains(where: { $0.key == f.key }) else { return }
             let old = Set(Conflicts.load(file).map(\.file))
             let fresh = list.filter { !old.contains($0.file) }
             Conflicts.save(list, to: file)
-            self.conflicts[f.path] = list
+            self.conflicts[f.key] = list
             if let first = fresh.first { self.newConflicts.append((f.displayName, fresh.count, (first.file as NSString).lastPathComponent)) }
         }
     }
@@ -782,7 +782,7 @@ final class AppModel: ObservableObject {
               confirm("Keep this version of “\(c.original)”?",
                       "The conflict copy replaces the current file. The current file is kept in the backups (in the app's state folder, for 30 days). The next sync sends the change to OpenCloud.",
                       button: "Keep This Version") else { return }
-        let local = config.localRootURL.appendingPathComponent(f.path)
+        let local = config.localURL(f)
         let backupDir = Backups.localDir(config.stateURL, f.stateName, Backups.stamp())
         conflictAction(f, failure: "Couldn't keep that version", {
             try Conflicts.keep(c, local: local, backupDir: backupDir)
@@ -792,7 +792,7 @@ final class AppModel: ObservableObject {
     /// Discard: the conflict copy goes to the Trash.
     func discardConflict(_ f: KeptFolder, _ c: ConflictItem) {
         guard conflictActionAllowed(),
-              let (loser, _) = Conflicts.target(config.localRootURL.appendingPathComponent(f.path), c),
+              let (loser, _) = Conflicts.target(config.localURL(f), c),
               confirm("Discard “\(c.file)”?", "It moves to the Trash. The next sync removes it from OpenCloud too.", button: "Discard") else { return }
         conflictAction(f, failure: "Couldn't move it to the Trash", {
             try FileManager.default.trashItem(at: loser, resultingItemURL: nil)
@@ -800,11 +800,11 @@ final class AppModel: ObservableObject {
     }
 
     func revealConflict(_ f: KeptFolder, _ c: ConflictItem) {
-        guard let (loser, _) = Conflicts.target(config.localRootURL.appendingPathComponent(f.path), c) else { return }
+        guard let (loser, _) = Conflicts.target(config.localURL(f), c) else { return }
         NSWorkspace.shared.activateFileViewerSelecting([loser])
     }
 
-    var conflictCount: Int { config.kept.reduce(0) { $0 + (conflicts[$1.path]?.count ?? 0) } }
+    var conflictCount: Int { config.kept.reduce(0) { $0 + (conflicts[$1.key]?.count ?? 0) } }
 
     nonisolated static func conflictsText(_ n: Int) -> String { n == 1 ? "1 conflict" : "\(n) conflicts" }
 
@@ -823,30 +823,30 @@ final class AppModel: ObservableObject {
             if config.isOIDC {
                 // The token command said the sign-in is gone; don't show rclone's raw error.
                 markSignedOut()
-                status[f.path]?.state = .failed("signed out")
+                status[f.key]?.state = .failed("signed out")
             } else {
-                status[f.path]?.state = .failed("rclone couldn't sign in; will retry")
+                status[f.key]?.state = .failed("rclone couldn't sign in; will retry")
             }
         case .interrupted:
             if res.timeout && !quitting {
-                status[f.path]?.state = .failed("timed out; will retry")
+                status[f.key]?.state = .failed("timed out; will retry")
             } else {
-                status[f.path]?.state = .skipped("interrupted; continues with the next sync")
+                status[f.key]?.state = .skipped("interrupted; continues with the next sync")
             }
         case .bigChange:
             // An emptied copy isn't a deletion the user made: never offer to apply it to the other side.
             if res.side != "Path2", localMissingOrEmpty(run.local) {
-                status[f.path]?.state = .failed(Self.missingLocalText(f.displayName))
+                status[f.key]?.state = .failed(Self.missingLocalText(f.displayName))
             } else if res.side != "Path1", await remoteMissingOrEmpty(f) {
-                status[f.path]?.state = .failed(Self.missingRemoteText)
+                status[f.key]?.state = .failed(Self.missingRemoteText)
             } else {
-                status[f.path]?.state = .bigDeletion(res.side == "Path1" ? "on this Mac" : res.side == "Path2" ? "in OpenCloud" : "")
+                status[f.key]?.state = .bigDeletion(res.side == "Path1" ? "on this Mac" : res.side == "Path2" ? "in OpenCloud" : "")
             }
         case .filtersChanged:
             markNeedsRepair(f, "the excludes changed, so the sync history must start over; choose Repair")
         case .needsResync:
             if out.contains("directory not found"), await remoteMissingOrEmpty(f) {
-                status[f.path]?.state = .failed(Self.missingRemoteText)
+                status[f.key]?.state = .failed(Self.missingRemoteText)
             } else {
                 markNeedsRepair(f, "sync history is out of date")
             }
@@ -854,9 +854,9 @@ final class AppModel: ObservableObject {
             parkDrift(f, AutoMerge.driftReason(res.path, "choose Repair when it's quiet"))
         case .failed:
             if out.contains("directory not found"), await remoteMissingOrEmpty(f) {
-                status[f.path]?.state = .failed(Self.missingRemoteText)
+                status[f.key]?.state = .failed(Self.missingRemoteText)
             } else {
-                status[f.path]?.state = .failed("rclone failed; will retry (see the sync log)")
+                status[f.key]?.state = .failed("rclone failed; will retry (see the sync log)")
             }
         }
     }
@@ -865,7 +865,7 @@ final class AppModel: ObservableObject {
     /// the server copy vanished, not that files were deleted on purpose: the large-deletion
     /// override must not be offered, or it would empty this Mac's copy too.
     private func remoteMissingOrEmpty(_ f: KeptFolder) async -> Bool {
-        let r = await Shell.run(config.rclone, ["lsf", "--max-depth", "1", "--exclude", ".DS_Store", config.remoteSpec + f.path], timeout: 60)
+        let r = await Shell.run(config.rclone, ["lsf", "--max-depth", "1", "--exclude", ".DS_Store", config.remote(for: f) + f.path], timeout: 60)
         if r.status != 0 { return r.output.contains("directory not found") || r.output.contains("not found") }
         return r.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -958,7 +958,7 @@ final class AppModel: ObservableObject {
 
     /// Only while the folder is blocked for that reason, never when the server copy is missing.
     func allowBigDeletion(_ f: KeptFolder) {
-        guard case .bigDeletion(let side) = status[f.path]?.state else { return }
+        guard case .bigDeletion(let side) = status[f.key]?.state else { return }
         let (where_, other) = side == "on this Mac" ? ("on this Mac", "OpenCloud")
             : side == "in OpenCloud" ? ("in OpenCloud", "this Mac") : ("on one side", "the other side")
         guard confirm("Allow a large deletion in “\(f.displayName)”?",
@@ -1001,18 +1001,28 @@ final class AppModel: ObservableObject {
             alert("That path is too long", "rclone's sync history can't handle folder paths longer than about 90 characters. Choose a folder higher up, or rename a folder.")
             return
         }
-        let key = Config.foldKey(rel)
+        if let e = addKept(KeptFolder(path: rel, stateName: KeptFolder.makeStateName(for: rel))) {
+            alert("Can't keep that folder", e)
+        }
+    }
+
+    /// Adds a kept folder (checked against the others in its space and on this Mac), saves the
+    /// settings and starts its first sync. Returns why it can't, or nil.
+    private func addKept(_ new: KeptFolder) -> String? {
+        var folder = new
+        let key = Config.foldKey(folder.path), sid = folder.space?.id
         if let clash = config.kept.first(where: {
             let k = Config.foldKey($0.path)
-            return key == k || key.hasPrefix(k + "/") || k.hasPrefix(key + "/")
+            return $0.space?.id == sid && (key == k || key.hasPrefix(k + "/") || k.hasPrefix(key + "/"))
         }) {
-            alert("Already covered", "“\(rel)” overlaps “\(clash.path)”, which is already kept on this Mac.")
-            return
+            return "“\(folder.path)” overlaps “\(clash.path)”, which is already kept on this Mac."
         }
-        var folder = KeptFolder(path: rel, stateName: KeptFolder.makeStateName(for: rel))
         while config.kept.contains(where: { $0.stateName == folder.stateName }) { folder.stateName += "x" }
-        config.kept.append(folder)
-        config.save()
+        var c = config
+        c.kept.append(folder)
+        if let e = c.validationError() { return e.prefix(1).uppercased() + e.dropFirst() + "." }
+        do { try c.write() } catch { return "Couldn't save the settings: \(error.localizedDescription)" }
+        config = c
         refreshStatusEntries()
         if config.paused {
             lastMessage = "“\(folder.displayName)” downloads when you resume syncing"
@@ -1020,13 +1030,48 @@ final class AppModel: ObservableObject {
             lastMessage = "Downloading “\(folder.displayName)”…"
             if !syncing { syncNow() }
         }
+        return nil
+    }
+
+    /// Keeps a folder from a project space or a share. Read-only folders are refused: a two-way
+    /// sync can't send changes back. Returns why it can't, or nil.
+    func keepFolder(in space: Space, path: String) async -> String? {
+        guard !needsSignIn else { return "Sign in first." }
+        guard !syncing else { return "A sync is running. Try again when it finishes." }
+        let rel = path.split(separator: "/").joined(separator: "/")
+        if rel.isEmpty { return "Choose a folder in the space (the whole space can't be kept)." }
+        if let p = KeptFolder.problem(newPath: rel) { return p.prefix(1).uppercased() + p.dropFirst() + "." }
+        if rel.utf8.count > 90 { return "That path is too long (rclone's limit is about 90 characters)." }
+        let server = config.serverURL ?? ""
+        do {
+            let token = try await Auth.accessToken(serverURL: server)
+            guard let url = SpacesAPI.davURL(base: server, space, path: rel) else { return "That path isn't valid." }
+            if SpacesAPI.readOnly(try await SpacesAPI.permissions(url, token: token)) {
+                return "“\(rel)” in \(space.name) is read-only for you, so it can't be kept here (a kept folder syncs both ways). Open it in the browser instead."
+            }
+        } catch {
+            return "Couldn't check “\(rel)” in \(space.name): \(error.localizedDescription)"
+        }
+        guard !syncing else { return "A sync is running. Try again when it finishes." }
+        return addKept(KeptFolder(path: rel, stateName: KeptFolder.makeStateName(for: rel, spaceID: space.id), space: space.ref))
+    }
+
+    /// The folders directly in `path` of a space, listed with rclone.
+    func browse(_ space: Space, path: String) async -> Result<[String], Error> {
+        let f = KeptFolder(path: path.split(separator: "/").joined(separator: "/"), stateName: "", space: space.ref)
+        if f.path.contains("'") { return .failure(AuthError.message("That path isn't valid.")) }
+        let r = await Shell.run(config.rclone, ["lsf", "--dirs-only", "--max-depth", "1", config.remote(for: f) + f.path], timeout: 60)
+        guard r.status == 0 else { return .failure(AuthError.message("Couldn't list that folder.")) }
+        let dirs = r.output.split(separator: "\n").map(String.init).filter { $0.hasSuffix("/") }
+            .map { String($0.dropLast()) }.filter { !$0.isEmpty && $0 != Backups.folderName }
+        return .success(dirs.sorted { Config.foldKey($0) < Config.foldKey($1) })
     }
 
     /// Final sync, then moves the local copy to the Trash and stops syncing it.
     func stopKeeping(_ f: KeptFolder) {
         guard !syncing else { alert("A sync is running", "Try again when it finishes."); return }
         Task {
-            let local = config.localRootURL.appendingPathComponent(f.path)
+            let local = config.localURL(f)
             // This Mac's copy is gone or empty (an unplugged disk, say): nothing to upload or to
             // move to the Trash, so it just stops being kept. A final sync would only fail.
             let gone = localMissingOrEmpty(local)
@@ -1057,7 +1102,7 @@ final class AppModel: ObservableObject {
                 try? fm.removeItem(at: self.workDir(f))
                 for s in [".initialised", ".needs-repair", ".auto-merge", ".drift-parked", ".filters-upgraded", ".conflicts.json"] { try? fm.removeItem(at: self.stateFile(f, s)) }
                 try? fm.removeItem(at: self.config.stateURL.appendingPathComponent("filters-\(f.stateName).txt"))
-                self.config.kept.removeAll { $0.path == f.path }
+                self.config.kept.removeAll { $0.key == f.key }
                 self.config.save()
                 self.refreshStatusEntries()
                 self.saveLastSuccess()
@@ -1068,7 +1113,7 @@ final class AppModel: ObservableObject {
 
     /// Number of files in a kept folder that the filters exclude from syncing (nil if unknown).
     private func countUnsyncedFiles(_ f: KeptFolder) async -> Int? {
-        let local = config.localRootURL.appendingPathComponent(f.path)
+        let local = config.localURL(f)
         let filters = config.stateURL.appendingPathComponent("filters-\(f.stateName).txt")
         guard FileManager.default.fileExists(atPath: filters.path) else { return nil }
         async let all = Shell.run(config.rclone, ["lsf", "-R", "--files-only", local.path], timeout: 300)
@@ -1080,7 +1125,7 @@ final class AppModel: ObservableObject {
     }
 
     func openLocal(_ f: KeptFolder) {
-        NSWorkspace.shared.open(config.localRootURL.appendingPathComponent(f.path))
+        NSWorkspace.shared.open(config.localURL(f))
     }
 
     /// Syncs just this folder now (the Settings window's per-folder Sync Now).
@@ -1110,7 +1155,7 @@ final class AppModel: ObservableObject {
 
     /// Runs every tick: announces what changed since the last check (see NotePlanner).
     private func checkNotifications() {
-        let folders = config.kept.map { ($0, status[$0.path]?.state ?? .idle) }
+        let folders = config.kept.map { ($0, status[$0.key]?.state ?? .idle) }
         var notes = notePlanner.plan(folders: folders, signedOut: signedOut && config.isOIDC, autoMerged: autoMerged)
         autoMerged = []
         let found = newConflicts
@@ -1451,7 +1496,7 @@ final class AppModel: ObservableObject {
 
     /// Why a folder needs the user, in a few words (nil if it doesn't).
     func attentionReason(_ f: KeptFolder) -> String? {
-        switch status[f.path]?.state {
+        switch status[f.key]?.state {
         case .needsRepair(let why): return why.isEmpty ? "needs repair" : "needs repair: \(why)"
         case .bigDeletion(let side): return side.isEmpty ? "large deletion blocked" : "large deletion blocked (\(side))"
         case .failed(let why): return why.isEmpty ? "sync failed" : "sync failed: \(why)"
@@ -1461,19 +1506,19 @@ final class AppModel: ObservableObject {
 
     /// The folder's line in the Kept Folders menu: the problem, or when it last synced.
     func menuDetail(_ f: KeptFolder) -> String {
-        switch status[f.path]?.state {
+        switch status[f.key]?.state {
         case .needsRepair: return "needs repair"
         case .bigDeletion: return "large deletion blocked"
         case .failed(let why): return why == Self.missingRemoteText ? "missing or empty in OpenCloud" : "sync failed"
         default: break
         }
-        switch status[f.path]?.state {
+        switch status[f.key]?.state {
         case .syncing: return "syncing…"
         case .skipped(let why): return "skipped (\(why))"
         default: break
         }
-        if let n = conflicts[f.path]?.count, n > 0 { return Self.conflictsText(n) }
-        if let t = status[f.path]?.lastSuccess { return "synced \(agoText(t))" }
+        if let n = conflicts[f.key]?.count, n > 0 { return Self.conflictsText(n) }
+        if let t = status[f.key]?.lastSuccess { return "synced \(agoText(t))" }
         return "waiting for first sync"
     }
 
@@ -1495,7 +1540,7 @@ final class AppModel: ObservableObject {
             if bad.count == 2 { s += " (and 1 more folder)" } else if bad.count > 2 { s += " (and \(bad.count - 1) more folders)" }
             return s
         }
-        let times = config.kept.compactMap { status[$0.path]?.lastSuccess }
+        let times = config.kept.compactMap { status[$0.key]?.lastSuccess }
         if config.paused {
             return times.min().map { "Paused · synced \(agoText($0))" } ?? "Paused"
         }

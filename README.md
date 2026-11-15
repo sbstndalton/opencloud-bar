@@ -91,6 +91,17 @@ On Windows there are two programs in one folder:
 
 `deploy-ms02/` shows a headless server set-up: a systemd user service and an `rclone` wrapper that runs rclone's official Docker image. The memory cap is on that container (3 GB), not on the service: a limit on the service would kill it mid-sync.
 
+## Spaces
+
+Besides your personal files, OpenCloud has **project spaces** and folders **shared with you**. You can keep folders from them too:
+
+- **Mac:** Settings ▸ Kept Folders ▸ **Keep from a Space…**. Choose the space, then the folder (type its path or pick it from the list).
+- **Windows, Linux:** in the settings window, Folders ▸ **Keep a folder by its path, or from another space**: **Load Spaces**, choose one, then type or list the folder.
+- The app asks the server which spaces you have (`/graph/v1.0/me/drives`: project spaces and accepted shares, not disabled ones). A folder that is read-only for you is refused, since a kept folder syncs both ways.
+- A space's folders go to `<local folder>/<space name>/<folder>`, apart from your personal folders. The folder list shows which space each one is in. The same path can be kept from two spaces.
+- They sync like personal folders, with the same sign-in; merge backups go to `.opencloud-bar-backups` at the top of that space.
+- The drive still shows the personal space only.
+
 ## Conflicts
 
 When a file changed on both sides between two syncs, the newer copy keeps its name and the other is saved next to it with `.conflict1` added to the whole name (`report.pdf.conflict1`; a second one is `.conflict2`). Nothing is lost, but nothing tells you either, so OpenCloud Bar looks for these copies after each sync:
@@ -156,7 +167,7 @@ Only the refresh token is kept. The short-lived access token is cached next to t
 - **Builds aren't notarized (macOS) or code-signed (Windows) yet**, so the first launch needs the steps above. Notarization needs a paid Apple Developer ID. Windows signing through SignPath is being set up. Once it is, it covers the programs inside the installer (`OpenCloud Bar.exe` and `opencloud-bar.exe`); the installer `OpenCloud-Bar-Setup-<version>.exe` itself is still unsigned, so SmartScreen may still warn when you run it.
 - **Linux tray:** the tray icon uses StatusNotifier. GNOME shows it only with the AppIndicator extension; KDE, Xfce, Cinnamon and most others show it as is. Without a tray the app still runs (`opencloud-bar run --no-tray`) and the settings page and command line work.
 - **Linux dialogs** use `zenity` and notifications use `notify-send` (package `libnotify-bin` or `libnotify`; the packages recommend both). Without zenity, sign in and keep folders from the settings page instead. Quit then only quits when nothing is still uploading; otherwise a notification says so, and `opencloud-bar quit --force` quits anyway.
-- One account and one OpenCloud space (your personal files) per computer. Shared spaces aren't kept yet.
+- One account per computer. The drive shows your personal space only; folders from project spaces and shares can be kept (see [Spaces](#spaces)), but not browsed on the drive. Read-only folders can't be kept. The "Shares" overview itself isn't a space you can keep from; each accepted share is.
 - Conflicts are found in the local copies of kept folders only (not on the drive), up to 200 per folder. Folders excluded everywhere (like `- **/node_modules/**`) aren't searched.
 
 ## How it works
@@ -201,7 +212,7 @@ Keys the app doesn't know about are kept when it saves.
 | `mountPoint` | where the drive is mounted | `~/OpenCloud-Drive` |
 | `cacheMaxSize` / `cacheMaxAge` | on-demand cache limits | `20G` / `72h` |
 | `syncIntervalSeconds` | how often kept folders sync | 300 |
-| `kept` | kept folders: `path` (relative to the space root), `stateName`, optional `extraFilters` | `[]` |
+| `kept` | kept folders: `path` (relative to the space root), `stateName`, optional `extraFilters`, and `space` (`id`, `name`, `davPath`) for a folder from a project space or share; without `space` it is the personal space | `[]` |
 | `commonFilters` | rclone filter rules for every kept folder | build folders, `node_modules`, `.venv`, temp files |
 | `paused` | kept folders don't sync | `false` |
 | `checkForUpdates` / `notifications` | daily update check / notifications | `true` / `true` |
