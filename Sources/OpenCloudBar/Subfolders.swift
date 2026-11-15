@@ -108,6 +108,8 @@ struct ChooseSubfoldersSheet: View {
         Toggle(isOn: Binding(get: { on }, set: { changes[rel] = $0 })) { Text(name + "/") }
             .toggleStyle(.checkbox)
             .disabled(!enabled)
+            .accessibilityLabel(rel.replacingOccurrences(of: "/", with: " ▸ "))
+            .accessibilityValue(on ? "synced" : "not synced")
             .help(SubfolderRules.choosable(name) ? "" : "This folder's name can't be unchecked here.")
     }
 
@@ -126,6 +128,7 @@ struct ChooseSubfoldersSheet: View {
                             Spacer()
                             if ok, on, children[name] == nil {
                                 Button("Show Subfolders") { load(name) }.buttonStyle(.link)
+                                    .accessibilityLabel("Show subfolders of \(name)")
                             }
                         }
                         if let kids = children[name] {
@@ -137,14 +140,15 @@ struct ChooseSubfoldersSheet: View {
                     }
                 }
                 .frame(minHeight: 200)
+                .accessibilityLabel("Subfolders of \(folder.displayName)")
             } else if error == nil {
                 ProgressView("Listing subfolders…")
             }
             InlineError(text: error)
             HStack {
-                if top == nil, error != nil { Button("Retry") { error = nil; load("") } }
+                if top == nil, error != nil { Button("Retry") { error = nil; load("") }.accessibilityLabel("Retry") }
                 Spacer()
-                Button("Cancel") { close() }.keyboardShortcut(.cancelAction)
+                Button("Cancel") { close() }.keyboardShortcut(.cancelAction).accessibilityLabel("Cancel")
                 Button("Save") {
                     busy = true
                     Task {
@@ -159,6 +163,7 @@ struct ChooseSubfoldersSheet: View {
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(changes.isEmpty || busy)
+                .accessibilityLabel("Save")
             }
         }
         .padding(20)

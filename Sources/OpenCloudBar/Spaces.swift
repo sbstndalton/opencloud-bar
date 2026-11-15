@@ -109,7 +109,7 @@ struct KeepFromSpaceSheet: View {
             Text("Project spaces and folders shared with you. Kept folders from a space go to \(model.config.localRoot)/<space name>/…. Read-only folders can't be kept, and the OpenCloud drive shows the personal space only.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if loadFailed {
-                Button("Retry") { Task { await load() } }
+                Button("Retry") { Task { await load() } }.accessibilityLabel("Retry loading spaces")
             } else if let spaces {
                 if spaces.isEmpty {
                     Text("No project spaces or shares are available to you.").foregroundStyle(.secondary)
@@ -119,14 +119,18 @@ struct KeepFromSpaceSheet: View {
                     }
                     HStack {
                         TextField("Folder in the space", text: $path, prompt: Text("Projects/2026"))
+                            .accessibilityLabel("Folder in the space")
                         Button("Up") { path = (path as NSString).deletingLastPathComponent; browse() }.disabled(path.isEmpty)
-                        Button("List") { browse() }
+                            .accessibilityLabel("Up one folder")
+                        Button("List") { browse() }.accessibilityLabel("List folders")
                     }
                     if let folders {
                         List(folders, id: \.self) { d in
                             Button(d + "/") { path = path.isEmpty ? d : path + "/" + d; browse() }.buttonStyle(.link)
+                                .accessibilityLabel("Open folder \(d)")
                         }
                         .frame(minHeight: 120)
+                        .accessibilityLabel("Folders in the space")
                         .overlay { if folders.isEmpty { Text("No folders here.").foregroundStyle(.secondary) } }
                     }
                 }
@@ -136,7 +140,7 @@ struct KeepFromSpaceSheet: View {
             InlineError(text: error)
             HStack {
                 Spacer()
-                Button("Cancel") { close() }.keyboardShortcut(.cancelAction)
+                Button("Cancel") { close() }.keyboardShortcut(.cancelAction).accessibilityLabel("Cancel")
                 Button("Keep on This Mac") {
                     guard let space else { return }
                     busy = true
@@ -147,6 +151,7 @@ struct KeepFromSpaceSheet: View {
                     }
                 }
                 .keyboardShortcut(.defaultAction)
+                .accessibilityLabel("Keep on This Mac")
                 .disabled(space == nil || path.trimmingCharacters(in: .whitespaces).isEmpty || busy)
             }
         }

@@ -4,6 +4,13 @@ All notable changes to OpenCloud Bar. The format follows [Keep a Changelog](http
 
 The release workflow copies the section for a tag into that tag's GitHub release, so every version heading must stay in the form `## [X.Y.Z] - date`.
 
+## [1.3.1] - 2026-11-15
+
+### Fixed
+- **Accessibility.** Controls now have names that VoiceOver and other assistive tools can read.
+  - Mac: the Kept Folders buttons (Keep a Folder…, Keep from a Space…, Pause/Resume Syncing, the Actions menu) and the sheets' buttons have labels; Choose Subfolders checkboxes are named after the folder, with "synced" or "not synced" as their value; folder rows say the folder's name, space and status, and the status and last-synced cells say what they show; the menu bar icon is "OpenCloud Bar" with the current status as its value; decorative icons are hidden from VoiceOver.
+  - Windows and Linux settings page: every field is tied to its label (or named from its placeholder or section); buttons whose text needs context (Show Subfolders, the conflict actions) say what they act on; the sync status line and messages are announced politely; the folder rows can be reached and chosen with the keyboard (Tab, then Enter or Space) and say the folder's status; keyboard focus is always visible and stays put when the page refreshes every few seconds; choosing a section moves focus to its heading.
+
 ## [1.3.0] - 2026-11-15
 
 ### Added

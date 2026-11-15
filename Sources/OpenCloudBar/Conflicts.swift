@@ -144,9 +144,9 @@ struct ConflictsPage: View {
                             Text("In “\(f.displayName)” · modified \(c.modified.formatted(date: .abbreviated, time: .shortened)) · \(ByteCountFormatter.string(fromByteCount: c.size, countStyle: .file))")
                                 .font(.caption).foregroundStyle(.secondary)
                             HStack {
-                                Button("Reveal in Finder") { model.revealConflict(f, c) }
-                                Button("Keep This Version…") { model.keepConflict(f, c) }.disabled(model.syncing)
-                                Button("Discard…") { model.discardConflict(f, c) }.disabled(model.syncing)
+                                Button("Reveal in Finder") { model.revealConflict(f, c) }.accessibilityLabel("Reveal in Finder")
+                                Button("Keep This Version…") { model.keepConflict(f, c) }.disabled(model.syncing).accessibilityLabel("Keep This Version…")
+                                Button("Discard…") { model.discardConflict(f, c) }.disabled(model.syncing).accessibilityLabel("Discard…")
                             }
                         }
                         .padding(.vertical, 2)

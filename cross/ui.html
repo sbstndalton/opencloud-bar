@@ -60,16 +60,19 @@ details { margin:14px 0; } summary { cursor:pointer; font-weight:600; }
 .notice.paused { background:color-mix(in srgb, var(--warn) 10%, var(--panel)); border-color:color-mix(in srgb, var(--warn) 45%, var(--line)); }
 .notice span { flex:1; min-width:200px; }
 td .why { display:block; color:var(--muted); font-size:12.5px; }
+:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+tbody tr:focus-visible { outline-offset:-2px; }
+.sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
 @media (max-width: 640px) { .app { flex-direction:column; } nav { width:auto; display:flex; flex-wrap:wrap; gap:4px; border-right:0; border-bottom:1px solid var(--line); } nav h1 { width:100%; } nav button { width:auto; } .row > label { width:100%; } }
 </style>
 </head>
 <body>
-<div id="banner"></div>
+<div id="banner" role="alert"></div>
 <div class="app">
-  <nav id="nav"><h1>OpenCloud Bar</h1></nav>
+  <nav id="nav" aria-label="Settings sections"><h1>OpenCloud Bar</h1></nav>
   <main id="main"></main>
 </div>
-<div id="toast"></div>
+<div id="toast" role="status" aria-live="polite"></div>
 <script nonce="{{NONCE}}">
 "use strict";
 // Plain DOM code, no libraries. Text from the server is only ever set with textContent.
@@ -93,6 +96,47 @@ function h(tag, attrs, ...kids) {
   return el;
 }
 
+// Accessibility: every control gets a name. A label in the same row is tied to its control
+// (<label for>); a control without one is named from its placeholder or the heading above it.
+// Runs on everything the page adds, so the section code stays plain.
+let a11yId = 0;
+function a11yFix(root) {
+  if (!root.querySelectorAll) return;
+  for (const lab of root.querySelectorAll(".row > label:not([for]):not(.check)")) {
+    const c = lab.nextElementSibling;
+    if (c && /^(INPUT|SELECT|TEXTAREA)$/.test(c.tagName)) {
+      if (!c.id) c.id = "c" + (++a11yId);
+      lab.htmlFor = c.id;
+    }
+  }
+  for (const c of root.querySelectorAll("input, select, textarea")) {
+    if (c.labels && c.labels.length) continue;
+    if (c.hasAttribute("aria-label")) continue;
+    let name = c.getAttribute("placeholder") || "";
+    if (c.tagName === "TEXTAREA" || !name) {
+      let p = c.closest(".card") || c.parentElement, hd = p && p.querySelector("h3");
+      if (hd) name = hd.textContent;
+    }
+    if (name) c.setAttribute("aria-label", name);
+  }
+  for (const b of root.querySelectorAll("button:not([aria-label])")) {
+    if (!b.textContent.trim() && b.title) b.setAttribute("aria-label", b.title);
+  }
+}
+// The 3-second refresh redraws parts of the page; keep the keyboard focus on the same control.
+function focusKey(el) {
+  if (el.dataset.path && el.tagName === "TR") return "TR|" + el.dataset.path; // its label changes with the status
+  return [el.tagName, el.getAttribute("aria-label") || "", el.textContent.trim().slice(0, 80), el.id || "", el.type || "", el.dataset.path || ""].join("|");
+}
+function keepFocus(box, redraw) {
+  const a = document.activeElement;
+  const key = a && a !== document.body && box.contains(a) ? focusKey(a) : null;
+  redraw();
+  if (key == null) return;
+  for (const el of box.querySelectorAll(a.tagName)) if (focusKey(el) === key) { el.focus(); return; }
+}
+new MutationObserver(ms => { for (const m of ms) for (const n of m.addedNodes) if (n.nodeType === 1) a11yFix(n.parentElement || n); })
+  .observe(document.body, { childList: true, subtree: true });
 async function api(method, path, body) {
   const opt = { method, headers: { "X-OpenCloud-Bar": "1" }, credentials: "same-origin" };
   if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
@@ -175,10 +219,10 @@ function buildNav() {
   const nav = document.getElementById("nav");
   nav.replaceChildren(h("h1", { text: "OpenCloud Bar" }));
   for (const [id, label] of SECTIONS) {
-    nav.append(h("button", { class: id === section ? "on" : "", onclick: () => go(id) }, label));
+    nav.append(h("button", { class: id === section ? "on" : "", "aria-current": id === section ? "page" : null, onclick: () => go(id, true) }, label));
   }
 }
-function go(id) {
+function go(id, focus) {
   section = id; location.hash = id;
   timers.forEach(clearInterval); timers = [];
   render++;
@@ -186,6 +230,9 @@ function go(id) {
   const main = document.getElementById("main");
   main.replaceChildren();
   ({ folders, conflicts, account, sync: syncPage, drive, general, logs, about })[id](main, render);
+  // A section chosen in the list: move the keyboard focus to its heading.
+  const h2 = focus && main.querySelector("h2");
+  if (h2) { h2.tabIndex = -1; h2.focus(); }
 }
 async function refreshState() {
   try { S = await get("state"); } catch (e) { return; }
@@ -197,7 +244,7 @@ async function refreshState() {
   if (section === "drive") drawDriveButtons();
 }
 function header(main, title) {
-  main.append(h("h2", { text: title }), h("p", { class: "summary", id: "summary", text: S ? S.status.summary : "" }), h("div", { id: "notices" }));
+  main.append(h("h2", { text: title }), h("p", { class: "summary", id: "summary", role: "status", "aria-live": "polite", text: S ? S.status.summary : "" }), h("div", { id: "notices" }));
   drawNotices();
 }
 // Paused and update-available notices, at the top of every section.
@@ -236,12 +283,15 @@ function drawFolders() {
     h("button", { class: "btn", disabled: busy || !S.config.configured || S.status.paused, onclick: () => act(() => post("sync"), "Sync started") }, "Sync Now"),
     h("button", { class: "btn", disabled: !S.config.configured, onclick: () => setPaused(!S.status.paused) }, S.status.paused ? "Resume Syncing" : "Pause Syncing"),
     h("button", { class: "btn", disabled: !S.config.serverURL, onclick: () => act(() => post("open", { kind: "web" })) }, "Open OpenCloud in Browser"));
-  const tbl = h("table", {}, h("thead", {}, h("tr", {}, h("th", { text: "Name" }), h("th", { text: "On this computer" }), h("th", { text: "Status" }), h("th", { text: "Last synced" }))),
+  const tbl = h("table", { "aria-label": "Kept folders" }, h("thead", {}, h("tr", {}, h("th", { text: "Name" }), h("th", { text: "On this computer" }), h("th", { text: "Status" }), h("th", { text: "Last synced" }))),
     h("tbody", {}, list.map(f => {
       const [cls, text, why] = stateLook(f);
-      return h("tr", { class: f.path === selected ? "sel" : "", onclick: () => { selected = f.path; drawFolders(); } },
+      const pick = () => { selected = f.path; drawFolders(); const r = document.querySelector("tbody tr.sel"); if (r) r.focus(); };
+      return h("tr", { class: f.path === selected ? "sel" : "", tabindex: "0", "data-path": f.path, "aria-selected": f.path === selected ? "true" : "false",
+          "aria-label": f.name + (f.space ? " in " + f.space : "") + ", " + text + (why ? ": " + why : ""),
+          onclick: pick, onkeydown: (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); pick(); } } },
         h("td", {}, f.name, f.space ? h("span", { class: "why", text: "in " + f.space }) : null), h("td", { class: "path", text: f.local }),
-        h("td", {}, h("span", { class: "dot " + cls }), text, why ? h("span", { class: "why", text: why }) : null),
+        h("td", {}, h("span", { class: "dot " + cls, role: "img", "aria-label": text }), h("span", { "aria-hidden": "true" }, text), why ? h("span", { class: "why", text: why }) : null),
         h("td", { text: ago(f.lastSuccess) }));
     })));
   const parts = [bar];
@@ -254,7 +304,7 @@ function drawFolders() {
   const keepFocus = old && document.activeElement === old;
   const typed = body.querySelector("#keep-path"), typedVal = typed ? typed.value : "";
   const wasOpen = !!(body.querySelector("details.keep") || {}).open;
-  body.replaceChildren(...parts);
+  keepFocus(body, () => body.replaceChildren(...parts));
   const ta = body.querySelector("textarea");
   if (ta && keepText != null) { ta.value = keepText; if (keepFocus) ta.focus(); }
   if (typedVal) body.querySelector("#keep-path").value = typedVal;
@@ -264,7 +314,7 @@ function keepFolder() {
   act(() => post("keep", {}), "Choose the folder in the dialog on your desktop");
 }
 function folderDetail(f, busy) {
-  const ta = h("textarea", { "data-path": f.path, spellcheck: "false" });
+  const ta = h("textarea", { "data-path": f.path, spellcheck: "false", "aria-label": "Excludes for " + f.name });
   ta.value = f.extraFilters.join("\n");
   const acts = [
     h("button", { class: "btn", onclick: () => act(() => post("open", { kind: "folder", path: f.path })) }, "Open Folder")];
@@ -326,7 +376,7 @@ function subfolderBox(f) {
     const on = included(it.name, it);
     const kids = subPick.children[it.name];
     list.append(h("div", { class: "row" }, row(it.name, it, false),
-      on && it.choosable && !kids ? h("button", { class: "btn", onclick: () => loadSubfolders(f, it.name) }, "Show Subfolders") : null));
+      on && it.choosable && !kids ? h("button", { class: "btn", "aria-label": "Show subfolders of " + it.name, onclick: () => loadSubfolders(f, it.name) }, "Show Subfolders") : null));
     if (kids) {
       const inner = h("div", { style: "margin-left: 2em" });
       if (!kids.length) inner.append(h("span", { class: "hint", text: "No subfolders." }));
@@ -373,7 +423,7 @@ function keepBox(busy) {
       keepSpaces === null ? h("button", { class: "btn", onclick: async () => { try { keepSpaces = (await get("spaces")).spaces || []; keepSpacesErr = ""; } catch (e) { keepSpaces = null; keepSpacesErr = e.message; } drawFolders(); } }, keepSpacesErr ? "Retry" : "Load Spaces") : null,
       keepSpacesErr ? h("span", { class: "inline-err", text: keepSpacesErr }) : null,
       keepSpaces && !keepSpaces.length ? h("span", { class: "hint", text: "No project spaces or shares are available to you." }) : null),
-    h("div", { class: "row" }, h("input", { type: "text", id: "keep-path", placeholder: "Documents/Projects" }),
+    h("div", { class: "row" }, h("input", { type: "text", id: "keep-path", placeholder: "Documents/Projects", "aria-label": "Folder path" }),
       h("button", { class: "btn", onclick: browse }, "List Folders"),
       h("button", { class: "btn", onclick: () => { const p = pathOf(); if (p) act(() => post("keep", { path: p, space: keepSpace }), busy ? "Folder kept; its first sync starts when the running sync finishes" : "Folder kept; the first sync starts shortly"); } }, "Keep")));
   if (keepDirs) box.append(h("div", { class: "card" }, keepDirs.length ? keepDirs.map(d => h("button", { class: "btn", onclick: () => {
@@ -402,14 +452,14 @@ function drawConflicts() {
   if (!rows.length) { body.replaceChildren(h("div", { class: "card" }, "No conflicts. When a file changes on both sides between syncs, the copy that lost shows up here.")); return; }
   const busy = S.status.syncing;
   const conflictAct = (f, c, action, msg) => act(() => post("conflict", { folder: f.path, file: c.file, action }), msg);
-  body.replaceChildren(h("table", {}, h("thead", {}, h("tr", {}, h("th", { text: "File" }), h("th", { text: "Folder" }), h("th", { text: "Modified" }), h("th", { text: "" }))),
+  keepFocus(body, () => body.replaceChildren(h("table", { "aria-label": "Conflicts" }, h("thead", {}, h("tr", {}, h("th", { text: "File" }), h("th", { text: "Folder" }), h("th", { text: "Modified" }), h("th", { text: "" }))),
     h("tbody", {}, rows.map(([f, c]) => h("tr", {},
       h("td", { class: "path", text: c.file }), h("td", { text: f.name }), h("td", { text: new Date(c.modified).toLocaleString() }),
       h("td", {},
-        h("button", { class: "btn", onclick: () => conflictAct(f, c, "reveal") }, "Show in Folder"),
-        h("button", { class: "btn", disabled: busy, onclick: () => { if (confirm("Keep this version of " + c.original + "?\n\nThe conflict copy replaces the current file. The current file is kept in the backups (in the app's sync state folder, for 30 days). The next sync sends the change to OpenCloud.")) conflictAct(f, c, "keep", "Kept; the next sync sends it to OpenCloud"); } }, "Keep This Version"),
-        h("button", { class: "btn danger", disabled: busy, onclick: () => { if (confirm("Discard " + c.file + "?\n\nIt moves to " + trashWhere() + ". The next sync removes it from OpenCloud too.")) conflictAct(f, c, "discard", "Discarded"); } }, "Discard")))))),
-    busy ? h("p", { class: "hint", text: "A sync is running; the actions wait until it finishes." }) : null);
+        h("button", { class: "btn", "aria-label": "Show " + c.file + " in its folder", onclick: () => conflictAct(f, c, "reveal") }, "Show in Folder"),
+        h("button", { class: "btn", "aria-label": "Keep this version: " + c.file, disabled: busy, onclick: () => { if (confirm("Keep this version of " + c.original + "?\n\nThe conflict copy replaces the current file. The current file is kept in the backups (in the app's sync state folder, for 30 days). The next sync sends the change to OpenCloud.")) conflictAct(f, c, "keep", "Kept; the next sync sends it to OpenCloud"); } }, "Keep This Version"),
+        h("button", { class: "btn danger", "aria-label": "Discard " + c.file, disabled: busy, onclick: () => { if (confirm("Discard " + c.file + "?\n\nIt moves to " + trashWhere() + ". The next sync removes it from OpenCloud too.")) conflictAct(f, c, "discard", "Discarded"); } }, "Discard")))))),
+    busy ? h("p", { class: "hint", text: "A sync is running; the actions wait until it finishes." }) : null));
 }
 
 // ---- Account
@@ -513,7 +563,7 @@ async function syncPage(main, r) {
     numField("Parallel checks", "checkers", "How many files are compared at once (1 to 64).", 1, 64),
     textField("Upload limit", "bwLimitUp", "For syncs and the drive, like 512K (KiB/s) or 2M (MiB/s). Empty: no limit.", { placeholder: "no limit" }),
     textField("Download limit", "bwLimitDown", "Like 512K or 10M. Empty: no limit.", { placeholder: "no limit" })));
-  const ta = h("textarea", { spellcheck: "false" }); ta.value = S.config.commonFilters.join("\n");
+  const ta = h("textarea", { spellcheck: "false", "aria-label": "Common excludes" }); ta.value = S.config.commonFilters.join("\n");
   main.append(h("div", { class: "card" }, h("h3", { text: "Common excludes" }),
     h("p", { class: "hint", text: "Files matching these rules are never synced, in any kept folder. One rule per line, like - *.tmp (exclude) or + keep.txt (include)." }),
     ta, h("div", { class: "row" },
@@ -558,7 +608,7 @@ function drawDriveButtons() {
     st.driveMounted ? h("button", { class: "btn", onclick: () => act(() => post("eject"), "Drive ejected") }, "Eject Drive")
       : h("button", { class: "btn primary", disabled: !S.config.mountEnabled || st.driveWanted, onclick: () => act(() => post("connect")) }, st.driveWanted ? "Connecting…" : "Connect Drive"),
     h("button", { class: "btn", disabled: !S.config.mountEnabled, onclick: () => act(() => post("open", { kind: "drive" })) }, "Open Drive Folder"));
-  box.replaceChildren(h("h3", { text: st.driveMounted ? "Drive is connected" : "Drive is not connected" }), live || h("div", { id: "drive-stats" }), btns);
+  keepFocus(box, () => box.replaceChildren(h("h3", { text: st.driveMounted ? "Drive is connected" : "Drive is not connected" }), live || h("div", { id: "drive-stats" }), btns));
 }
 async function pollDrive(r) {
   let d;
@@ -654,7 +704,7 @@ async function logs(main, r) {
   try { src = await get("logs"); } catch (e) { main.append(h("p", { class: "inline-err", text: e.message })); return; }
   if (r !== render) return;
   if (!src.some(s => s.name === logName)) logName = "app.log";
-  const sel = h("select", { onchange: () => { logName = sel.value; stick = true; load(); } },
+  const sel = h("select", { "aria-label": "Log", onchange: () => { logName = sel.value; stick = true; load(); } },
     src.map(s => { const o = h("option", { value: s.name, text: s.label }); if (s.name === logName) o.selected = true; return o; }));
   const pre = h("pre", { class: "log" });
   let stick = true;

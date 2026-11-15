@@ -131,12 +131,13 @@ struct SettingsView: View {
     private func configErrorBanner(_ e: String) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                .accessibilityLabel("Settings problem")
             VStack(alignment: .leading, spacing: 6) {
                 Text(e).fixedSize(horizontal: false, vertical: true)
                 Text("Settings can't be changed until the settings file is fixed.").font(.caption).foregroundStyle(.secondary)
                 HStack {
-                    Button("Open Settings File") { model.editConfig() }
-                    Button("Reload Settings") { model.reloadConfig() }
+                    Button("Open Settings File") { model.editConfig() }.accessibilityLabel("Open Settings File")
+                    Button("Reload Settings") { model.reloadConfig() }.accessibilityLabel("Reload Settings")
                 }
             }
             Spacer()
@@ -232,19 +233,19 @@ struct AccountPage: View {
             }
             Section {
                 HStack {
-                    Button("Open OpenCloud in Browser") { if let u = webURL { NSWorkspace.shared.open(u) } }
+                    Button("Open OpenCloud in Browser") { if let u = webURL { NSWorkspace.shared.open(u) } }.accessibilityLabel("Open OpenCloud in Browser")
                         .disabled(webURL == nil)
                     if model.config.isOIDC {
-                        Button("Refresh") { store.refresh(model.config, signedIn: !model.needsSignIn) }
+                        Button("Refresh") { store.refresh(model.config, signedIn: !model.needsSignIn) }.accessibilityLabel("Refresh")
                             .disabled(store.loading)
                         if store.loading { ProgressView().controlSize(.small) }
                     }
                     Spacer()
                     if model.config.isOIDC {
                         if model.needsSignIn {
-                            Button("Sign In…") { model.showSetup() }
+                            Button("Sign In…") { model.showSetup() }.accessibilityLabel("Sign In…")
                         } else {
-                            Button("Sign Out…") { model.signOut() }
+                            Button("Sign Out…") { model.signOut() }.accessibilityLabel("Sign Out…")
                         }
                     }
                 }
@@ -320,6 +321,7 @@ struct SyncPage: View {
                 Text("Files matching these rules are never synced. One rule per line: “- pattern” excludes, “+ pattern” includes.")
                     .font(.caption).foregroundStyle(.secondary)
                 FilterEditor(rules: model.config.commonFilters,
+                             label: "Excludes for all folders",
                              disabledReason: model.syncing ? "Wait for the running sync to finish to change excludes." : nil,
                              restoreDefaults: Config().commonFilters) { lines in
                     guard model.confirm("Change the excludes for all folders?",
@@ -334,7 +336,7 @@ struct SyncPage: View {
                 Text("For syncs and the drive, like 512K (KiB/s) or 2M (MiB/s). Empty: no limit.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
-                    Button("Apply") { applyBandwidth() }
+                    Button("Apply") { applyBandwidth() }.accessibilityLabel("Apply")
                         .disabled(bwUp == (model.config.bwLimitUp ?? "") && bwDown == (model.config.bwLimitDown ?? ""))
                 }
                 InlineError(text: bwError)
@@ -344,7 +346,7 @@ struct SyncPage: View {
                     Text(model.config.localRoot).textSelection(.enabled)
                 }
                 HStack {
-                    Button("Change…") { chooseRoot() }.disabled(!model.config.kept.isEmpty)
+                    Button("Change…") { chooseRoot() }.disabled(!model.config.kept.isEmpty).accessibilityLabel("Change…")
                     if !model.config.kept.isEmpty {
                         Text("Stop keeping all folders first: kept folders stay where they are.")
                             .font(.caption).foregroundStyle(.secondary)
@@ -422,11 +424,11 @@ struct DrivePage: View {
                     Text(model.driveMounted ? "Connected" : (model.driveWanted ? "Connecting…" : "Not connected"))
                 }
                 HStack {
-                    Button("Open OpenCloud Drive") { model.openDrive() }.disabled(model.needsSignIn)
+                    Button("Open OpenCloud Drive") { model.openDrive() }.disabled(model.needsSignIn).accessibilityLabel("Open OpenCloud Drive")
                     if model.driveMounted {
-                        Button("Eject") { model.ejectDrive() }
+                        Button("Eject") { model.ejectDrive() }.accessibilityLabel("Eject")
                     } else {
-                        Button("Connect") { model.connectDrive() }
+                        Button("Connect") { model.connectDrive() }.accessibilityLabel("Connect")
                             .disabled(model.driveWanted || model.needsSignIn)
                     }
                 }
@@ -435,9 +437,9 @@ struct DrivePage: View {
                 TextField("Mount location", text: $mountPoint)
                 TextField("Volume name", text: $volumeName)
                 HStack {
-                    Button("Choose…") { chooseMountPoint() }
-                    Button("Apply") { apply() }.disabled(!dirty)
-                    Button("Revert") { load() }.disabled(!dirty)
+                    Button("Choose…") { chooseMountPoint() }.accessibilityLabel("Choose…")
+                    Button("Apply") { apply() }.disabled(!dirty).accessibilityLabel("Apply")
+                    Button("Revert") { load() }.disabled(!dirty).accessibilityLabel("Revert")
                 }
                 Text("Changing the location or name reconnects the drive.").font(.caption).foregroundStyle(.secondary)
                 InlineError(text: error)
@@ -569,7 +571,7 @@ struct GeneralPage: View {
                     Text(updateText).foregroundStyle(model.updateState.available ? Color.accentColor : Color.secondary)
                     Spacer()
                     if model.updateState.checking { ProgressView().controlSize(.small) }
-                    Button("Check Now") { Task { await model.checkForUpdates(manual: true) } }
+                    Button("Check Now") { Task { await model.checkForUpdates(manual: true) } }.accessibilityLabel("Check Now")
                         .disabled(model.updateState.checking)
                     if model.updateState.available, let v = model.updateState.latest {
                         Button("Get v\(v)…") { model.openRelease() }.buttonStyle(.borderedProminent)
@@ -611,16 +613,16 @@ struct GeneralPage: View {
                             .font(.caption).foregroundStyle(.secondary)
                         InlineError(text: advancedError)
                         HStack {
-                            Button("Apply") { applyAdvanced() }.disabled(!advancedDirty)
-                            Button("Revert") { loadAdvanced() }.disabled(!advancedDirty)
+                            Button("Apply") { applyAdvanced() }.disabled(!advancedDirty).accessibilityLabel("Apply")
+                            Button("Revert") { loadAdvanced() }.disabled(!advancedDirty).accessibilityLabel("Revert")
                         }
                         Divider()
                         Text("Settings file").font(.headline)
                         Text("Everything above can be changed here. The file is only a fallback for hand edits.")
                             .font(.caption).foregroundStyle(.secondary)
                         HStack {
-                            Button("Open Settings File") { model.editConfig() }
-                            Button("Reload Settings") { model.reloadConfig(); loadAdvanced() }
+                            Button("Open Settings File") { model.editConfig() }.accessibilityLabel("Open Settings File")
+                            Button("Reload Settings") { model.reloadConfig(); loadAdvanced() }.accessibilityLabel("Reload Settings")
                         }
                     }
                     .padding(.top, 6)

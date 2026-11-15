@@ -132,7 +132,7 @@ struct LogsPage: View {
                         model.openLogs()
                     }
                 }
-                Button("Clear…") { clear() }
+                Button("Clear…") { clear() }.accessibilityLabel("Clear…")
                     .disabled(!exists || current.file == "drive.log")
                     .help(current.file == "drive.log" ? "rclone keeps this file open while the drive runs" : "")
             }

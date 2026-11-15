@@ -41,6 +41,7 @@ struct SetupView: View {
             Text("Enter your OpenCloud server address. Your browser opens on the OpenCloud sign-in page; there is nothing else to configure.")
                 .fixedSize(horizontal: false, vertical: true)
             TextField("https://cloud.example.com", text: $state.address)
+                .accessibilityLabel("Server address")
                 .textFieldStyle(.roundedBorder)
                 .disabled(state.busy)
                 .onSubmit { state.signIn() }
@@ -55,8 +56,8 @@ struct SetupView: View {
             }
             HStack {
                 Spacer()
-                Button("Cancel") { state.cancel(); close() }.keyboardShortcut(.cancelAction)
-                Button("Sign In with Browser") { state.signIn() }
+                Button("Cancel") { state.cancel(); close() }.keyboardShortcut(.cancelAction).accessibilityLabel("Cancel")
+                Button("Sign In with Browser") { state.signIn() }.accessibilityLabel("Sign In with Browser")
                     .keyboardShortcut(.defaultAction)
                     .disabled(state.busy || state.address.trimmingCharacters(in: .whitespaces).isEmpty)
             }

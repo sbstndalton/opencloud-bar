@@ -45,6 +45,8 @@ enum FilterText {
 /// An editable list of filter rules with Apply / Revert.
 struct FilterEditor: View {
     let rules: [String]
+    /// What the rules field is called for VoiceOver.
+    var label = "Exclude rules"
     let disabledReason: String?
     var restoreDefaults: [String]?
     /// Called with the new rules; returns an error to show, or nil.
@@ -60,6 +62,7 @@ struct FilterEditor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             TextEditor(text: $text)
+                .accessibilityLabel(label)
                 .font(.system(.body, design: .monospaced))
                 .frame(minHeight: 90, maxHeight: 160)
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(nsColor: .separatorColor)))
@@ -80,10 +83,13 @@ struct FilterEditor: View {
                     }
                 }
                 .disabled(!changed || busy || disabledReason != nil)
-                Button("Revert") { text = rules.joined(separator: "\n"); error = nil }
+                .accessibilityLabel("Apply")
+                Button("Revert") { text = rules.joined(separator: "\n"); error = nil }.accessibilityLabel("Revert")
                     .disabled(!changed)
+                    .accessibilityLabel("Revert")
                 if let d = restoreDefaults {
                     Button("Restore Defaults") { text = d.joined(separator: "\n"); error = nil }
+                        .accessibilityLabel("Restore Defaults")
                         .disabled(disabledReason != nil || edited == d)
                 }
             }
@@ -111,6 +117,11 @@ struct FoldersPage: View {
 
     private func state(_ f: KeptFolder) -> FolderStatus.State { model.status[f.key]?.state ?? .idle }
 
+    /// What VoiceOver says for a folder's row: its name, its space, its status.
+    private func rowLabel(_ f: KeptFolder) -> String {
+        f.displayName + (f.space.map { " in \($0.name)" } ?? "") + ", " + state(f).text
+    }
+
     private var browserURL: URL? {
         if let w = store.account?.webURL, let u = URL(string: w) { return u }
         guard let s = model.config.serverURL, !s.isEmpty else { return nil }
@@ -121,11 +132,14 @@ struct FoldersPage: View {
         VStack(alignment: .leading, spacing: 0) {
             Table(model.config.kept, selection: $selection) {
                 TableColumn("Name") { f in
-                    if let s = f.space {
-                        (Text(f.displayName) + Text("  in \(s.name)").foregroundStyle(.secondary)).lineLimit(1)
-                    } else {
-                        Text(f.displayName).lineLimit(1)
+                    Group {
+                        if let s = f.space {
+                            (Text(f.displayName) + Text("  in \(s.name)").foregroundStyle(.secondary)).lineLimit(1)
+                        } else {
+                            Text(f.displayName).lineLimit(1)
+                        }
                     }
+                    .accessibilityLabel(rowLabel(f))
                 }
                 TableColumn("On This Mac") { f in
                     Text(localPath(f)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
@@ -133,23 +147,25 @@ struct FoldersPage: View {
                 TableColumn("Status") { f in
                     if case .syncing = state(f) {
                         HStack(spacing: 6) {
-                            ProgressView().controlSize(.small)
+                            ProgressView().controlSize(.small).accessibilityHidden(true)
                             Text(model.activeFiles > 0 && model.activeFolder == f.displayName
                                  ? "Syncing… · \(model.activeFiles) file\(model.activeFiles == 1 ? "" : "s")" : "Syncing…")
                                 .lineLimit(1)
                         }
+                        .accessibilityElement(children: .combine)
                     } else {
                         Label(state(f).text, systemImage: state(f).symbol)
                             .lineLimit(1)
                             .foregroundStyle(model.hasProblem(f) ? Color.orange : Color.primary)
+                            .accessibilityLabel(state(f).text)
                     }
                 }
                 TableColumn("Last Synced") { f in
                     TimelineView(.periodic(from: .now, by: 30)) { _ in
                         if let t = model.status[f.key]?.lastSuccess {
-                            Text(AppModel.relative(t))
+                            Text(AppModel.relative(t)).accessibilityLabel("Last synced \(AppModel.relative(t))")
                         } else {
-                            Text("Never").foregroundStyle(.secondary)
+                            Text("Never").foregroundStyle(.secondary).accessibilityLabel("Never synced")
                         }
                     }
                 }
@@ -169,6 +185,7 @@ struct FoldersPage: View {
                 if model.config.kept.isEmpty {
                     VStack(spacing: 6) {
                         Image(systemName: "folder.badge.plus").font(.largeTitle).foregroundStyle(.secondary)
+                            .accessibilityHidden(true)
                         Text("No folders kept on this Mac").font(.headline)
                         Text("Choose Keep a Folder… to keep a copy of an OpenCloud folder here. It syncs both ways.")
                             .foregroundStyle(.secondary).multilineTextAlignment(.center)
@@ -177,29 +194,34 @@ struct FoldersPage: View {
                 }
             }
             .frame(minHeight: 150)
+            .accessibilityLabel("Kept folders")
 
             Divider()
             if model.config.paused {
                 HStack {
-                    Image(systemName: "pause.circle.fill").foregroundStyle(.orange)
+                    Image(systemName: "pause.circle.fill").foregroundStyle(.orange).accessibilityHidden(true)
                     Text("Syncing is paused. Kept folders don't sync until you resume; the drive keeps working.")
                     Spacer()
-                    Button("Resume Syncing") { model.setPaused(false) }
+                    Button("Resume Syncing") { model.setPaused(false) }.accessibilityLabel("Resume Syncing")
                 }
                 .padding(10)
                 .background(Color.orange.opacity(0.12))
             }
             HStack {
-                Button("Keep a Folder…") { model.keepFolder() }
+                Button("Keep a Folder…") { model.keepFolder() }.accessibilityLabel("Keep a Folder…")
                     .disabled(model.needsSignIn)
-                Button("Keep from a Space…") { keepingFromSpace = true }
+                    .accessibilityLabel("Keep a Folder…")
+                Button("Keep from a Space…") { keepingFromSpace = true }.accessibilityLabel("Keep from a Space…")
                     .disabled(model.needsSignIn || !model.config.isOIDC)
                     .help("Project spaces and folders shared with you")
+                    .accessibilityLabel("Keep from a Space…")
                 Button(model.config.paused ? "Resume Syncing" : "Pause Syncing") { model.setPaused(!model.config.paused) }
                     .disabled(model.configError != nil || !model.config.isConfigured)
+                    .accessibilityLabel(model.config.paused ? "Resume Syncing" : "Pause Syncing")
                 Spacer()
                 if let f = selected {
                     Menu("Actions for “\(f.displayName)”") { actions(f) }.fixedSize()
+                        .accessibilityLabel("Actions for \(f.displayName)")
                 }
             }
             .padding(10)
@@ -214,23 +236,23 @@ struct FoldersPage: View {
     /// Per-folder actions: used by the context menu and the Actions menu.
     @ViewBuilder
     private func actions(_ f: KeptFolder) -> some View {
-        Button("Open in Finder") { model.openLocal(f) }
-        Button("Open in Browser") { if let u = browserURL { NSWorkspace.shared.open(u) } }
+        Button("Open in Finder") { model.openLocal(f) }.accessibilityLabel("Open in Finder")
+        Button("Open in Browser") { if let u = browserURL { NSWorkspace.shared.open(u) } }.accessibilityLabel("Open in Browser")
             .disabled(browserURL == nil)
-        Button("Sync Now") { model.syncNow(f) }
+        Button("Sync Now") { model.syncNow(f) }.accessibilityLabel("Sync Now")
             .disabled(model.syncing || model.needsSignIn || model.config.paused)
         switch state(f) {
         case .needsRepair:
-            Button("Repair (Merge Both Sides)…") { model.repair(f) }.disabled(model.syncing)
+            Button("Repair (Merge Both Sides)…") { model.repair(f) }.disabled(model.syncing).accessibilityLabel("Repair (Merge Both Sides)…")
         case .bigDeletion:
-            Button("Allow Large Deletion…") { model.allowBigDeletion(f) }.disabled(model.syncing)
+            Button("Allow Large Deletion…") { model.allowBigDeletion(f) }.disabled(model.syncing).accessibilityLabel("Allow Large Deletion…")
         default:
             EmptyView()
         }
-        Button("Choose Subfolders…") { choosingSubfolders = f }
+        Button("Choose Subfolders…") { choosingSubfolders = f }.accessibilityLabel("Choose Subfolders…")
             .disabled(model.needsSignIn || model.folderBusy(f))
         Divider()
-        Button("Stop Keeping on This Mac…") { model.stopKeeping(f) }.disabled(model.syncing)
+        Button("Stop Keeping on This Mac…") { model.stopKeeping(f) }.disabled(model.syncing).accessibilityLabel("Stop Keeping on This Mac…")
     }
 
     private func detail(_ f: KeptFolder) -> some View {
@@ -257,8 +279,9 @@ struct FoldersPage: View {
                 HStack {
                     Text("Subfolders").font(.headline)
                     Spacer()
-                    Button("Choose Subfolders…") { choosingSubfolders = f }
+                    Button("Choose Subfolders…") { choosingSubfolders = f }.accessibilityLabel("Choose Subfolders…")
                         .disabled(model.needsSignIn || model.folderBusy(f))
+                        .accessibilityLabel("Choose Subfolders of \(f.displayName)…")
                 }
                 Text("Choose which subfolders sync to this Mac.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -266,6 +289,7 @@ struct FoldersPage: View {
                 Text("Files matching these rules are not synced, on top of the excludes under Sync. One rule per line, for example “- /Old backups/**”.")
                     .font(.caption).foregroundStyle(.secondary)
                 FilterEditor(rules: f.extraFilters,
+                             label: "Excludes for \(f.displayName)",
                              disabledReason: model.folderBusy(f) ? "Wait for this folder's sync to finish to change its excludes." : nil,
                              restoreDefaults: nil) { lines in
                     guard model.confirm("Change the excludes for “\(f.displayName)”?",

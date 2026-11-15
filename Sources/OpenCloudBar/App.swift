@@ -71,7 +71,11 @@ struct OpenCloudBarApp: App {
 
 struct MenuIcon: View {
     @ObservedObject var model: AppModel
-    var body: some View { Image(systemName: model.symbol) }
+    var body: some View {
+        Image(systemName: model.symbol)
+            .accessibilityLabel("OpenCloud Bar")
+            .accessibilityValue(model.summary)
+    }
 }
 
 struct MenuContent: View {
