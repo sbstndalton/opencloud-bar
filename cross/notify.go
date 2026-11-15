@@ -142,6 +142,23 @@ func deletionSide(fs []FolderStatus, one bool) string {
 	return "on one side"
 }
 
+// conflictNote announces conflict copies found since the last check (one note for all folders).
+func conflictNote(bs []conflictBatch) *note {
+	if len(bs) == 0 {
+		return nil
+	}
+	n, names := 0, []string{}
+	for _, b := range bs {
+		n += b.n
+		names = append(names, b.folder)
+	}
+	title := conflictsText(n) + " in “" + names[0] + "”"
+	if len(names) > 1 {
+		title = conflictsText(n) + " in " + fmt.Sprint(len(names)) + " folders"
+	}
+	return &note{title, "A file changed on both sides. The newer copy kept the name; the other is saved next to it as ….conflict1. Open Settings ▸ Conflicts to keep one.", "conflicts"}
+}
+
 func plural(names []string, one, many string) string {
 	if len(names) == 1 {
 		return fmt.Sprintf(one, names[0])
@@ -185,6 +202,8 @@ func (e *Engine) checkNotifications() {
 	e.mu.Lock()
 	merged := e.autoMerged
 	e.autoMerged = nil
+	conflicts := e.newConflicts
+	e.newConflicts = nil
 	notes := planNotifications(&e.notes, st, merged)
 	on := e.cfg.NotificationsOn() && e.cfgErr == nil
 	e.mu.Unlock()
@@ -192,6 +211,9 @@ func (e *Engine) checkNotifications() {
 		return // the update notice waits: it is shown once notifications are on again
 	}
 	if n := updateNote(st.Update, filepath.Join(appDir(), "notified-update")); n != nil {
+		notes = append(notes, *n)
+	}
+	if n := conflictNote(conflicts); n != nil {
 		notes = append(notes, *n)
 	}
 	for _, n := range notes {

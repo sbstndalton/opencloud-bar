@@ -101,6 +101,9 @@ struct MenuContent: View {
         Divider()
 
         keptFoldersMenu
+        if model.conflictCount > 0 {
+            Button("\(AppModel.conflictsText(model.conflictCount).prefix(1).uppercased() + AppModel.conflictsText(model.conflictCount).dropFirst())…") { model.openSettings(.conflicts) }
+        }
         Divider()
 
         Button("Sync Now") { model.syncNow() }

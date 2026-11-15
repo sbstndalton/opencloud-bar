@@ -298,6 +298,12 @@ func (u *webUI) handler(e *Engine) http.Handler {
 		}
 		jsonOK(w, e.SetPaused(*b.Paused))
 	})
+	mux.HandleFunc("POST /ui/api/conflict", func(w http.ResponseWriter, r *http.Request) {
+		var b struct{ Folder, File, Action string }
+		if readJSON(w, r, &b) {
+			jsonOK(w, e.ConflictAction(b.Folder, b.File, b.Action))
+		}
+	})
 	mux.HandleFunc("POST /ui/api/check-updates", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, e.CheckForUpdates(r.Context()))
 	})
@@ -474,6 +480,8 @@ func (e *Engine) uiState() map[string]any {
 			"paused":                cfg.Paused,
 			"checkForUpdates":       cfg.UpdateChecks(),
 			"notifications":         cfg.NotificationsOn(),
+			"bwLimitUp":             cfg.BwLimitUp,
+			"bwLimitDown":           cfg.BwLimitDown,
 		},
 		"defaults": map[string]any{
 			"syncIntervalSeconds": def.SyncIntervalSeconds,

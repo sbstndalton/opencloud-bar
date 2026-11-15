@@ -4,6 +4,16 @@ All notable changes to OpenCloud Bar. The format follows [Keep a Changelog](http
 
 The release workflow copies the section for a tag into that tag's GitHub release, so every version heading must stay in the form `## [X.Y.Z] - date`.
 
+## [1.1.0] - 2026-11-15
+
+### Added
+- **Conflicts:** when a file changed on both sides between syncs, the newer copy keeps the name and the other is saved next to it as `name.conflict1` (rclone's naming). OpenCloud Bar now finds these copies after every sync and lists them in **Settings ▸ Conflicts** with the folder and the date changed. Each one has:
+  - **Reveal in Finder** / **Show in Folder**;
+  - **Keep This Version**: the conflict copy replaces the file, and the replaced file goes to the local backups (like a merge's);
+  - **Discard**: the conflict copy goes to the Trash (Windows: the "Removed by OpenCloud Bar" folder).
+  The next sync applies the change to OpenCloud. Actions wait while a sync runs. The menu shows "N conflicts", and a notification announces each new batch (if notifications are on).
+- **Bandwidth limits:** optional upload and download limits in **Settings ▸ Sync** (for example `512K` or `2M`; empty means no limit). They apply to syncs and to the drive (rclone `--bwlimit UP:DOWN`). Settings keys `bwLimitUp` and `bwLimitDown`.
+
 ## [1.0.2] - 2026-11-15
 
 ### Fixed

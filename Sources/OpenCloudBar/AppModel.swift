@@ -49,6 +49,10 @@ final class AppModel: ObservableObject {
     private lazy var notifier = Notifier(model: self)
     private var notePlanner = NotePlanner()
     private var autoMerged: [String] = []
+    /// Conflict copies per kept folder (keyed by KeptFolder.path); see Conflicts.swift.
+    @Published private(set) var conflicts: [String: [ConflictItem]] = [:]
+    /// Conflict copies found since the last notification check: (folder name, count).
+    private var newConflicts: [(String, Int)] = []
     /// A failed update check is retried after a growing wait (it isn't the daily check).
     private var updateRetryAt = Date.distantPast
     private var updateFailures = 0
@@ -189,9 +193,11 @@ final class AppModel: ObservableObject {
             s.lastSuccess = saved?[f.stateName]
             if let reason = needsRepairReason(f) { s.state = .needsRepair(reason) }
             status[f.path] = s
+            conflicts[f.path] = Conflicts.load(stateFile(f, ".conflicts.json"))
         }
         let paths = Set(config.kept.map(\.path))
         for k in status.keys where !paths.contains(k) { status[k] = nil }
+        for k in conflicts.keys where !paths.contains(k) { conflicts[k] = nil }
     }
 
     // MARK: - Supervisor
@@ -312,7 +318,7 @@ final class AppModel: ObservableObject {
                     "--transfers", "4", "--checkers", "8", "--low-level-retries", "10",
                     "--exclude", ".DS_Store", "--exclude", "._*",
                     "--rc", "--rc-addr", "127.0.0.1:\(config.rcPort)",
-                    "--log-level", "NOTICE"]
+                    "--log-level", "NOTICE"] + config.bwLimitArgs
         unmountRequested = false
         mountStartedAt = Date()
         do {
@@ -703,7 +709,7 @@ final class AppModel: ObservableObject {
                     "--resilient", "--recover", "--max-lock", "10m",
                     "--conflict-resolve", "newer", "--conflict-loser", "num",
                     "--transfers", "4", "--checkers", "6", "--log-level", level,
-                    "--stats", "2s", "--stats-log-level", "NOTICE"] + extra   // progress for the menu (StatsFilter)
+                    "--stats", "2s", "--stats-log-level", "NOTICE"] + config.bwLimitArgs + extra   // progress for the menu (StatsFilter)
         let log = Log.url("sync-\(run.f.stateName).log")
         Log.append("\n=== \(Date()) \(kind) of \(run.f.path)\n", to: log)
         return await runTracked(config.rclone, args, log: log)
@@ -719,7 +725,70 @@ final class AppModel: ObservableObject {
         status[run.f.path]?.state = .ok
         status[run.f.path]?.lastSuccess = Date()
         saveLastSuccess()
+        rescanConflicts(run.f)
     }
+
+    // MARK: - Conflicts
+
+    /// Looks for conflict copies in a folder (off the main thread) and remembers the list.
+    func rescanConflicts(_ f: KeptFolder) {
+        let local = config.localRootURL.appendingPathComponent(f.path)
+        let filters = f.extraFilters + config.commonFilters
+        let file = stateFile(f, ".conflicts.json")
+        Task {
+            let list = await Task.detached { Conflicts.scan(local, filters: filters) }.value
+            guard self.config.kept.contains(where: { $0.path == f.path }) else { return }
+            let old = Set(Conflicts.load(file).map(\.file))
+            let fresh = list.filter { !old.contains($0.file) }.count
+            Conflicts.save(list, to: file)
+            self.conflicts[f.path] = list
+            if fresh > 0 { self.newConflicts.append((f.displayName, fresh)) }
+        }
+    }
+
+    private func conflictActionAllowed() -> Bool {
+        guard !syncing else { alert("A sync is running", "Try again when it finishes."); return false }
+        return true
+    }
+
+    /// Keep This Version: the conflict copy becomes the file; the current file goes to the backups.
+    func keepConflict(_ f: KeptFolder, _ c: ConflictItem) {
+        guard conflictActionAllowed(),
+              confirm("Keep this version of “\(c.original)”?",
+                      "The conflict copy replaces the current file. The current file is kept in the backups (in the app's state folder, for 30 days). The next sync sends the change to OpenCloud.",
+                      button: "Keep This Version") else { return }
+        let local = config.localRootURL.appendingPathComponent(f.path)
+        do {
+            try Conflicts.keep(c, local: local, backupDir: Backups.localDir(config.stateURL, f.stateName, Backups.stamp()))
+            Log.line("\(f.path): conflict kept: \(c.file)")
+        } catch {
+            alert("Couldn't keep that version", error.localizedDescription)
+        }
+        rescanConflicts(f)
+    }
+
+    /// Discard: the conflict copy goes to the Trash.
+    func discardConflict(_ f: KeptFolder, _ c: ConflictItem) {
+        guard conflictActionAllowed(),
+              let (loser, _) = Conflicts.target(config.localRootURL.appendingPathComponent(f.path), c),
+              confirm("Discard “\(c.file)”?", "It moves to the Trash. The next sync removes it from OpenCloud too.", button: "Discard") else { return }
+        do {
+            try FileManager.default.trashItem(at: loser, resultingItemURL: nil)
+            Log.line("\(f.path): conflict discarded: \(c.file)")
+        } catch {
+            alert("Couldn't move it to the Trash", error.localizedDescription)
+        }
+        rescanConflicts(f)
+    }
+
+    func revealConflict(_ f: KeptFolder, _ c: ConflictItem) {
+        guard let (loser, _) = Conflicts.target(config.localRootURL.appendingPathComponent(f.path), c) else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([loser])
+    }
+
+    var conflictCount: Int { config.kept.reduce(0) { $0 + (conflicts[$1.path]?.count ?? 0) } }
+
+    nonisolated static func conflictsText(_ n: Int) -> String { n == 1 ? "1 conflict" : "\(n) conflicts" }
 
     nonisolated static let missingRemoteText = "Folder is missing or empty in OpenCloud"
     /// This Mac's copy vanished (an unplugged disk, a moved folder). The large-deletion override
@@ -968,7 +1037,7 @@ final class AppModel: ObservableObject {
                     }
                 }
                 try? fm.removeItem(at: self.workDir(f))
-                for s in [".initialised", ".needs-repair", ".auto-merge", ".drift-parked", ".filters-upgraded"] { try? fm.removeItem(at: self.stateFile(f, s)) }
+                for s in [".initialised", ".needs-repair", ".auto-merge", ".drift-parked", ".filters-upgraded", ".conflicts.json"] { try? fm.removeItem(at: self.stateFile(f, s)) }
                 try? fm.removeItem(at: self.config.stateURL.appendingPathComponent("filters-\(f.stateName).txt"))
                 self.config.kept.removeAll { $0.path == f.path }
                 self.config.save()
@@ -1026,7 +1095,14 @@ final class AppModel: ObservableObject {
         let folders = config.kept.map { ($0, status[$0.path]?.state ?? .idle) }
         var notes = notePlanner.plan(folders: folders, signedOut: signedOut && config.isOIDC, autoMerged: autoMerged)
         autoMerged = []
+        let found = newConflicts
+        newConflicts = []
         guard config.notifications, configError == nil else { return }
+        if !found.isEmpty {
+            let n = found.reduce(0) { $0 + $1.1 }
+            let title = found.count == 1 ? "\(Self.conflictsText(n)) in “\(found[0].0)”" : "\(Self.conflictsText(n)) in \(found.count) folders"
+            notes.append(Note(title: title, body: "A file changed on both sides. The newer copy kept the name; the other is saved next to it as ….conflict1. Open Settings ▸ Conflicts to keep one.", page: .conflicts))
+        }
         // Only marked as shown when it is: with notifications off, the notice waits.
         if updateState.available, let v = updateState.latest,
            UserDefaults.standard.string(forKey: "notifiedUpdate") != v {
@@ -1158,7 +1234,8 @@ final class AppModel: ObservableObject {
         }
         if reconnect {
             restartConnection()
-        } else if c.cacheMaxSize != old.cacheMaxSize || c.cacheMaxAge != old.cacheMaxAge || c.volumeName != old.volumeName {
+        } else if c.cacheMaxSize != old.cacheMaxSize || c.cacheMaxAge != old.cacheMaxAge || c.volumeName != old.volumeName
+                    || c.bwLimitUp != old.bwLimitUp || c.bwLimitDown != old.bwLimitDown {
             restartDriveForNewSettings()
         }
         return nil
@@ -1376,11 +1453,18 @@ final class AppModel: ObservableObject {
         case .skipped(let why): return "skipped (\(why))"
         default: break
         }
+        if let n = conflicts[f.path]?.count, n > 0 { return Self.conflictsText(n) }
         if let t = status[f.path]?.lastSuccess { return "synced \(agoText(t))" }
         return "waiting for first sync"
     }
 
     var summary: String {
+        let s = baseSummary
+        let n = conflictCount
+        return n > 0 && configError == nil && !syncing ? s + " · " + Self.conflictsText(n) : s
+    }
+
+    private var baseSummary: String {
         if let e = configError { return e }
         if !config.isConfigured { return "Not set up: choose Set Up / Sign In…" }
         if waitingForKeychain { return "Waiting for Keychain access…" }

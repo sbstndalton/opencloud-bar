@@ -99,6 +99,10 @@ struct Config: Codable {
     var checkForUpdates = true
     /// Notifications for problems, automatic merges and updates.
     var notifications = true
+    /// Upload / download limits for syncs and the drive, in rclone's units ("512K" = 512 KiB/s,
+    /// "2M" = 2 MiB/s, a bare number is KiB/s). nil: no limit. Same keys as the Go app.
+    var bwLimitUp: String?
+    var bwLimitDown: String?
     var commonFilters: [String] = [
         "- *.tmp", "- .*.bundle.tmp", "- *~", "- .DS_Store", "- ._*", "- Thumbs.db",
         "- .sync_*.db", "- .sync_*.db-*", "- .OpenCloudSync.log", "- .owncloudsync.log",
@@ -135,6 +139,26 @@ struct Config: Codable {
         paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? def.paused
         checkForUpdates = try c.decodeIfPresent(Bool.self, forKey: .checkForUpdates) ?? def.checkForUpdates
         notifications = try c.decodeIfPresent(Bool.self, forKey: .notifications) ?? def.notifications
+        bwLimitUp = try c.decodeIfPresent(String.self, forKey: .bwLimitUp)
+        bwLimitDown = try c.decodeIfPresent(String.self, forKey: .bwLimitDown)
+    }
+
+    /// Why a bandwidth limit isn't valid (nil if fine; empty is no limit).
+    static func bwLimitProblem(_ name: String, _ v: String) -> String? {
+        if v.isEmpty { return nil }
+        guard v.range(of: #"^[0-9]+(\.[0-9]+)?[KMG]?$"#, options: .regularExpression) != nil else {
+            return "\(name) looks like 512K or 2M (K = KiB/s, M = MiB/s), or empty for no limit"
+        }
+        let number = v.trimmingCharacters(in: CharacterSet(charactersIn: "KMG"))
+        if (Double(number) ?? 0) <= 0 { return "\(name) must be more than 0, or empty for no limit" }
+        return nil
+    }
+
+    /// rclone's --bwlimit UP:DOWN ("off" for the side without a limit), or nothing.
+    var bwLimitArgs: [String] {
+        let up = bwLimitUp ?? "", down = bwLimitDown ?? ""
+        if up.isEmpty && down.isEmpty { return [] }
+        return ["--bwlimit", (up.isEmpty ? "off" : up) + ":" + (down.isEmpty ? "off" : down)]
     }
 
     /// "oidc" (browser sign-in) or "rclone" (the named rclone remote holds the credentials).
@@ -172,6 +196,8 @@ struct Config: Codable {
         if let v = webdavVendor, v.contains(where: { "',: ".contains($0) }) { return "webdavVendor isn't a valid rclone vendor name" }
         if let a = auth, a != "oidc" && a != "rclone" { return "auth must be \"oidc\" or \"rclone\", not “\(a)”" }
         if tunnel && sshHost.isEmpty { return "useTunnel needs sshHost" }
+        if let p = Config.bwLimitProblem("bwLimitUp", bwLimitUp ?? "") { return p }
+        if let p = Config.bwLimitProblem("bwLimitDown", bwLimitDown ?? "") { return p }
         return nil
     }
 
@@ -321,7 +347,7 @@ struct Config: Codable {
             var merged = old
             // Optional settings this app owns are left out of the encoding when nil; drop them
             // from the old file too, so clearing one actually removes it.
-            for k in ["serverURL", "auth", "useTunnel", "webdavVendor"] { merged.removeValue(forKey: k) }
+            for k in ["serverURL", "auth", "useTunnel", "webdavVendor", "bwLimitUp", "bwLimitDown"] { merged.removeValue(forKey: k) }
             let oldKept = (old["kept"] as? [[String: Any]]) ?? []
             if let newKept = new["kept"] as? [[String: Any]] {
                 new["kept"] = newKept.map { entry -> [String: Any] in

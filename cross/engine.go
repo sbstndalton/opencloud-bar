@@ -32,12 +32,13 @@ const (
 )
 
 type FolderStatus struct {
-	Path        string    `json:"path"`
-	Name        string    `json:"name"`
-	State       string    `json:"state"`
-	Detail      string    `json:"detail,omitempty"`
-	LastSuccess time.Time `json:"lastSuccess,omitempty"`
-	Local       string    `json:"local"`
+	Path        string     `json:"path"`
+	Name        string     `json:"name"`
+	State       string     `json:"state"`
+	Detail      string     `json:"detail,omitempty"`
+	LastSuccess time.Time  `json:"lastSuccess,omitempty"`
+	Local       string     `json:"local"`
+	Conflicts   []Conflict `json:"conflicts,omitempty"` // conflict copies in the local copy (conflicts.go)
 }
 
 type Status struct {
@@ -53,6 +54,7 @@ type Status struct {
 	ConfigError  string         `json:"configError,omitempty"`
 	Paused       bool           `json:"paused,omitempty"` // kept folders don't sync until resumed
 	Update       UpdateState    `json:"update"`
+	Conflicts    int            `json:"conflicts,omitempty"` // conflict copies over all kept folders
 }
 
 // Engine runs the SSH tunnel, the on-demand drive (rclone mount) and the two-way sync
@@ -91,6 +93,8 @@ type Engine struct {
 
 	notes      notifyState // what has been announced (notify.go)
 	autoMerged []string    // folders merged automatically since the last notification check
+	// conflict copies found since the last notification check
+	newConflicts []conflictBatch
 
 	// What the running sync is doing, for "Syncing “X” (2 of 3) · 12 files…".
 	activeName           string
@@ -210,6 +214,7 @@ func (e *Engine) refreshStatusLocked() {
 				saved = e.loadLastSuccess()
 			}
 			s.LastSuccess = saved[f.StateName]
+			s.Conflicts = loadConflicts(e.cfg.conflictsPath(f))
 			if r := readReason(e.cfg.statePath(f, ".needs-repair")); r != "" {
 				s.State, s.Detail = StNeedsRepair, r
 			}
@@ -442,6 +447,7 @@ func (e *Engine) startMountLocked() {
 		"--exclude", ".DS_Store", "--exclude", "._*",
 		"--rc", "--rc-addr", fmt.Sprintf("127.0.0.1:%d", e.cfg.RcPort()),
 		"--log-level", "NOTICE"}
+	args = append(args, bwLimitArgs(e.cfg.BwLimitUp, e.cfg.BwLimitDown)...)
 	args = append(args, mountExtraArgs()...)
 	cmd := exec.Command(e.cfg.Rclone(), args...)
 	// The rc login goes in the environment, not the command line, so other users can't read it.
@@ -1074,6 +1080,7 @@ func (e *Engine) bisync(r folderRun, kind string, extra ...string) (string, erro
 		"--conflict-resolve", "newer", "--conflict-loser", "num",
 		"--transfers", strconv.Itoa(tr), "--checkers", strconv.Itoa(ck), "--log-level", level,
 		"--stats", "2s", "--stats-log-level", "NOTICE"} // progress for the menu (activity.go)
+	args = append(args, bwLimitArgs(r.cfg.BwLimitUp, r.cfg.BwLimitDown)...)
 	args = append(args, extra...)
 	sf := &statsFilter{onFiles: func(n int) {
 		e.mu.Lock()
@@ -1102,6 +1109,7 @@ func (e *Engine) syncSucceeded(r folderRun) {
 	_ = os.Remove(r.cfg.statePath(r.f, ".drift-parked"))
 	_ = os.Remove(r.cfg.statePath(r.f, ".filters-upgraded"))
 	_ = os.WriteFile(r.serverFile, []byte(r.cfg.ServerIdentity()), 0o600)
+	e.updateConflicts(r.cfg, r.f)
 	e.setState(r.f, StOK, "")
 }
 
@@ -1465,6 +1473,7 @@ func (e *Engine) Reload() error {
 	reconnect := cfg.SSHHost != e.cfg.SSHHost || cfg.LocalPort != e.cfg.LocalPort || cfg.ServerPort != e.cfg.ServerPort ||
 		cfg.DavPath != e.cfg.DavPath || cfg.RcloneRemote != e.cfg.RcloneRemote || cfg.MountPoint != e.cfg.MountPoint ||
 		cfg.ServerURL != e.cfg.ServerURL || cfg.AuthMode() != e.cfg.AuthMode() || cfg.Tunnel() != e.cfg.Tunnel()
+	remount := cfg.BwLimitUp != e.cfg.BwLimitUp || cfg.BwLimitDown != e.cfg.BwLimitDown // the drive's limit
 	wasOut := e.signedOut
 	e.cfg, e.cfgErr = cfg, nil
 	e.signedOut = out
@@ -1478,6 +1487,12 @@ func (e *Engine) Reload() error {
 	e.refreshStatusLocked()
 	m, t := e.mount, e.tunnel
 	e.mu.Unlock()
+	if remount && !reconnect && m != nil {
+		e.mu.Lock()
+		e.unmountRequest = true // it starts again on the next tick, with the new limit
+		e.mu.Unlock()
+		_ = e.unmount(m)
+	}
 	if reconnect {
 		if m != nil {
 			e.mu.Lock()
@@ -1557,6 +1572,7 @@ func (e *Engine) Status() Status {
 			oldest = s.LastSuccess
 		}
 	}
+	st.Conflicts = conflictCount(st.Folders)
 	switch {
 	case st.ConfigError != "":
 		st.Summary = st.ConfigError
@@ -1580,6 +1596,9 @@ func (e *Engine) Status() Status {
 		st.Summary = "Nothing kept on this computer"
 	default:
 		st.Summary = "Waiting for first sync"
+	}
+	if st.Conflicts > 0 && st.ConfigError == "" && !e.syncing {
+		st.Summary += " · " + conflictsText(st.Conflicts)
 	}
 	return st
 }

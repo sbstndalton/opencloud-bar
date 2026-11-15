@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode"
@@ -72,6 +73,41 @@ type Config struct {
 	CheckForUpdates *bool `json:"checkForUpdates,omitempty"`
 	// Notifications: desktop notifications for problems, automatic merges and updates (default on).
 	Notifications *bool `json:"notifications,omitempty"`
+	// BwLimitUp / BwLimitDown: upload / download limits for syncs and the drive, in rclone's
+	// units ("512K" = 512 KiB/s, "2M" = 2 MiB/s, a bare number is KiB/s). Empty: no limit.
+	BwLimitUp   string `json:"bwLimitUp,omitempty"`
+	BwLimitDown string `json:"bwLimitDown,omitempty"`
+}
+
+var bwRe = regexp.MustCompile(`^([0-9]+(\.[0-9]+)?)([KMG])?$`)
+
+// bwLimitProblem checks one limit ("" is no limit).
+func bwLimitProblem(name, v string) error {
+	if v == "" {
+		return nil
+	}
+	m := bwRe.FindStringSubmatch(v)
+	if m == nil {
+		return fmt.Errorf("%s looks like 512K or 2M (K = KiB/s, M = MiB/s), or empty for no limit", name)
+	}
+	if n, _ := strconv.ParseFloat(m[1], 64); n <= 0 {
+		return fmt.Errorf("%s must be more than 0, or empty for no limit", name)
+	}
+	return nil
+}
+
+// bwLimitArgs is rclone's --bwlimit UP:DOWN ("off" for the side without a limit), or nothing.
+func bwLimitArgs(up, down string) []string {
+	if up == "" && down == "" {
+		return nil
+	}
+	or := func(s string) string {
+		if s == "" {
+			return "off"
+		}
+		return s
+	}
+	return []string{"--bwlimit", or(up) + ":" + or(down)}
 }
 
 func (c Config) UpdateChecks() bool    { return c.CheckForUpdates == nil || *c.CheckForUpdates }
@@ -361,6 +397,12 @@ func (c Config) Validate() error {
 	}
 	if c.Tunnel() && c.SSHHost == "" {
 		return errors.New("useTunnel needs sshHost")
+	}
+	if err := bwLimitProblem("bwLimitUp", c.BwLimitUp); err != nil {
+		return err
+	}
+	if err := bwLimitProblem("bwLimitDown", c.BwLimitDown); err != nil {
+		return err
 	}
 	return nil
 }

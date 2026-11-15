@@ -2,11 +2,12 @@ import AppKit
 import SwiftUI
 
 enum SettingsPage: String, CaseIterable, Identifiable {
-    case folders, account, sync, drive, general, logs
+    case folders, conflicts, account, sync, drive, general, logs
     var id: String { rawValue }
     var title: String {
         switch self {
         case .folders: return "Kept Folders"
+        case .conflicts: return "Conflicts"
         case .account: return "Account"
         case .sync: return "Sync"
         case .drive: return "OpenCloud Drive"
@@ -17,6 +18,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .folders: return "folder"
+        case .conflicts: return "doc.on.doc"
         case .account: return "person.crop.circle"
         case .sync: return "arrow.triangle.2.circlepath"
         case .drive: return "externaldrive"
@@ -111,6 +113,7 @@ struct SettingsView: View {
                 if let e = model.configError { configErrorBanner(e) }
                 switch router.page {
                 case .folders: FoldersPage(model: model, store: store)
+                case .conflicts: ConflictsPage(model: model)
                 case .account: AccountPage(model: model, store: store)
                 case .sync: SyncPage(model: model, store: store)
                 case .drive: DrivePage(model: model)
@@ -291,6 +294,9 @@ struct SyncPage: View {
     @ObservedObject var model: AppModel
     @ObservedObject var store: ServerInfoStore
     @Local private var error: String?
+    @Local private var bwUp = ""
+    @Local private var bwDown = ""
+    @Local private var bwError: String?
 
     private static let intervals: [(value: Int, label: String)] = [
         (60, "Every minute"), (300, "Every 5 minutes"), (900, "Every 15 minutes"),
@@ -322,6 +328,17 @@ struct SyncPage: View {
                     return await model.updateConfig { $0.commonFilters = lines }
                 }
             }
+            Section("Bandwidth") {
+                TextField("Upload limit", text: $bwUp, prompt: Text("no limit"))
+                TextField("Download limit", text: $bwDown, prompt: Text("no limit"))
+                Text("For syncs and the drive, like 512K (KiB/s) or 2M (MiB/s). Empty: no limit.")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Button("Apply") { applyBandwidth() }
+                        .disabled(bwUp == (model.config.bwLimitUp ?? "") && bwDown == (model.config.bwLimitDown ?? ""))
+                }
+                InlineError(text: bwError)
+            }
             Section("Where kept folders live") {
                 LabeledContent("Location on this Mac") {
                     Text(model.config.localRoot).textSelection(.enabled)
@@ -349,6 +366,18 @@ struct SyncPage: View {
         }
         .formStyle(.grouped)
         .task { store.loadIfNeeded(model.config, signedIn: !model.needsSignIn) }
+        .onAppear { bwUp = model.config.bwLimitUp ?? ""; bwDown = model.config.bwLimitDown ?? "" }
+    }
+
+    private func applyBandwidth() {
+        let up = bwUp.trimmingCharacters(in: .whitespaces).uppercased(), down = bwDown.trimmingCharacters(in: .whitespaces).uppercased()
+        if let p = Config.bwLimitProblem("The upload limit", up) ?? Config.bwLimitProblem("The download limit", down) {
+            bwError = p; return
+        }
+        Task {
+            bwError = await model.updateConfig { $0.bwLimitUp = up.isEmpty ? nil : up; $0.bwLimitDown = down.isEmpty ? nil : down }
+            if bwError == nil { bwUp = up; bwDown = down }
+        }
     }
 
     private func chooseRoot() {

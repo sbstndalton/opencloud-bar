@@ -139,6 +139,9 @@ func folderLabelAt(f FolderStatus, now time.Time) string {
 		}
 		return s
 	}
+	if n := len(f.Conflicts); n > 0 {
+		return "⚠ " + f.Name + " — " + conflictsText(n)
+	}
 	if !f.LastSuccess.IsZero() {
 		return f.Name + " — synced " + agoAt(f.LastSuccess, now)
 	}

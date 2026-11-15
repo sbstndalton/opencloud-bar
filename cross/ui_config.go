@@ -38,6 +38,8 @@ type configPatch struct {
 	CheckForUpdates       *bool               `json:"checkForUpdates"`
 	Notifications         *bool               `json:"notifications"`
 	KeptFilters           map[string][]string `json:"keptFilters"` // kept folder path -> its own excludes
+	BwLimitUp             *string             `json:"bwLimitUp"`   // "" for no limit
+	BwLimitDown           *string             `json:"bwLimitDown"`
 }
 
 var (
@@ -246,6 +248,20 @@ func applyConfigPatch(p configPatch) (restartPort bool, err error) {
 	}
 	if p.Notifications != nil {
 		set("notifications", *p.Notifications)
+	}
+	for key, v := range map[string]*string{"bwLimitUp": p.BwLimitUp, "bwLimitDown": p.BwLimitDown} {
+		if v == nil {
+			continue
+		}
+		limit := strings.ToUpper(strings.TrimSpace(*v))
+		if err := bwLimitProblem(map[string]string{"bwLimitUp": "Upload limit", "bwLimitDown": "Download limit"}[key], limit); err != nil {
+			return false, err
+		}
+		if limit == "" {
+			delete(raw, key)
+		} else {
+			set(key, limit)
+		}
 	}
 	if p.KeptFilters != nil {
 		kept, err := rawKept(raw) // per-folder unknown keys survive too

@@ -67,8 +67,9 @@ On the Mac, **Settings…** (⌘,) opens these pages. Windows and Linux have the
 | Page | What it does |
 |---|---|
 | **Kept Folders** | A table of your kept folders: name, location on this Mac, status and when each last synced (this survives restarts). Per folder: Open in Finder, Open in Browser, Sync Now, Repair, Allow Large Deletion (when needed) and Stop Keeping. Select a folder to see its paths, its last error and its own exclude rules. |
+| **Conflicts** | Conflict copies (`name.conflict1`) in your kept folders, with Reveal, Keep This Version and Discard. See [Conflicts](#conflicts). |
 | **Account** | Server address and version, your name, email and username, and a storage bar with used and total space. **Open OpenCloud in Browser**, **Refresh**, and **Sign Out** (or **Sign In…**). It reads these from the server with your sign-in; nothing is shown if you're signed out. |
-| **Sync** | How often kept folders sync (1, 5, 15, 30 or 60 minutes), the exclude rules for all folders (with **Restore Defaults**), where kept folders live on this Mac (changeable only while no folder is kept), and the file names the server refuses. |
+| **Sync** | How often kept folders sync (1, 5, 15, 30 or 60 minutes), the exclude rules for all folders (with **Restore Defaults**), where kept folders live on this Mac (changeable only while no folder is kept), upload and download limits, and the file names the server refuses. |
 | **OpenCloud Drive** | Connect or eject the drive, its mount location and volume name, the cache size limit and age, and live cache use and pending uploads while it is connected. |
 | **General** | Open at Login, the version, update checks (**Check Now**) and notifications. With an SSH tunnel: whether to check the server's memory before syncing. Under **Advanced**: the SSH tunnel settings, the rclone path, **Open Settings File** and **Reload Settings**. |
 | **Logs** | The app log, the drive and tunnel logs, and each folder's sync log: the last 3000 lines, refreshed every 2 seconds, with errors in red. **Copy**, **Reveal in Finder** and **Clear…**. |
@@ -89,6 +90,21 @@ On Windows there are two programs in one folder:
 - `opencloud-bar.exe` is the same program as a console app, so commands print their output in a terminal.
 
 `deploy-ms02/` shows a headless server set-up: a systemd user service and an `rclone` wrapper that runs rclone's official Docker image. The memory cap is on that container (3 GB), not on the service: a limit on the service would kill it mid-sync.
+
+## Conflicts
+
+When a file changed on both sides between two syncs, the newer copy keeps its name and the other is saved next to it with `.conflict1` added to the whole name (`report.pdf.conflict1`; a second one is `.conflict2`). Nothing is lost, but nothing tells you either, so OpenCloud Bar looks for these copies after each sync:
+
+- The menu shows "N conflicts", and you get one notification for each new batch.
+- **Settings ▸ Conflicts** lists each copy with its folder and when it changed:
+  - **Reveal in Finder** (Mac) / **Show in Folder** (Windows, Linux).
+  - **Keep This Version** makes the conflict copy the file. The file it replaces goes to the local backups (`backups/` in the sync state folder, kept 30 days).
+  - **Discard** moves the conflict copy to the Trash (Windows: the "Removed by OpenCloud Bar" folder in your user folder).
+- These are changes on this computer; the next sync applies them to OpenCloud. They wait while a sync is running.
+
+## Bandwidth limit
+
+**Settings ▸ Sync ▸ Upload limit / Download limit** slow syncs and the drive down so they leave room for other things. Use rclone's units: `512K` is 512 KiB/s, `2M` is 2 MiB/s, a plain number is KiB/s. Leave a field empty for no limit. The drive restarts to pick up a change; a running sync uses it from the next sync. In the settings file the keys are `bwLimitUp` and `bwLimitDown`.
 
 ## Safety
 
@@ -141,7 +157,7 @@ Only the refresh token is kept. The short-lived access token is cached next to t
 - **Linux tray:** the tray icon uses StatusNotifier. GNOME shows it only with the AppIndicator extension; KDE, Xfce, Cinnamon and most others show it as is. Without a tray the app still runs (`opencloud-bar run --no-tray`) and the settings page and command line work.
 - **Linux dialogs** use `zenity` and notifications use `notify-send` (package `libnotify-bin` or `libnotify`; the packages recommend both). Without zenity, sign in and keep folders from the settings page instead. Quit then only quits when nothing is still uploading; otherwise a notification says so, and `opencloud-bar quit --force` quits anyway.
 - One account and one OpenCloud space (your personal files) per computer. Shared spaces aren't kept yet.
-- There is no conflict viewer. When both sides changed, the newer copy wins and the other is kept next to it with a number added to its name.
+- Conflicts are found in the local copies of kept folders only (not on the drive), up to 200 per folder. Folders excluded everywhere (like `- **/node_modules/**`) aren't searched.
 
 ## How it works
 
@@ -189,6 +205,7 @@ Keys the app doesn't know about are kept when it saves.
 | `commonFilters` | rclone filter rules for every kept folder | build folders, `node_modules`, `.venv`, temp files |
 | `paused` | kept folders don't sync | `false` |
 | `checkForUpdates` / `notifications` | daily update check / notifications | `true` / `true` |
+| `bwLimitUp` / `bwLimitDown` | upload / download limit, like `512K` or `2M` | none |
 
 Extra settings on Windows and Linux:
 

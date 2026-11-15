@@ -72,7 +72,7 @@ td .why { display:block; color:var(--muted); font-size:12.5px; }
 <script nonce="{{NONCE}}">
 "use strict";
 // Plain DOM code, no libraries. Text from the server is only ever set with textContent.
-const SECTIONS = [["folders","Folders"],["account","Account"],["sync","Sync"],["drive","Drive"],["general","General"],["logs","Logs"],["about","About"]];
+const SECTIONS = [["folders","Folders"],["conflicts","Conflicts"],["account","Account"],["sync","Sync"],["drive","Drive"],["general","General"],["logs","Logs"],["about","About"]];
 let S = null;            // last /ui/api/state
 let section = "folders";
 let selected = null;     // selected folder path
@@ -184,7 +184,7 @@ function go(id) {
   buildNav();
   const main = document.getElementById("main");
   main.replaceChildren();
-  ({ folders, account, sync: syncPage, drive, general, logs, about })[id](main, render);
+  ({ folders, conflicts, account, sync: syncPage, drive, general, logs, about })[id](main, render);
 }
 async function refreshState() {
   try { S = await get("state"); } catch (e) { return; }
@@ -192,6 +192,7 @@ async function refreshState() {
   if (sum) sum.textContent = S.status.summary + (S.status.message ? " — " + S.status.message : "");
   drawNotices();
   if (section === "folders") drawFolders();
+  if (section === "conflicts") drawConflicts();
   if (section === "drive") drawDriveButtons();
 }
 function header(main, title) {
@@ -293,6 +294,33 @@ async function stopKeeping(f) {
   if (confirm("Stop keeping " + f.name + " here?\n\n" + text)) act(() => post("unkeep", { path: f.path }), "Started; see the status above");
 }
 
+// ---- Conflicts
+
+function conflicts(main) {
+  header(main, "Conflicts");
+  main.append(h("p", { class: "hint", text: "When a file changed on both sides, the newer copy keeps its name and the other is saved next to it as name.conflict1. Keep This Version makes the conflict copy the file (the current one goes to the backups in the sync state folder); Discard moves the conflict copy to " + (navigator.userAgent.includes("Windows") ? "the \"Removed by OpenCloud Bar\" folder in your user folder" : "the trash") + ". The next sync applies either to OpenCloud." }),
+    h("div", { id: "conflicts-body" }));
+  drawConflicts();
+  timers.push(setInterval(refreshState, 3000));
+}
+function drawConflicts() {
+  const body = document.getElementById("conflicts-body");
+  if (!body || !S) return;
+  const rows = [];
+  for (const f of S.folders) for (const c of (f.conflicts || [])) rows.push([f, c]);
+  if (!rows.length) { body.replaceChildren(h("div", { class: "card" }, "No conflicts. When a file changes on both sides between syncs, the copy that lost shows up here.")); return; }
+  const busy = S.status.syncing;
+  const conflictAct = (f, c, action, msg) => act(() => post("conflict", { folder: f.path, file: c.file, action }), msg);
+  body.replaceChildren(h("table", {}, h("thead", {}, h("tr", {}, h("th", { text: "File" }), h("th", { text: "Folder" }), h("th", { text: "Modified" }), h("th", { text: "" }))),
+    h("tbody", {}, rows.map(([f, c]) => h("tr", {},
+      h("td", { class: "path", text: c.file }), h("td", { text: f.name }), h("td", { text: new Date(c.modified).toLocaleString() }),
+      h("td", {},
+        h("button", { class: "btn", onclick: () => conflictAct(f, c, "reveal") }, "Show in Folder"),
+        h("button", { class: "btn", disabled: busy, onclick: () => { if (confirm("Keep this version of " + c.original + "?\n\nThe conflict copy replaces the current file; the current file is kept in the backups.")) conflictAct(f, c, "keep", "Kept; the next sync sends it to OpenCloud"); } }, "Keep This Version"),
+        h("button", { class: "btn danger", disabled: busy, onclick: () => { if (confirm("Discard " + c.file + "?")) conflictAct(f, c, "discard", "Discarded"); } }, "Discard")))))),
+    busy ? h("p", { class: "hint", text: "A sync is running; the actions wait until it finishes." }) : null);
+}
+
 // ---- Account
 
 async function account(main, r) {
@@ -391,7 +419,9 @@ async function syncPage(main, r) {
     selectField("Sync every", "syncIntervalSeconds", [[60,"1 minute"],[300,"5 minutes"],[900,"15 minutes"],[1800,"30 minutes"],[3600,"1 hour"]]),
     textField("Local folder", "localRoot", kept ? "Can't change while folders are kept here. Stop keeping them first." : "New kept folders are placed inside this folder.", { disabled: kept }),
     numField("Parallel transfers", "transfers", "How many files copy at once (1 to 32).", 1, 32),
-    numField("Parallel checks", "checkers", "How many files are compared at once (1 to 64).", 1, 64)));
+    numField("Parallel checks", "checkers", "How many files are compared at once (1 to 64).", 1, 64),
+    textField("Upload limit", "bwLimitUp", "For syncs and the drive, like 512K (KiB/s) or 2M (MiB/s). Empty: no limit.", { placeholder: "no limit" }),
+    textField("Download limit", "bwLimitDown", "Like 512K or 10M. Empty: no limit.", { placeholder: "no limit" })));
   const ta = h("textarea", { spellcheck: "false" }); ta.value = S.config.commonFilters.join("\n");
   main.append(h("div", { class: "card" }, h("h3", { text: "Common excludes" }),
     h("p", { class: "hint", text: "Files matching these rules are never synced, in any kept folder. One rule per line, like - *.tmp (exclude) or + keep.txt (include)." }),
