@@ -18,6 +18,8 @@ struct FolderStatus {
     var lastSuccess: Date?
     /// Live sync: a change was seen here, a sync follows soon.
     var pending = false
+    /// A first failure that looks like a network blip: shown, not notified (a second in a row is).
+    var quiet = false
 }
 
 /// Owns the three moving parts: the SSH tunnel, the on-demand drive (rclone nfsmount)
@@ -68,6 +70,8 @@ final class AppModel: ObservableObject {
     private(set) lazy var live = LiveSync(model: self)
     /// What started each folder's running sync ("timer", "local change", "server change"), for Recent Changes.
     private var runTrigger: [String: String] = [:]
+    /// Failed runs in a row per folder (a single network blip isn't notified).
+    private var failStreak: [String: Int] = [:]
     /// Recent Changes (oldest first), from activity.json in the sync state folder.
     @Published private(set) var recentChanges: [Change] = []
     private var changesURL: URL { config.stateURL.appendingPathComponent("activity.json") }
@@ -227,6 +231,9 @@ final class AppModel: ObservableObject {
     func setPending(_ key: String, _ on: Bool) {
         if status[key]?.pending != on { status[key]?.pending = on }
     }
+
+    /// Live sync: a sync of this folder starts, so a queued one for it is done by it.
+    func dequeue(_ key: String) { queuedKeys.remove(key) }
 
     /// Live sync: these folders changed and settled; sync them (after the running sync, if any).
     func queueLiveSync(_ keys: [String]) {
@@ -886,6 +893,8 @@ final class AppModel: ObservableObject {
         try? fm.removeItem(at: stateFile(run.f, ".filters-upgraded"))
         try? config.serverIdentity(for: run.f).write(to: run.serverFile, atomically: true, encoding: .utf8)
         status[run.f.key]?.state = .ok
+        status[run.f.key]?.quiet = false
+        failStreak[run.f.key] = nil
         status[run.f.key]?.lastSuccess = Date()
         saveLastSuccess()
         rescanConflicts(run.f)
@@ -973,9 +982,31 @@ final class AppModel: ObservableObject {
         "This Mac's copy of “\(name)” is empty or missing. If it is on a disk, reconnect it; to stop syncing it here instead, choose Stop Keeping (the folder in OpenCloud stays as it is)"
     }
 
+    nonisolated static let networkText = "network problem; will retry (see the sync log)"
+
+    /// rclone errors from a network blip (the next run usually works); same as the Go app.
+    nonisolated static func transientNetwork(_ out: String) -> Bool {
+        let re = #"(?i)can't assign requested address|connection reset|connection refused|i/o timeout|no such host|TLS handshake timeout|network is unreachable|broken pipe|unexpected EOF|context deadline exceeded|temporary failure in name resolution"#
+        func blip(_ s: Substring) -> Bool { s.range(of: re, options: .regularExpression) != nil }
+        guard blip(Substring(out)) else { return false }
+        for l in out.split(separator: "\n") where l.contains("ERROR") && !blip(l) {
+            if !(l.contains("Bisync aborted") || l.contains("bisync is EXPERIMENTAL") || l.contains("Failed to bisync") || l.contains("error(s) while")) {
+                return false   // other errors too: not just a blip
+            }
+        }
+        return true
+    }
+
     /// Shows why a run failed (drift is handled by the caller).
     private func failed(_ run: FolderRun, _ res: BisyncResult, _ out: String) async {
         let f = run.f
+        status[f.key]?.quiet = false
+        defer {   // failed runs in a row; a first network blip is quiet
+            if case .failed(let why) = status[f.key]?.state {
+                failStreak[f.key, default: 0] += 1
+                status[f.key]?.quiet = why == Self.networkText && failStreak[f.key] == 1
+            }
+        }
         switch res.outcome {
         case .signedOut:
             if config.isOIDC {
@@ -1013,6 +1044,8 @@ final class AppModel: ObservableObject {
         case .failed:
             if out.contains("directory not found"), await remoteMissingOrEmpty(f) {
                 status[f.key]?.state = .failed(Self.missingRemoteText)
+            } else if Self.transientNetwork(out) {
+                status[f.key]?.state = .failed(Self.networkText)
             } else {
                 status[f.key]?.state = .failed("rclone failed; will retry (see the sync log)")
             }
@@ -1306,7 +1339,8 @@ final class AppModel: ObservableObject {
                     }
                 }
                 try? fm.removeItem(at: self.workDir(f))
-                for s in [".initialised", ".needs-repair", ".auto-merge", ".drift-parked", ".filters-upgraded", ".conflicts.json"] { try? fm.removeItem(at: self.stateFile(f, s)) }
+                self.live.remoteForget(f.key)   // before .server-etag goes: a late check doesn't write it
+                for s in [".initialised", ".needs-repair", ".auto-merge", ".drift-parked", ".filters-upgraded", ".conflicts.json", ".server-etag"] { try? fm.removeItem(at: self.stateFile(f, s)) }
                 try? fm.removeItem(at: self.config.stateURL.appendingPathComponent("filters-\(f.stateName).txt"))
                 var c = self.config
                 c.kept.removeAll { $0.key == f.key }
@@ -1368,7 +1402,11 @@ final class AppModel: ObservableObject {
 
     /// Runs every tick: announces what changed since the last check (see NotePlanner).
     private func checkNotifications() {
-        let folders = config.kept.map { ($0, status[$0.key]?.state ?? .idle) }
+        // A quiet failure (one network blip) counts as "no news": the last kind stands.
+        let folders = config.kept.map { f -> (KeptFolder, FolderStatus.State) in
+            let s = status[f.key]
+            return (f, s?.quiet == true ? .skipped("") : s?.state ?? .idle)
+        }
         var notes = notePlanner.plan(folders: folders, signedOut: signedOut && config.isOIDC, autoMerged: autoMerged)
         autoMerged = []
         let found = newConflicts

@@ -21,8 +21,8 @@ import (
 // same path as a local change: the minimum gap, the per-folder queue, never two runs at once.
 //
 //   - Baseline: the last ETag per folder, in memory and in the state folder (<state>.server-etag).
-//     The first check after launch only records it (the launch's sync covers what happened
-//     while the app was closed). After each successful sync the ETag is read again and becomes
+//     The first check after launch syncs the folder if the ETag differs from the stored one
+//     (the queue takes it once with the launch sync), else only records it. After each successful sync the ETag is read again and becomes
 //     the baseline, so the app's own uploads don't start another sync. A check that was
 //     running when a sync started is ignored.
 //   - Errors (network, 401, 5xx, a redirect): that folder backs off, doubling up to
@@ -30,6 +30,8 @@ import (
 //   - No checks while paused, signed out, quitting, without the browser sign-in, or with a
 //     configuration error; at most remoteParallel at once.
 //   - The bearer token goes only to the server: accountClient follows no redirects.
+//   - A change in OpenCloud while the folder syncs goes into the baseline read after the
+//     sync; if that sync didn't take it, it comes with the next timer sync (or change).
 
 var (
 	remoteEvery      = 30 * time.Second
@@ -40,6 +42,7 @@ var (
 )
 
 type remoteFolder struct {
+	syncing bool   // the engine runs a sync of it now
 	etag    string // the baseline
 	known   bool   // the baseline was read (or loaded)
 	loaded  bool   // the state file was read
@@ -138,7 +141,7 @@ func (e *Engine) remoteTick() {
 			rf = &remoteFolder{}
 			l.remote[key] = rf
 		}
-		if l.remoteRun >= remoteParallel || rf.busy || rf.pending || now.Before(rf.nextAt) {
+		if l.remoteRun >= remoteParallel || rf.busy || rf.pending || rf.syncing || l.remoteGone[key] || now.Before(rf.nextAt) {
 			continue
 		}
 		if lf := l.folders[key]; (lf != nil && lf.own) || e.queued[key] {
@@ -157,6 +160,11 @@ func (e *Engine) remoteTick() {
 	for key := range l.remote {
 		if !keep[key] {
 			delete(l.remote, key)
+		}
+	}
+	for key := range l.remoteGone {
+		if !keep[key] {
+			delete(l.remoteGone, key) // kept again later: checked again
 		}
 	}
 	e.mu.Unlock()
@@ -183,9 +191,32 @@ func (e *Engine) remoteCheck(j remoteJob) {
 		cancel()
 	}
 	save := e.remoteResult(j, stored, etag, status, err)
-	if save != "" {
+	if save == "" {
+		return
+	}
+	l := e.live()
+	l.fileMu.Lock() // with remoteForget: no write after Stop Keeping removed the file
+	defer l.fileMu.Unlock()
+	_, kept := e.find(j.key) // takes e.mu itself
+	e.mu.Lock()
+	still := kept && l.remote[j.key] != nil && !l.remoteGone[j.key]
+	e.mu.Unlock()
+	if still {
 		_ = os.WriteFile(j.state, []byte(save+"\n"), 0o600)
 	}
+}
+
+// remoteForget: the folder stops being kept; its checks stop and its stored ETag goes.
+func (e *Engine) remoteForget(f KeptFolder) {
+	l := e.live()
+	e.mu.Lock()
+	delete(l.remote, f.Key())
+	l.remoteGone[f.Key()] = true
+	state := e.cfg.statePath(f, ".server-etag")
+	e.mu.Unlock()
+	l.fileMu.Lock()
+	_ = os.Remove(state)
+	l.fileMu.Unlock()
 }
 
 // remoteResult applies a check's answer; it returns an ETag to store ("" for none).
@@ -216,8 +247,14 @@ func (e *Engine) remoteResult(j remoteJob, stored, etag string, status int, err 
 	}
 	rf.fails = 0
 	rf.nextAt = remoteNext(now)
-	if j.gen != rf.gen {
+	if j.gen != rf.gen || rf.syncing {
 		return "" // a sync started or ended meanwhile: its baseline read decides
+	}
+	if j.load && !j.baseline && stored != "" && etag != stored {
+		// Changed while the app was closed: sync (the queue takes it once with the launch sync).
+		rf.etag, rf.known = etag, true
+		e.serverChangeLocked(j.key)
+		return etag
 	}
 	if j.baseline || j.load || !rf.known { // after a sync, the first check after launch: record
 		changed := !rf.known || rf.etag != etag
@@ -252,9 +289,14 @@ func (e *Engine) serverChangeLocked(key string) {
 
 // remoteSyncStartedLocked: a sync of the folder starts; running checks are ignored.
 func (e *Engine) remoteSyncStartedLocked(key string) {
-	if rf := e.live().remote[key]; rf != nil {
-		rf.gen++
+	l := e.live()
+	rf := l.remote[key]
+	if rf == nil {
+		rf = &remoteFolder{}
+		l.remote[key] = rf
 	}
+	rf.gen++
+	rf.syncing = true
 }
 
 // remoteSyncEndedLocked: after a successful sync the folder's ETag is read again and becomes
@@ -271,7 +313,8 @@ func (e *Engine) remoteSyncEndedLocked(f KeptFolder, ok bool) *remoteJob {
 		l.remote[key] = rf
 	}
 	rf.gen++
-	if !ok || !e.remoteOnLocked() {
+	rf.syncing = false
+	if !ok || !e.remoteOnLocked() || l.remoteGone[key] {
 		// A failed sync may have uploaded part: the next check only records (the folder is
 		// tried again at the interval), so a failing sync doesn't restart every 30 s.
 		rf.known = rf.known && ok

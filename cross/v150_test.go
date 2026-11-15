@@ -422,7 +422,6 @@ func TestLiveNoDeadlockUnderFlood(t *testing.T) {
 	for i := 0; i < 30; i++ {
 		_ = os.MkdirAll(filepath.Join(local, "d"+strconv.Itoa(i)), 0o700)
 	}
-	resetLive(e)
 	real, _ := resolveRoot(local)
 	var stopFlood atomic.Bool
 	e.mu.Lock()
@@ -438,6 +437,7 @@ func TestLiveNoDeadlockUnderFlood(t *testing.T) {
 		}), nil
 	}
 	e.mu.Unlock()
+	resetLive(e) // after the hook: the engine's own liveLoop may reconcile at any moment
 	defer stopFlood.Store(true)
 	done := make(chan struct{})
 	go func() { e.reconcileWatches(); close(done) }()
@@ -550,14 +550,20 @@ func fakeRig(t *testing.T) (*Engine, *fakeWatcher, string) {
 	e := pausedRig(t, `,"liveSync":true,"kept":[{"path":"Docs","stateName":"docs-1"}]`)
 	local := e.cfg.Local(e.cfg.Kept[0])
 	_ = os.MkdirAll(local, 0o700)
-	resetLive(e)
-	var fake *fakeWatcher
+	// The hook first: the engine's own liveLoop may reconcile at any moment.
+	var made sync.Map // *fakeWatcher -> true
 	e.mu.Lock()
-	e.live().newWatcher = func() (fsWatcher, error) { fake = newFakeWatcher(nil, nil); return fake, nil }
+	e.live().newWatcher = func() (fsWatcher, error) { w := newFakeWatcher(nil, nil); made.Store(w, true); return w, nil }
 	e.mu.Unlock()
+	resetLive(e)
 	e.reconcileWatches()
-	if watchOf(e, "Docs") == nil || fake == nil {
+	fw := watchOf(e, "Docs")
+	if fw == nil {
 		t.Fatal("not watched")
+	}
+	fake, _ := fw.w.(*fakeWatcher)
+	if _, ok := made.Load(fake); fake == nil || !ok {
+		t.Fatal("not watched through the fake")
 	}
 	real, _ := resolveRoot(local)
 	return e, fake, real

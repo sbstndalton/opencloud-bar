@@ -182,7 +182,8 @@ func TestRemoteOwnRunBaseline(t *testing.T) {
 	}
 }
 
-// After a restart the stored ETag is the baseline; the first check doesn't sync.
+// After a restart the stored ETag is the baseline: the same ETag doesn't sync, a different
+// one (changed while the app was closed) does.
 func TestRemoteRestartNoSync(t *testing.T) {
 	e, _, d := remoteRig(t)
 	state := e.cfg.statePath(e.cfg.Kept[0], ".server-etag")
@@ -197,6 +198,69 @@ func TestRemoteRestartNoSync(t *testing.T) {
 	}
 	if rf := remoteOf(e, "Docs"); !rf.known || rf.etag != `"e1"` {
 		t.Errorf("baseline %+v", rf)
+	}
+	e2, _, d2 := remoteRig(t)
+	state2 := e2.cfg.statePath(e2.cfg.Kept[0], ".server-etag")
+	_ = os.WriteFile(state2, []byte(`"old"`+"\n"), 0o600)
+	d2.etag.Store(`"new"`)
+	check(t, e2)
+	e2.liveTick()
+	if !queued(e2, "Docs") {
+		t.Fatal("changed while closed: no sync")
+	}
+	if b, _ := os.ReadFile(state2); strings.TrimSpace(string(b)) != `"new"` {
+		t.Errorf("stored %q", b)
+	}
+	// The launch sync reaching the folder takes the queued one.
+	e2.mu.Lock()
+	tr := e2.ownSyncLocked("Docs", true, time.Now())
+	q := e2.queued["Docs"]
+	e2.mu.Unlock()
+	if tr != "server change" || q {
+		t.Errorf("trigger %q, still queued %v", tr, q)
+	}
+}
+
+// Stop Keeping: checks stop, the stored ETag goes, and a check finishing afterwards doesn't
+// write it again. A sync running before any reconcile isn't checked against.
+func TestRemoteUnkeepAndRunningSync(t *testing.T) {
+	e, clk, d := remoteRig(t)
+	f := e.cfg.Kept[0]
+	state := e.cfg.statePath(f, ".server-etag")
+	check(t, e)
+	if _, err := os.Stat(state); err != nil {
+		t.Fatal("not stored")
+	}
+	d.delay.Store(200)
+	clk.add(time.Minute)
+	d.etag.Store(`"e9"`)
+	e.remoteTick() // in flight while the folder stops being kept
+	time.Sleep(50 * time.Millisecond)
+	e.remoteForget(f)
+	waitFor(t, func() bool {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		return e.live().remoteRun == 0
+	})
+	if _, err := os.Stat(state); !os.IsNotExist(err) {
+		t.Fatal(".server-etag written after Stop Keeping")
+	}
+	clk.add(time.Minute)
+	n := d.calls.Load()
+	check(t, e)
+	if d.calls.Load() != n {
+		t.Fatal("checked after Stop Keeping")
+	}
+	// A sync started before live sync knew the folder: no checks during it.
+	e3, clk3, d3 := remoteRig(t)
+	e3.mu.Lock()
+	delete(e3.live().folders, "Docs")
+	e3.remoteSyncStartedLocked("Docs")
+	e3.mu.Unlock()
+	clk3.add(time.Minute)
+	check(t, e3)
+	if d3.calls.Load() != 0 {
+		t.Fatal("checked during a sync")
 	}
 }
 
@@ -290,5 +354,41 @@ func TestRemoteNoTokenOnRedirect(t *testing.T) {
 	}
 	if rf := remoteOf(e, "Docs"); rf.fails != 1 || rf.known {
 		t.Errorf("redirect taken as an answer: %+v", rf)
+	}
+}
+
+// A single network blip isn't notified; the second failed run in a row is.
+func TestTransientFailureNotifiedOnRepeat(t *testing.T) {
+	blip := "2026/11/15 22:50:01 ERROR : Bisync critical error: dial tcp 10.0.0.1:443: connect: can't assign requested address\n" +
+		"2026/11/15 22:50:01 ERROR : Bisync aborted. Please try again.\n"
+	if !transientNetwork(blip) || !transientNetwork("read tcp: connection reset by peer") || !transientNetwork("lookup cloud.example.com: no such host") {
+		t.Fatal("blips not recognised")
+	}
+	if transientNetwork("ERROR : file.txt: permission denied\nERROR : i/o timeout") || transientNetwork("ERROR : Bisync critical error: something else") {
+		t.Fatal("a real error taken for a blip")
+	}
+	e := pausedRig(t, `,"kept":[{"path":"Docs","stateName":"d"}]`)
+	f := e.cfg.Kept[0]
+	ns := &notifyState{}
+	planNotifications(ns, e.Status(), nil) // seeds
+	e.setStateNet(f, StFailed, "network problem; will retry (see the sync log)", true)
+	if n := planNotifications(ns, e.Status(), nil); len(n) != 0 || !e.Status().Folders[0].Quiet {
+		t.Fatalf("first blip notified: %+v", n)
+	}
+	e.setStateNet(f, StFailed, "network problem; will retry (see the sync log)", true)
+	if n := planNotifications(ns, e.Status(), nil); len(n) != 1 || !strings.Contains(n[0].Title, "Sync failed") {
+		t.Fatalf("second failure in a row: %+v", n)
+	}
+	e.setState(f, StOK, "")
+	planNotifications(ns, e.Status(), nil)
+	e.setStateNet(f, StFailed, "network problem; will retry (see the sync log)", true)
+	if n := planNotifications(ns, e.Status(), nil); len(n) != 0 {
+		t.Fatalf("blip after a success notified: %+v", n)
+	}
+	e.setState(f, StOK, "")
+	planNotifications(ns, e.Status(), nil)
+	e.setState(f, StFailed, "rclone failed; will retry (see the sync log)")
+	if n := planNotifications(ns, e.Status(), nil); len(n) != 1 {
+		t.Fatalf("a real failure not notified: %+v", n)
 	}
 }

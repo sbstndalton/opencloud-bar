@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -41,6 +42,9 @@ type FolderStatus struct {
 	Local       string     `json:"local"`
 	Conflicts   []Conflict `json:"conflicts,omitempty"` // conflict copies in the local copy (conflicts.go)
 	Pending     bool       `json:"pending,omitempty"`   // live sync: a change was seen, a sync follows soon
+	// Quiet: a first failure that looks like a network blip; shown, but not notified (the
+	// next failed run in a row is).
+	Quiet bool `json:"quiet,omitempty"`
 }
 
 type Status struct {
@@ -72,6 +76,8 @@ type Engine struct {
 	// Folders kept while a sync ran: their first sync runs right after it (keys).
 	queued map[string]bool
 	liveS  *liveState // live sync (watch.go)
+	// failStreak: failed runs in a row per folder (a single network blip isn't notified).
+	failStreak map[string]int
 
 	signedOut   bool      // OIDC only: no usable sign-in; nothing runs until the user signs in
 	authRetryAt time.Time // after a transient token-refresh failure, don't retry every tick
@@ -694,11 +700,25 @@ func readReason(file string) string {
 	return strings.TrimSpace(string(b))
 }
 
-func (e *Engine) setState(f KeptFolder, state, detail string) {
+func (e *Engine) setState(f KeptFolder, state, detail string) { e.setStateNet(f, state, detail, false) }
+
+// setStateNet: as setState; transient says a failure looks like a network blip, which isn't
+// notified unless the folder's previous run failed too.
+func (e *Engine) setStateNet(f KeptFolder, state, detail string, transient bool) {
 	e.mu.Lock()
 	ok := false
+	if e.failStreak == nil {
+		e.failStreak = map[string]int{}
+	}
+	switch state {
+	case StFailed:
+		e.failStreak[f.Key()]++
+	case StOK:
+		delete(e.failStreak, f.Key())
+	}
 	if s := e.status[f.Key()]; s != nil {
 		s.State, s.Detail = state, detail
+		s.Quiet = state == StFailed && transient && e.failStreak[f.Key()] == 1
 		if state == StOK {
 			s.LastSuccess = time.Now()
 			ok = true
@@ -1270,8 +1290,29 @@ func (e *Engine) syncFailed(r folderRun, res bisyncResult, out string) {
 			e.setState(f, StFailed, missingRemoteText)
 			return
 		}
+		if transientNetwork(out) {
+			e.setStateNet(f, StFailed, "network problem; will retry (see the sync log)", true)
+			return
+		}
 		e.setState(f, StFailed, "rclone failed; will retry (see the sync log)")
 	}
+}
+
+// reTransient: rclone errors from a network blip (the next run usually works).
+var reTransient = regexp.MustCompile(`(?i)can't assign requested address|connection reset|connection refused|i/o timeout|no such host|TLS handshake timeout|network is unreachable|broken pipe|unexpected EOF|context deadline exceeded|temporary failure in name resolution`)
+
+// transientNetwork: the run's errors are all network trouble.
+func transientNetwork(out string) bool {
+	if !reTransient.MatchString(out) {
+		return false
+	}
+	for _, l := range strings.Split(out, "\n") { // other errors too: not just a blip
+		if strings.Contains(l, "ERROR") && !reTransient.MatchString(l) && !strings.Contains(l, "Bisync aborted") &&
+			!strings.Contains(l, "bisync is EXPERIMENTAL") && !strings.Contains(l, "Failed to bisync") && !strings.Contains(l, "error(s) while") {
+			return false
+		}
+	}
+	return true
 }
 
 // remoteMissingOrEmpty is true when the folder is gone from OpenCloud or holds nothing. A
@@ -1590,7 +1631,8 @@ func (e *Engine) Unkeep(path string, result func(error)) error {
 			}
 		}
 		_ = os.RemoveAll(e.workDir(f))
-		for _, s := range []string{".initialised", ".needs-repair", ".auto-merge", ".drift-parked", ".filters-upgraded"} {
+		e.remoteForget(f) // before its .server-etag goes: a check finishing later doesn't write it
+		for _, s := range []string{".initialised", ".needs-repair", ".auto-merge", ".drift-parked", ".filters-upgraded", ".server-etag"} {
 			_ = os.Remove(e.stateFile(f, s))
 		}
 		_ = os.Remove(e.filtersFile(f))

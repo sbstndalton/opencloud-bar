@@ -119,16 +119,18 @@ type liveFolder struct {
 }
 
 type liveState struct {
-	folders   map[string]*liveFolder
-	triggered map[string]string        // queued by live sync: the next run's trigger ("local change", "server change")
-	remote    map[string]*remoteFolder // server change checks (remote.go)
-	remoteRun int                      // checks running now
-	running   bool
-	stop      chan struct{}
-	kick      chan struct{} // reconcile soon
-	noticed   bool          // the one-time notice was given
-	watchDirs atomic.Int64  // directories watched, all folders
-	maxDirs   atomic.Int64
+	folders    map[string]*liveFolder
+	triggered  map[string]string        // queued by live sync: the next run's trigger ("local change", "server change")
+	remote     map[string]*remoteFolder // server change checks (remote.go)
+	remoteGone map[string]bool          // stopped being kept: no checks, no .server-etag writes
+	fileMu     sync.Mutex               // .server-etag writes and removals
+	remoteRun  int                      // checks running now
+	running    bool
+	stop       chan struct{}
+	kick       chan struct{} // reconcile soon
+	noticed    bool          // the one-time notice was given
+	watchDirs  atomic.Int64  // directories watched, all folders
+	maxDirs    atomic.Int64
 	// callTimeout: the longest a watcher Add/Remove may take (nanoseconds); past it the
 	// watch is dead (fsnotify on Windows can wait forever on a watcher closed meanwhile).
 	callTimeout atomic.Int64
@@ -142,7 +144,7 @@ type liveState struct {
 
 func (e *Engine) live() *liveState {
 	if e.liveS == nil {
-		e.liveS = &liveState{folders: map[string]*liveFolder{}, triggered: map[string]string{}, remote: map[string]*remoteFolder{},
+		e.liveS = &liveState{folders: map[string]*liveFolder{}, triggered: map[string]string{}, remote: map[string]*remoteFolder{}, remoteGone: map[string]bool{},
 			kick: make(chan struct{}, 1), now: time.Now, newWatcher: newRealWatcher,
 			remoteToken: accessToken, remoteETag: davETag}
 		e.liveS.maxDirs.Store(defaultWatchCap())
@@ -928,6 +930,7 @@ func (e *Engine) ownSyncLocked(key string, start bool, began time.Time) string {
 		if s := e.status[key]; s != nil {
 			s.Pending = false
 		}
+		delete(e.queued, key) // this run takes what was queued for it
 		return trigger
 	}
 	if lf != nil {

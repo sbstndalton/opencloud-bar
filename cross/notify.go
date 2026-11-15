@@ -42,6 +42,9 @@ func problemKind(f FolderStatus) (kind string, keep bool) {
 		if f.Detail == "signed out" {
 			return "", false // the sign-out notification covers it
 		}
+		if f.Quiet {
+			return "", true // a single network blip: shown in the menu, notified if it repeats
+		}
 		return "failed", false
 	}
 	return "", false

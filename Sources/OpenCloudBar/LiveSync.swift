@@ -91,7 +91,8 @@ final class LiveSync {
             }
         }
         triggered = triggered.filter { want[$0.key] != nil }
-        remote = remote.filter { want[$0.key] != nil }
+        remote = remote.filter { want[$0.key] != nil || $0.value.syncing }
+        remoteGone = remoteGone.filter { key in !model.config.kept.contains { $0.key == key } }
         for (key, var lf) in folders {
             if let s = lf.stream, want[key]?.2 != lf.sig || !s.stillValid() { s.stop(); lf.stream = nil; folders[key] = lf }
             if want[key] == nil { folders[key] = nil }
@@ -203,6 +204,7 @@ final class LiveSync {
             trigger = t
             folders[key]?.lastLive = Date()
         }
+        model.dequeue(key)   // this run takes what was queued for it
         if var lf = folders[key] {
             lf.local = false; lf.server = false
             lf.own = true
@@ -254,9 +256,11 @@ final class LiveSync {
         var nextAt = Date.distantPast
         var fails = 0
         var busy = false, pending = false
+        var syncing = false   // the app syncs it now (also before live sync knew the folder)
         var gen = 0
     }
     private var remote: [String: Remote] = [:]
+    private var remoteGone = Set<String>()   // stopped being kept: no checks, no .server-etag writes
     private var remoteRunning = 0
 
     private var remoteOn: Bool {
@@ -273,7 +277,8 @@ final class LiveSync {
         for f in c.kept where remoteRunning < Self.remoteParallel {
             var r = remote[f.key] ?? Remote()
             defer { remote[f.key] = r }
-            guard !r.busy, !r.pending, now >= r.nextAt, folders[f.key]?.own != true else { continue }
+            guard !r.busy, !r.pending, !r.syncing, !remoteGone.contains(f.key), now >= r.nextAt,
+                  folders[f.key]?.own != true else { continue }
             guard let url = SharesAPI.davURL(c, f, rel: "") else { r.nextAt = now.addingTimeInterval(Self.remoteMaxBackoff); continue }
             r.busy = true
             remoteRunning += 1
@@ -306,16 +311,18 @@ final class LiveSync {
         }
         r.fails = 0
         r.nextAt = now.addingTimeInterval(Self.remoteEvery + Double.random(in: -Self.remoteJitter...Self.remoteJitter))
-        guard j.gen == r.gen else { return }   // a sync started or ended meanwhile
-        if j.baseline || j.load || !r.known {   // after a sync, or the first check after launch: record
-            if !r.known || r.etag != etag { try? Data((etag + "\n").utf8).write(to: j.state, options: .atomic) }
+        guard j.gen == r.gen, !r.syncing else { return }   // a sync started or ended meanwhile
+        let changedWhileClosed = j.load && !j.baseline && !stored.isEmpty && etag != stored
+        if !changedWhileClosed, j.baseline || j.load || !r.known {   // after a sync, or the first check after launch: record
+            if !r.known || r.etag != etag { storeETag(j, etag) }
             r.etag = etag; r.known = true
             return
         }
-        guard etag != r.etag else { return }
-        r.etag = etag
-        try? Data((etag + "\n").utf8).write(to: j.state, options: .atomic)
-        if var lf = folders[j.key] {
+        guard etag != r.etag || changedWhileClosed else { return }
+        r.etag = etag; r.known = true
+        storeETag(j, etag)
+        var lf = folders[j.key] ?? Folder()
+        do {
             if !lf.pending { lf.pending = true; lf.first = now }
             lf.server = true
             lf.last = now.addingTimeInterval(-Self.quiet)
@@ -324,13 +331,31 @@ final class LiveSync {
         }
     }
 
-    func remoteSyncStarted(_ key: String) { remote[key]?.gen += 1 }
+    /// Writes the baseline, unless the folder stopped being kept meanwhile.
+    private func storeETag(_ j: RemoteJob, _ etag: String) {
+        guard remote[j.key] != nil, !remoteGone.contains(j.key), model.config.kept.contains(where: { $0.key == j.key }) else { return }
+        try? Data((etag + "\n").utf8).write(to: j.state, options: .atomic)
+    }
+
+    /// Stop Keeping: no more checks; the caller removes .server-etag after this.
+    func remoteForget(_ key: String) {
+        remote[key] = nil
+        remoteGone.insert(key)
+    }
+
+    func remoteSyncStarted(_ key: String) {
+        var r = remote[key] ?? Remote()
+        r.gen += 1
+        r.syncing = true
+        remote[key] = r
+    }
 
     func remoteSyncEnded(_ f: KeptFolder, ok: Bool) {
         guard var r = remote[f.key] ?? (remoteOn ? Remote() : nil) else { return }
         defer { remote[f.key] = r }
         r.gen += 1
-        guard ok, remoteOn, let url = SharesAPI.davURL(model.config, f, rel: "") else {
+        r.syncing = false
+        guard ok, remoteOn, !remoteGone.contains(f.key), let url = SharesAPI.davURL(model.config, f, rel: "") else {
             r.known = r.known && ok   // a failed sync: the next check only records
             return
         }

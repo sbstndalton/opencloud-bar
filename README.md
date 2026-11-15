@@ -157,7 +157,7 @@ Changes on this computer: the local copy of each kept folder is watched.
 Changes in OpenCloud (with the browser sign-in):
 
 - About every 30 seconds, each kept folder (from your personal space or a project space) is asked for its ETag, one small WebDAV request (`PROPFIND`, `Depth: 0`, only `getetag`; no listing). OpenCloud updates a folder's ETag whenever anything below it changes, so a changed ETag means the folder changed; it syncs as soon as the 30-second gap and the queue allow.
-- The last ETag is kept per folder (`<folder>.server-etag` in the sync state folder). The first check after the app starts only records it, and after each sync the ETag is read again, so the app's own uploads don't start another sync.
+- The last ETag is kept per folder (`<folder>.server-etag` in the sync state folder; removed by Stop Keeping). If it changed while the app was closed, the first check syncs the folder (once, together with the sync at start). After each sync the ETag is read again, so the app's own uploads don't start another sync. A change made in OpenCloud while that folder is syncing arrives with the next interval sync (or the next change).
 - If the server can't be reached or answers with an error, that folder is checked less often (up to every 5 minutes), without notifications. No checks while paused, signed out, or (Mac) asleep; at most 4 at a time. The sign-in token is only sent to your server: redirects aren't followed.
 
 ## Keeping a folder while a sync runs

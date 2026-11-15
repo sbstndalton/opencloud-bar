@@ -8,13 +8,15 @@ The release workflow copies the section for a tag into that tag's GitHub release
 
 ### Added
 - **Live sync now also notices changes in OpenCloud (preview, same setting).** With **Sync changes right away (preview)** (renamed from "Sync local changes right away"; the config key stays `liveSync`) and the browser sign-in, each kept folder's root (personal and project spaces) is asked for its ETag about every 30 seconds (± 5 s): one WebDAV `PROPFIND`, `Depth: 0`, `getetag` only, at most 4 at once. OpenCloud propagates a change's tree time up to the space root, so the root's ETag changes with anything below it. A changed ETag syncs that folder through the same gap and queue as a local change; Recent Changes says "(after a change in OpenCloud)" (`trigger`: "server change").
-- The last ETag per folder is kept in memory and in `<folder>.server-etag` in the sync state folder. The first check after launch only records it; after each successful sync the ETag is read again as the baseline, so the app's own uploads don't start another sync, and a check that was running when a sync started is ignored.
+- The last ETag per folder is kept in memory and in `<folder>.server-etag` in the sync state folder (removed by Stop Keeping; a check finishing afterwards doesn't write it again). If the ETag differs from the stored one at the first check after launch, the folder syncs (once: a sync that reaches the folder takes the queued one). After each successful sync the ETag is read again as the baseline, so the app's own uploads don't start another sync; no check runs while the folder syncs, and a check that was running when a sync started is ignored.
 - Errors (no connection, 401, 5xx, a redirect) back off per folder, doubling up to 5 minutes, without notifications. No checks while paused, signed out, (Mac) asleep, or with the older rclone sign-in. The bearer token goes only to the server: redirects aren't followed.
+
+### Changed
+- A single sync that fails because of a network blip (rclone: "can't assign requested address", "connection reset", "i/o timeout", "no such host", "TLS handshake timeout" and similar, with no other errors) shows "network problem; will retry" in the menu but isn't notified; a second failed run of that folder in a row is.
 
 ### Not included
 - Folders kept with the older rclone sign-in (no bearer token) get no server checks; they sync at the interval.
-- A change in OpenCloud made while the app syncs that folder is taken into the baseline read after the sync; it syncs at the interval if that sync didn't pick it up.
-- Changes made in OpenCloud while the app was closed aren't compared on the first check; the sync at launch takes care of them.
+- A change made in OpenCloud while that folder is syncing goes into the baseline read after the sync: if that sync didn't take it, it arrives with the next interval sync (or the next change).
 
 ## [1.5.0] - 2026-11-15
 
