@@ -270,12 +270,23 @@ enum Auth {
 
     /// An older version may have left the refresh token in the Keychain: signed in (auth.json)
     /// but no token file yet.
-    static var keychainMigrationPending: Bool { readState() != nil && readRefresh() == nil }
+    static var keychainMigrationPending: Bool {
+        readState() != nil && readRefresh() == nil && !FileManager.default.fileExists(atPath: migrationDoneURL.path)
+    }
+
+    /// Written once the Keychain answered (token moved, missing, or access denied), so a
+    /// declined prompt isn't asked again at every launch: the user signs in again instead.
+    static var migrationDoneURL: URL { Config.supportURL.appendingPathComponent("keychain-migrated") }
+    static func markMigrationDone() {
+        FileManager.default.createFile(atPath: migrationDoneURL.path, contents: Data(), attributes: [.posixPermissions: 0o600])
+    }
 
     /// The one-time move from the Keychain to the file. Blocks while macOS asks for permission,
     /// so it must run off the main thread. Returns true if the token was moved.
     static func migrateFromKeychain() -> Bool {
-        guard let s = readState(), readRefresh() == nil, let t = Keychain.get(s.account) else { return false }
+        guard let s = readState(), readRefresh() == nil else { return false }
+        defer { markMigrationDone() }   // the Keychain answered: never ask again
+        guard let t = Keychain.get(s.account) else { return false }
         // The user may have signed in again while macOS was asking: keep that newer sign-in.
         guard readRefresh() == nil, readState()?.account == s.account else { Keychain.delete(s.account); return false }
         do { try writeRefresh(t) } catch { return false }

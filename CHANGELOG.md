@@ -4,6 +4,11 @@ All notable changes to OpenCloud Bar. The format follows [Keep a Changelog](http
 
 The release workflow copies the section for a tag into that tag's GitHub release, so every version heading must stay in the form `## [X.Y.Z] - date`.
 
+## [1.0.1] - 2026-11-15
+
+### Fixed
+- macOS: after updating from 0.4 or earlier, the one-time Keychain question ("OpenCloud Bar wants to use your confidential information") is asked only once. Before, choosing **Deny** made it come back at every launch. After **Deny**, choose **Sign In Again…**.
+
 ## [1.0.0] - 2026-11-15
 
 The first stable release. It gathers the reliability work and features of 0.4 and 0.5, and adds the items below.
