@@ -1,6 +1,10 @@
 // Command opencloud-bar keeps chosen OpenCloud folders synced both ways with rclone bisync,
-// mounts the rest on demand with rclone mount, and runs everything through an SSH tunnel.
+// mounts the rest on demand with rclone mount. It signs in with the browser (OpenID Connect) or,
+// for older setups, goes through an SSH tunnel with credentials in rclone.conf.
 //
+//	opencloud-bar setup [URL]         sign in with the browser (no SSH key or app token needed)
+//	opencloud-bar logout              forget the sign-in on this computer
+//	opencloud-bar token               print an access token (rclone runs this)
 //	opencloud-bar [run [--no-tray]]   start (tray icon if a desktop is available)
 //	opencloud-bar status              show what's going on
 //	opencloud-bar sync                sync kept folders now
@@ -33,7 +37,7 @@ import (
 )
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `usage: opencloud-bar run [--no-tray] | status | sync | keep PATH [--local DIR] |
+	fmt.Fprintln(os.Stderr, `usage: opencloud-bar setup [URL] | logout | token | run [--no-tray] | status | sync | keep PATH [--local DIR] |
        unkeep PATH | repair PATH | allow-delete PATH | connect | eject | reload | quit`)
 	os.Exit(2)
 }
@@ -60,6 +64,12 @@ func main() {
 		if err := call("POST", "/"+os.Args[1], nil, nil); err != nil {
 			fail(err)
 		}
+	case "setup":
+		cmdSetup(os.Args[2:])
+	case "token":
+		cmdToken()
+	case "logout":
+		cmdLogout()
 	case "keep":
 		fs := flag.NewFlagSet("keep", flag.ExitOnError)
 		local := fs.String("local", "", "absolute local folder (default: localRoot/PATH)")
@@ -142,7 +152,11 @@ func printStatus(st Status) {
 	if st.Message != "" {
 		fmt.Println("  " + st.Message)
 	}
-	fmt.Printf("  tunnel: %v   drive: mounted=%v wanted=%v\n", st.TunnelUp, st.DriveMounted, st.DriveWanted)
+	if st.UseTunnel {
+		fmt.Printf("  tunnel: %v   drive: mounted=%v wanted=%v\n", st.TunnelUp, st.DriveMounted, st.DriveWanted)
+	} else {
+		fmt.Printf("  drive: mounted=%v wanted=%v\n", st.DriveMounted, st.DriveWanted)
+	}
 	for _, f := range st.Folders {
 		line := fmt.Sprintf("  %-30s %s", f.Name, f.State)
 		if f.Detail != "" {

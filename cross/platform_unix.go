@@ -183,3 +183,31 @@ func dialogPickFolder(start, prompt string) (string, bool) {
 	}
 	return strings.TrimRight(strings.TrimSpace(string(out)), "/"), true
 }
+
+// openURL opens a web address in the default browser.
+func openURL(u string) error {
+	if runtime.GOOS == "darwin" {
+		return exec.Command("open", u).Start()
+	}
+	return exec.Command("xdg-open", u).Start()
+}
+
+// dialogEntry asks for one line of text. ok is false if cancelled or if no dialog tool is available.
+func dialogEntry(title, prompt, def string) (string, bool) {
+	if runtime.GOOS == "darwin" {
+		script := fmt.Sprintf(`text returned of (display dialog %q with title %q default answer %q buttons {"Cancel", "OK"} default button "OK")`, prompt, title, def)
+		out, err := exec.Command("osascript", "-e", script).Output()
+		if err != nil {
+			return "", false
+		}
+		return strings.TrimSpace(string(out)), true
+	}
+	if _, err := exec.LookPath("zenity"); err != nil {
+		return "", false
+	}
+	out, err := exec.Command("zenity", "--entry", "--title", title, "--text", prompt, "--entry-text", def, "--width", "420").Output()
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(out)), true
+}

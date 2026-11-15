@@ -14,7 +14,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+/// Entry point. `--token` (rclone's bearer token command) prints a token and exits before any UI starts.
 @main
+enum Launcher {
+    static func main() {
+        if CommandLine.arguments.contains("--token") { Auth.runTokenMode() }
+        OpenCloudBarApp.main()
+    }
+}
+
 struct OpenCloudBarApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
@@ -39,15 +47,19 @@ struct MenuContent: View {
     var body: some View {
         Text(model.summary)
         if let msg = model.lastMessage { Text(msg) }
+        if model.needsSignIn {
+            Button("Set Up / Sign In…") { model.showSetup() }
+        }
         Divider()
 
         Section("OpenCloud Drive") {
             Button("Open OpenCloud Drive") { model.openDrive() }
+                .disabled(model.needsSignIn)
             if model.driveMounted {
                 Button("Eject Drive") { model.ejectDrive() }
             } else {
                 Button(model.driveWanted ? "Connecting…" : "Connect Drive") { model.connectDrive() }
-                    .disabled(model.driveWanted)
+                    .disabled(model.driveWanted || model.needsSignIn)
             }
         }
         Divider()
@@ -70,12 +82,12 @@ struct MenuContent: View {
                 }
             }
             Button("Keep a Folder on This Mac…") { model.keepFolder() }
-                .disabled(model.syncing)
+                .disabled(model.syncing || model.needsSignIn)
         }
         Divider()
 
         Button("Sync Now") { model.syncNow() }
-            .disabled(model.syncing || !model.config.isConfigured)
+            .disabled(model.syncing || model.needsSignIn)
             .keyboardShortcut("s")
         Toggle("Open at Login", isOn: Binding(get: { model.opensAtLogin },
                                               set: { _ in model.toggleOpenAtLogin() }))
@@ -83,6 +95,10 @@ struct MenuContent: View {
             Button("Show Logs") { model.openLogs() }
             Button("Edit Settings File") { model.editConfig() }
             Button("Reload Settings") { model.reloadConfig() }
+            if model.config.isOIDC && !model.needsSignIn {
+                Divider()
+                Button("Sign Out") { model.signOut() }
+            }
         }
         Divider()
         Button("Quit OpenCloud Bar") { NSApp.terminate(nil) }

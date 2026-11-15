@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"fyne.io/systray"
@@ -36,6 +37,8 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 	message := systray.AddMenuItem("", "")
 	message.Disable()
 	message.Hide()
+	setup := systray.AddMenuItem("Set Up / Sign In…", "")
+	setup.Hide()
 	systray.AddSeparator()
 	openDrive := systray.AddMenuItem("Open OpenCloud Drive", "")
 	toggleDrive := systray.AddMenuItem("Connect Drive", "")
@@ -59,6 +62,8 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 	settings := systray.AddMenuItem("Edit Settings File", "")
 	logs := systray.AddMenuItem("Show Logs", "")
 	reload := systray.AddMenuItem("Reload Settings", "")
+	signOut := systray.AddMenuItem("Sign Out", "")
+	signOut.Hide()
 	systray.AddSeparator()
 	quitItem := systray.AddMenuItem("Quit OpenCloud Bar", "")
 
@@ -73,6 +78,10 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 			message.Hide()
 		}
 		systray.SetTooltip("OpenCloud Bar — " + st.Summary)
+		configured := e.cfg.Configured()
+		needSignIn := !configured || st.SignedOut
+		show(setup, needSignIn)
+		show(signOut, e.cfg.OIDC() && configured && !st.SignedOut)
 		if !e.cfg.Mounting() {
 			openDrive.Hide()
 			toggleDrive.Hide()
@@ -101,10 +110,14 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 			enable(s.repair, !st.Syncing)
 			enable(s.allow, !st.Syncing)
 		}
-		enable(keep, !st.Syncing && len(st.Folders) < folderSlots)
+		enable(keep, !needSignIn && !st.Syncing && len(st.Folders) < folderSlots)
 		enable(syncNow, !st.Syncing)
 	}
 	refresh()
+	// First launch (nothing set up yet): start the set-up right away.
+	if e.Status().ConfigError == "" && !e.cfg.Configured() {
+		go setUpAndSignIn(e)
+	}
 
 	go func() {
 		t := time.NewTicker(10 * time.Second)
@@ -181,6 +194,12 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 				} else {
 					e.Connect()
 				}
+			case <-setup.ClickedCh:
+				go setUpAndSignIn(e) // minutes in the browser: don't block the menu
+			case <-signOut.ClickedCh:
+				if dialogConfirm("Sign out of OpenCloud?", "The drive is disconnected and syncing stops. Your kept folders stay on this computer. Sign in again to resume.", "Sign Out") {
+					e.SignOut()
+				}
 			case <-keep.ClickedCh:
 				pickAndKeep(e)
 			case <-syncNow.ClickedCh:
@@ -203,6 +222,46 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 			}
 		}
 	}()
+}
+
+var signingIn atomic.Bool
+
+// setUpAndSignIn asks for the server address, signs in with the browser, then offers to keep a folder.
+func setUpAndSignIn(e *Engine) {
+	if !signingIn.CompareAndSwap(false, true) {
+		return
+	}
+	defer signingIn.Store(false)
+	e.mu.Lock()
+	def := e.cfg.ServerURL
+	e.mu.Unlock()
+	addr, ok := dialogEntry("Set Up OpenCloud Bar", "Your OpenCloud server address, for example https://cloud.example.com", def)
+	if !ok || addr == "" {
+		return
+	}
+	e.setMessage("Waiting for you to sign in in the browser…")
+	e.notify()
+	ctx, cancel := context.WithTimeout(context.Background(), loginTimeout+time.Minute)
+	defer cancel()
+	user, err := signIn(ctx, addr, nil)
+	e.setMessage("")
+	if err != nil {
+		e.notify()
+		dialogAlert("Sign-in failed", err.Error())
+		return
+	}
+	if err := e.Reload(); err != nil {
+		dialogAlert("OpenCloud Bar", "Signed in as "+user+", but the new settings couldn't be applied yet: "+err.Error())
+		return
+	}
+	if !dialogConfirm("Signed in as "+user, "OpenCloud Bar is connecting. Choose a folder from OpenCloud to keep on this computer now?", "Keep a Folder…") {
+		return
+	}
+	// The folder picker browses the drive, which needs a moment to mount.
+	for i := 0; i < 30 && !e.Status().DriveMounted && e.cfg.Mounting(); i++ {
+		time.Sleep(time.Second)
+	}
+	pickAndKeep(e)
 }
 
 func pickAndKeep(e *Engine) {

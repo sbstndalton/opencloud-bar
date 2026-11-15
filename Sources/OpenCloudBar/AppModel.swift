@@ -30,8 +30,13 @@ final class AppModel: ObservableObject {
     @Published private(set) var status: [String: FolderStatus] = [:]   // keyed by KeptFolder.path
     @Published private(set) var lastMessage: String?
     @Published private(set) var configError: String?
+    /// OIDC only: no usable sign-in; nothing runs until the user signs in.
+    @Published private(set) var signedOut = false
     @Published private(set) var opensAtLogin = SMAppService.mainApp.status == .enabled
 
+    private var authBusy = false
+    private var authRetryAt = Date.distantPast
+    private var setupWindow: SetupWindowController?
     private var tunnelRestartAt = Date.distantPast
     private var mount: Process?
     private var mountStartedAt = Date.distantPast
@@ -51,9 +56,47 @@ final class AppModel: ObservableObject {
         let (c, err) = Config.load()
         config = c
         configError = err
+        signedOut = c.isOIDC && c.isConfigured && !Auth.haveCredentials(c)
+        applyEnvironment()
         refreshStatusEntries()
         startTicker()
+        // First launch (nothing set up yet): open the set-up window right away.
+        if configError == nil && !c.isConfigured {
+            DispatchQueue.main.async { [weak self] in self?.showSetup() }
+        }
     }
+
+    /// In OIDC mode rclone gets its bearer token from this app's own `--token` mode.
+    private func applyEnvironment() {
+        Shell.setExtraEnvironment(config.isOIDC ? ["RCLONE_WEBDAV_BEARER_TOKEN_COMMAND": Auth.bearerTokenCommand()] : [:])
+    }
+
+    /// Keeps the cached access token fresh (rclone only asks for a new one after a 401) and
+    /// notices a revoked sign-in.
+    private func checkAuth() {
+        guard !authBusy, Date() >= authRetryAt else { return }
+        authBusy = true
+        let url = config.serverURL ?? ""
+        Task { [weak self] in
+            do { _ = try await Auth.accessToken(serverURL: url) }
+            catch AuthError.signedOut { self?.markSignedOut() }
+            catch {
+                Log.line("token refresh failed: \(error.localizedDescription)")
+                self?.authRetryAt = Date().addingTimeInterval(30)
+            }
+            self?.authBusy = false
+        }
+    }
+
+    private func markSignedOut() {
+        guard !signedOut else { return }
+        signedOut = true
+        lastMessage = Self.signedOutText
+        Log.line("signed out (sign-in missing or revoked)")
+    }
+
+    static let signedOutText = "Signed out: choose Set Up / Sign In…"
+    var needsSignIn: Bool { !config.isConfigured || signedOut }
 
     private func startTicker() {
         guard ticker == nil else { return }
@@ -77,19 +120,26 @@ final class AppModel: ObservableObject {
 
     private func tick() {
         guard !quitting, config.isConfigured, configError == nil else { return }
-        let portOpen = Shell.portOpen(config.localPort)
-        let ours = FileManager.default.fileExists(atPath: controlPath)
-        tunnelUp = portOpen && ours
+        if config.isOIDC {
+            if signedOut { return }
+            checkAuth()
+        }
         driveMounted = Shell.isMounted(config.mountURL)
-
-        if !tunnelUp, Date() >= tunnelRestartAt {
-            if portOpen && !ours {
-                // Something else holds the port. Don't send credentials to it.
-                lastMessage = "Port \(config.localPort) is in use by another program; waiting for it to close."
-                tunnelRestartAt = Date().addingTimeInterval(30)
-            } else {
-                startTunnel()
+        if config.tunnel {
+            let portOpen = Shell.portOpen(config.localPort)
+            let ours = FileManager.default.fileExists(atPath: controlPath)
+            tunnelUp = portOpen && ours
+            if !tunnelUp, Date() >= tunnelRestartAt {
+                if portOpen && !ours {
+                    // Something else holds the port. Don't send credentials to it.
+                    lastMessage = "Port \(config.localPort) is in use by another program; waiting for it to close."
+                    tunnelRestartAt = Date().addingTimeInterval(30)
+                } else {
+                    startTunnel()
+                }
             }
+        } else {
+            tunnelUp = true   // no tunnel: the server is reached directly
         }
         if driveWanted, tunnelUp, mount == nil, Date() >= mountRestartAt { startMount() }
         if !syncing, tunnelUp, Date() >= nextSyncAt, !config.kept.isEmpty { syncNow() }
@@ -289,7 +339,7 @@ final class AppModel: ObservableObject {
     }
 
     func syncNow() {
-        guard !syncing, config.isConfigured, configError == nil else { return }
+        guard !syncing, config.isConfigured, configError == nil, !signedOut else { return }
         nextSyncAt = Date().addingTimeInterval(TimeInterval(max(60, config.syncIntervalSeconds)))
         syncing = true
         let folders = config.kept
@@ -312,7 +362,8 @@ final class AppModel: ObservableObject {
 
     /// Returns true if the server is short on memory (or unreachable) and we should not add load.
     private func serverTooBusy() async -> Bool {
-        guard config.minServerAvailableMiB > 0 else { return false }
+        // The memory check runs over ssh, so it only applies with the tunnel.
+        guard config.tunnel, config.minServerAvailableMiB > 0 else { return false }
         let r = await Shell.run("/usr/bin/ssh", ["-o", "BatchMode=yes", "-o", "ControlMaster=no",
                                                  "-o", "ControlPath=\(controlPath)", config.sshHost,
                                                  "awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo"], timeout: 20)
@@ -330,6 +381,7 @@ final class AppModel: ObservableObject {
     }
 
     private func waitForTunnel() async -> Bool {
+        if !config.tunnel { return true }
         for _ in 0..<20 {
             if FileManager.default.fileExists(atPath: controlPath) && Shell.portOpen(config.localPort) { return true }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
@@ -404,7 +456,11 @@ final class AppModel: ObservableObject {
             status[f.path]?.lastSuccess = Date()
             return true
         }
-        if r.output.contains("Must run --resync") && !r.output.contains("retryable without --resync") {
+        if config.isOIDC && r.output.contains(Auth.signedOutText) {
+            // The token command said the sign-in is gone; don't show rclone's raw error.
+            markSignedOut()
+            status[f.path]?.state = .failed("signed out")
+        } else if r.output.contains("Must run --resync") && !r.output.contains("retryable without --resync") {
             markNeedsRepair(f, "sync history is out of date")
         } else if r.output.contains("Safety abort") || r.output.contains("too many deletes") {
             status[f.path]?.state = .bigDeletion
@@ -492,6 +548,7 @@ final class AppModel: ObservableObject {
 
     /// Lets the user pick a folder in the on-demand drive and keeps it on this Mac from now on.
     func keepFolder() {
+        guard !needsSignIn else { alert("Sign in first", "Choose Set Up / Sign In… in the menu."); return }
         guard driveMounted else {
             alert("Connect the OpenCloud drive first", "Folders are chosen from the drive. Choose Connect Drive, then try again.")
             return
@@ -609,15 +666,53 @@ final class AppModel: ObservableObject {
 
     func reloadConfig() {
         guard !syncing else { alert("A sync is running", "Reload when it finishes."); return }
+        applyLoadedConfig(message: "Settings reloaded")
+    }
+
+    /// Loads config.json and applies it; restarts the connection if connection settings changed
+    /// or the sign-in is gone.
+    private func applyLoadedConfig(message: String?) {
         let (c, err) = Config.load()
         configError = err
         guard err == nil else { return }
-        let reconnect = c.connectionKey != config.connectionKey
+        let out = c.isOIDC && c.isConfigured && !Auth.haveCredentials(c)
+        let wasOut = signedOut
+        let reconnect = c.connectionKey != config.connectionKey || out
         config = c
+        signedOut = out
+        applyEnvironment()
         refreshStatusEntries()
-        lastMessage = "Settings reloaded"
+        lastMessage = out ? Self.signedOutText : message
+        if wasOut && !out {
+            // Just signed in: start right away instead of waiting out old retry timers.
+            authRetryAt = .distantPast; tunnelRestartAt = .distantPast; mountRestartAt = .distantPast; nextSyncAt = Date()
+        }
         if reconnect { restartConnection() }
         startTicker()
+    }
+
+    // MARK: - Set up and sign in
+
+    /// Opens the set-up window (server address + "Sign In with Browser").
+    func showSetup() {
+        if setupWindow == nil { setupWindow = SetupWindowController(model: self) }
+        setupWindow?.show()
+    }
+
+    /// Called by the set-up window after a successful sign-in.
+    func finishSetup(username: String) {
+        setupWindow = nil
+        applyLoadedConfig(message: "Signed in as \(username). Choose Keep a Folder on This Mac… to start.")
+    }
+
+    func signOut() {
+        guard confirm("Sign out of OpenCloud?",
+                      "The drive is disconnected and syncing stops. Your kept folders stay on this Mac. Sign in again to resume.",
+                      button: "Sign Out") else { return }
+        Auth.logout()
+        signedOut = true
+        lastMessage = Self.signedOutText
+        restartConnection()
     }
 
     /// Stops the drive and tunnel so tick() starts them again with the current settings.
@@ -699,7 +794,8 @@ final class AppModel: ObservableObject {
 
     var summary: String {
         if let e = configError { return e }
-        if !config.isConfigured { return "Not set up: open Advanced ▸ Edit Settings File" }
+        if !config.isConfigured { return "Not set up: choose Set Up / Sign In… (or Advanced ▸ Edit Settings File)" }
+        if signedOut { return Self.signedOutText }
         if syncing { return "Syncing…" }
         if let bad = config.kept.first(where: hasProblem) { return "“\(bad.displayName)” needs attention" }
         let times = config.kept.compactMap { status[$0.path]?.lastSuccess }
@@ -711,7 +807,7 @@ final class AppModel: ObservableObject {
     }
 
     var symbol: String {
-        if configError != nil || !config.isConfigured { return "exclamationmark.icloud" }
+        if configError != nil || !config.isConfigured || signedOut { return "exclamationmark.icloud" }
         if syncing { return "arrow.triangle.2.circlepath.icloud" }
         if config.kept.contains(where: hasProblem) { return "exclamationmark.icloud" }
         if !tunnelUp { return "icloud.slash" }

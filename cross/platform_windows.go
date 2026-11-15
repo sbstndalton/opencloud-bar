@@ -121,3 +121,22 @@ func dialogPickFolder(start, prompt string) (string, bool) {
 	}
 	return strings.TrimSpace(string(out)), true
 }
+
+// openURL opens a web address in the default browser. rundll32 passes the whole URL through
+// untouched (explorer.exe mangles URLs containing & in some cases).
+func openURL(u string) error {
+	return exec.Command("rundll32.exe", "url.dll,FileProtocolHandler", u).Start()
+}
+
+// dialogEntry asks for one line of text with a Visual Basic input box. The box returns an empty
+// string when cancelled, so empty means cancelled.
+func dialogEntry(title, prompt, def string) (string, bool) {
+	script := "Add-Type -AssemblyName Microsoft.VisualBasic; " +
+		"[Microsoft.VisualBasic.Interaction]::InputBox(" + psQuote(prompt) + ", " + psQuote(title) + ", " + psQuote(def) + ")"
+	out, err := ps(script).Output()
+	if err != nil {
+		return "", false
+	}
+	v := strings.TrimSpace(string(out))
+	return v, v != ""
+}

@@ -19,11 +19,20 @@ Get the latest build from [Releases](https://github.com/sbstndalton/opencloud-ba
 |---|---|---|
 | `OpenCloud-Bar-macOS.dmg` | macOS 14+ on Apple silicon | Drag the app to Applications. It's ad-hoc signed, so the first time, right-click it and choose **Open**. macOS's own NFS client provides the drive, so nothing else is needed. |
 | `OpenCloud-Bar-Setup-<version>.exe` | Windows 10/11 x64 | Installs the app, rclone and [WinFsp](https://winfsp.dev) (for the drive letter). Adds a Start menu entry, an optional start at sign-in, and the `opencloud-bar` command for terminals. |
-| `opencloud-bar_<version>_amd64.deb` / `_arm64.deb` | Debian, Ubuntu | `sudo apt install ./opencloud-bar_*.deb` pulls in FUSE 3 and the SSH client. |
+| `opencloud-bar_<version>_amd64.deb` / `_arm64.deb` | Debian, Ubuntu | `sudo apt install ./opencloud-bar_*.deb` pulls in FUSE 3 (the SSH client is only recommended, for the legacy tunnel). |
 | `opencloud-bar-<version>.x86_64.rpm` / `.aarch64.rpm` | Fedora, openSUSE | `sudo dnf install ./opencloud-bar-*.rpm` |
 | `opencloud-bar-linux-amd64.tar.gz` / `arm64` | other Linux | The app plus rclone. Install FUSE 3 yourself. |
 
-What no installer can do for you is connect to your own server. You still need SSH key access to the machine running OpenCloud, and an app token for your account (see Requirements below).
+## Getting started
+
+1. Install the app (above).
+2. Open it. The first time, the set-up opens by itself; later it is **Set Up / Sign In…** in the menu. On the command line: `opencloud-bar setup https://cloud.example.com`.
+3. Enter your server address, for example `https://cloud.example.com`. Your browser opens on OpenCloud's own sign-in page. Sign in there.
+4. Choose **Keep a Folder…** to keep a folder on this computer. Everything else is on the drive.
+
+That's all: no SSH key, no app token and no rclone configuration. The app signs in the same way OpenCloud's own desktop client does (OpenID Connect with PKCE). The refresh token is stored in the macOS Keychain, the Windows Credential Manager, or the Linux Secret Service. Without a Secret Service (a headless Linux machine) it is kept in a private file (mode 0600) in the app's settings folder. Choose **Sign Out** to forget it.
+
+It connects straight to your server over HTTPS, so it also works through a proxy such as Cloudflare. Uploads use rclone's `infinitescale` WebDAV vendor, which sends large files in chunks (tus) and so isn't stopped by the proxy's 100 MB request limit.
 
 ## How it works
 
@@ -34,20 +43,14 @@ What no installer can do for you is connect to your own server. You still need S
 | On-demand drive | `rclone nfsmount` on macOS (built-in NFS client, no FUSE or kernel extension), `rclone mount` on Windows and Linux |
 | Kept folders | `rclone bisync` (two-way sync with a state file per folder) |
 
-Traffic goes through an SSH tunnel to the server's local OpenCloud port. This skips any reverse proxy or CDN in front of OpenCloud. Cloudflare in particular closes HTTP/2 connections after about 10,000 requests, which breaks the official desktop client on large trees, and it limits uploads to 100 MB. On the Mac, the tunnel runs as a per-user launchd agent that the app creates and removes. That way macOS Local Network privacy doesn't block it, and it survives an app crash.
+rclone connects directly to your server (`serverURL`) over HTTPS. To authenticate it runs the app's own token command (`opencloud-bar token`, or `OpenCloudBar --token` on the Mac) as its bearer token command. The command prints a cached access token and refreshes it from the stored refresh token when it is nearly out of date. Existing setups that use an SSH tunnel keep working; see [Legacy: SSH tunnel](#legacy-ssh-tunnel) at the end.
 
 ## macOS
 
 ### Requirements
 
 - macOS 14 or later
-- `rclone` (`brew install rclone`)
-- SSH key access to the machine running OpenCloud, with a host alias in `~/.ssh/config`
-- An rclone WebDAV remote for your OpenCloud account, using an app token. Create the token with `opencloud auth-app create` on the server, or in the web UI, then run:
-
-  ```bash
-  rclone config create opencloud webdav vendor=owncloud user=YOURUSER pass=YOURTOKEN url=http://127.0.0.1:19201/remote.php/dav/files/YOURUSER --obscure
-  ```
+- `rclone`, if the app doesn't bundle one (`brew install rclone`)
 
 ### Build and install
 
@@ -59,21 +62,21 @@ Traffic goes through an SSH tunnel to the server's local OpenCloud port. This sk
 ./scripts/install.sh
 ```
 
-On first launch the app writes `~/Library/Application Support/OpenCloudBar/config.json`. Fill in `sshHost` and `davPath` (`/remote.php/dav/files/YOURUSER`), then choose **Advanced ▸ Reload Settings**.
+On first launch the menu shows **Set Up / Sign In…**; see [Getting started](#getting-started). Settings live in `~/Library/Application Support/OpenCloudBar/config.json`.
 
 ## Settings (`config.json`)
 
 | Key | Meaning | Default |
 |---|---|---|
-| `sshHost` | SSH alias of the OpenCloud server | — |
-| `serverPort` / `localPort` | OpenCloud port on the server / local end of the tunnel | 9200 / 19201 |
-| `rcloneRemote` | name of the rclone remote holding the credentials | `opencloud` |
-| `davPath` | WebDAV path of your personal space | — |
+| `serverURL` | your server, for example `https://cloud.example.com` (written by Set Up) | — |
+| `auth` | `oidc` (browser sign-in) or `rclone` (legacy: the named rclone remote holds the credentials) | `oidc` if `serverURL` is set, else `rclone` |
+| `useTunnel` | legacy: send traffic through the SSH tunnel. Set Up leaves it off | `true` only if `sshHost` is set |
+| `webdavVendor` | rclone WebDAV vendor for browser sign-in. `infinitescale` uploads in chunks; `owncloud` uses one request per file | `infinitescale` |
+| `davPath` | WebDAV path of your personal space (written by Set Up) | — |
 | `localRoot` | where kept folders live | `~/OpenCloud/Personal` |
 | `mountPoint` | where the drive is mounted | `~/OpenCloud-Drive` |
 | `cacheMaxSize` / `cacheMaxAge` | on-demand cache limits | `20G` / `72h` |
 | `syncIntervalSeconds` | how often kept folders sync | 300 |
-| `minServerAvailableMiB` | skip a sync run when the server has less free memory than this (Linux servers; set 0 to turn off) | 8192 |
 | `kept` | kept folders: `path` (relative to the space root), `stateName`, optional `extraFilters` | `[]` |
 | `commonFilters` | rclone filter rules for every kept folder | build folders, `node_modules`, `.venv`, temp files |
 
@@ -117,14 +120,37 @@ Extra settings for the port:
 | `mountEnabled` | `false` turns the drive off (servers) |
 | `kept[].localPath` | keep a folder at an absolute local path instead of `localRoot/path` |
 | `rcloneConfig` | path to an rclone.conf |
-| `sshPath` | path to the ssh client |
 | `transfers` / `checkers` | rclone parallelism |
+
+Setting up on the command line: `opencloud-bar setup [URL]` signs in through the browser and writes `serverURL`, `auth` and `davPath` into `config.json` (other keys are kept; if the app is running it reloads). `opencloud-bar logout` forgets the sign-in, and `opencloud-bar token` prints an access token (rclone runs it; you rarely need it). On Windows the tray app runs the console `opencloud-bar.exe` next to it for the token command.
 
 `deploy-ms02/` shows a headless server setup: a systemd user service, plus an `rclone` wrapper that runs the official Docker image with a memory cap.
 
 ## License
 
 MIT
+
+## Legacy: SSH tunnel
+
+Older setups reach the server through an SSH tunnel to its local OpenCloud port and keep the credentials in a named rclone remote. They still work unchanged, and there is nothing to migrate unless you want to: run Set Up and the app switches to browser sign-in. Kept folders then need one **Repair** (a merge) because the server identity changed. New installs don't need any of this.
+
+A config is legacy when it has `sshHost` and no `serverURL`. Settings used only by it:
+
+| Key | Meaning | Default |
+|---|---|---|
+| `sshHost` | SSH alias of the OpenCloud server | — |
+| `serverPort` / `localPort` | OpenCloud port on the server / local end of the tunnel | 9200 / 19201 |
+| `rcloneRemote` | name of the rclone remote holding the credentials | `opencloud` |
+| `sshPath` | path to the ssh client (Linux and Windows) | `ssh` |
+| `minServerAvailableMiB` | skip a sync run when the server has less free memory than this; checked over ssh, so tunnel mode only (0 turns it off) | 8192 |
+
+The rclone remote uses an app token (`opencloud auth-app create` on the server, or in the web UI):
+
+```bash
+rclone config create opencloud webdav vendor=owncloud user=YOURUSER pass=YOURTOKEN url=http://127.0.0.1:19201/remote.php/dav/files/YOURUSER --obscure
+```
+
+On the Mac the tunnel runs as a per-user launchd agent that the app creates and removes, so macOS Local Network privacy doesn't block it and it survives an app crash. This needs SSH key access to the server and the SSH client (recommended, not required, by the Linux packages).
 
 ## Code signing policy
 
@@ -137,4 +163,4 @@ Windows binaries are built from this repository by the [Windows workflow](.githu
 
 ## Privacy
 
-This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it. It only connects to the OpenCloud server and SSH host that you put in its settings file.
+This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it. It only connects to the OpenCloud server you enter (and, for legacy setups, the SSH host in its settings file).

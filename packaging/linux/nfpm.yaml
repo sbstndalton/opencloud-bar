@@ -10,7 +10,7 @@ priority: optional
 maintainer: OpenCloud Bar contributors <noreply@github.com>
 description: |
   Tray app and service for OpenCloud: an on-demand drive (rclone mount) plus
-  folders kept in two-way sync (rclone bisync), over an SSH tunnel. Includes rclone.
+  folders kept in two-way sync (rclone bisync), signed in through the browser. Includes rclone.
 homepage: https://github.com/sbstndalton/opencloud-bar
 license: MIT
 depends:
@@ -19,9 +19,9 @@ recommends:
   - zenity
 overrides:
   deb:
-    depends: [fuse3, openssh-client]
+    recommends: [zenity, openssh-client]   # ssh only for legacy SSH-tunnel configs
   rpm:
-    depends: [fuse3, openssh-clients]
+    recommends: [zenity, openssh-clients]
 contents:
   - src: ${SRC}/opencloud-bar
     dst: /usr/bin/opencloud-bar

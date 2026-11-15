@@ -4,9 +4,15 @@ import Foundation
 enum Shell {
     static let path = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
+    /// Extra variables for every tool we run (rclone's bearer token command in OIDC mode).
+    private static let extraLock = NSLock()
+    nonisolated(unsafe) private static var extra: [String: String] = [:]
+    static func setExtraEnvironment(_ e: [String: String]) { extraLock.lock(); extra = e; extraLock.unlock() }
+
     static func environment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = path
+        extraLock.lock(); env.merge(extra) { _, new in new }; extraLock.unlock()
         return env
     }
 

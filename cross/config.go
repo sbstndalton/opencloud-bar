@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -50,6 +51,57 @@ type Config struct {
 	Checkers              int          `json:"checkers,omitempty"`
 	Kept                  []KeptFolder `json:"kept"`
 	CommonFilters         []string     `json:"commonFilters"`
+
+	// Browser sign-in (see auth.go). All three are optional; a config without them is a
+	// "legacy" config (SSH tunnel + named rclone remote) and behaves exactly as before.
+	ServerURL string `json:"serverURL,omitempty"` // https://cloud.example.com, no trailing slash
+	Auth      string `json:"auth,omitempty"`      // "oidc" or "rclone"; default oidc if serverURL is set
+	UseTunnel *bool  `json:"useTunnel,omitempty"` // default: true if sshHost is set (legacy only)
+
+	// WebdavVendor is rclone's webdav vendor for the OIDC remote. Default "infinitescale": tus
+	// chunked uploads, which pass proxies like Cloudflare (owncloud's single PUT gets 413 over 100 MB).
+	// Ignored for legacy remotes (named rclone remote), which keep their own settings.
+	WebdavVendor string `json:"webdavVendor,omitempty"`
+}
+
+func (c Config) Vendor() string {
+	if c.WebdavVendor != "" {
+		return c.WebdavVendor
+	}
+	return "infinitescale"
+}
+
+const (
+	authOIDC   = "oidc"
+	authRclone = "rclone"
+)
+
+// AuthMode is "oidc" (browser sign-in) or "rclone" (the named rclone remote holds the credentials).
+func (c Config) AuthMode() string {
+	if c.Auth != "" {
+		return c.Auth
+	}
+	if c.ServerURL != "" {
+		return authOIDC
+	}
+	return authRclone
+}
+func (c Config) OIDC() bool { return c.AuthMode() == authOIDC }
+
+// Tunnel reports whether traffic goes through the SSH tunnel to 127.0.0.1:localPort.
+func (c Config) Tunnel() bool {
+	if c.UseTunnel != nil {
+		return *c.UseTunnel
+	}
+	return c.SSHHost != ""
+}
+
+// BaseURL is where rclone connects, before davPath.
+func (c Config) BaseURL() string {
+	if c.Tunnel() {
+		return fmt.Sprintf("http://127.0.0.1:%d", c.LocalPort)
+	}
+	return strings.TrimRight(c.ServerURL, "/")
 }
 
 func defaultConfig() Config {
@@ -126,14 +178,37 @@ func expand(p string) string {
 	return p
 }
 
-func (c Config) Configured() bool { return c.SSHHost != "" && !strings.Contains(c.DavPath, "USER") }
-func (c Config) Mounting() bool   { return c.MountEnabled == nil || *c.MountEnabled }
-func (c Config) RcPort() int      { return c.LocalPort + 100 }
-func (c Config) APIPort() int     { return c.LocalPort + 101 }
-func (c Config) RemoteSpec() string {
-	return fmt.Sprintf("%s,url='http://127.0.0.1:%d%s':", c.RcloneRemote, c.LocalPort, c.DavPath)
+// Configured says the settings are complete. Whether an OIDC config is also signed in is
+// the engine's business (it needs the keyring), not checked here.
+func (c Config) Configured() bool {
+	if strings.Contains(c.DavPath, "USER") {
+		return false
+	}
+	if c.OIDC() {
+		return c.ServerURL != ""
+	}
+	return c.SSHHost != "" || (c.ServerURL != "" && !c.Tunnel())
 }
+func (c Config) Mounting() bool { return c.MountEnabled == nil || *c.MountEnabled }
+func (c Config) RcPort() int    { return c.LocalPort + 100 }
+func (c Config) APIPort() int   { return c.LocalPort + 101 }
+
+// RemoteSpec is the rclone remote for the space root. Legacy: the named remote from rclone.conf.
+// OIDC: an on-the-fly webdav remote; the bearer token comes from RCLONE_WEBDAV_BEARER_TOKEN_COMMAND
+// (see Engine.env), so no rclone.conf is needed.
+func (c Config) RemoteSpec() string {
+	if c.OIDC() {
+		return fmt.Sprintf(":webdav,vendor=%s,url='%s%s':", c.Vendor(), c.BaseURL(), c.DavPath)
+	}
+	return fmt.Sprintf("%s,url='%s%s':", c.RcloneRemote, c.BaseURL(), c.DavPath)
+}
+
+// ServerIdentity changes when the server or account does; kept folders then need a repair.
+// The legacy format is unchanged so existing sync state stays valid.
 func (c Config) ServerIdentity() string {
+	if c.OIDC() {
+		return fmt.Sprintf("oidc|%s|%s", c.ServerURL, c.DavPath)
+	}
 	return fmt.Sprintf("%s|%d|%s|%s", c.SSHHost, c.ServerPort, c.RcloneRemote, c.DavPath)
 }
 func (c Config) Local(f KeptFolder) string {
@@ -206,6 +281,18 @@ func (c Config) Validate() error {
 	if strings.Contains(c.DavPath, "'") {
 		return errors.New("davPath can't contain a single quote")
 	}
+	if strings.ContainsAny(c.WebdavVendor, "',: ") {
+		return errors.New("webdavVendor isn't a valid rclone vendor name")
+	}
+	if strings.Contains(c.ServerURL, "'") {
+		return errors.New("serverURL can't contain a single quote")
+	}
+	if c.Auth != "" && c.Auth != authOIDC && c.Auth != authRclone {
+		return fmt.Errorf(`auth must be "oidc" or "rclone", not %q`, c.Auth)
+	}
+	if c.Tunnel() && c.SSHHost == "" {
+		return errors.New("useTunnel needs sshHost")
+	}
 	return nil
 }
 
@@ -238,6 +325,52 @@ func saveConfig(c Config) error {
 	}
 	tmp := configFile() + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, configFile())
+}
+
+// davPathFor is the WebDAV path of a user's files.
+func davPathFor(username string) string {
+	// PathEscape leaves ' alone, but davPath is embedded in a single-quoted rclone value.
+	return "/remote.php/dav/files/" + strings.ReplaceAll(url.PathEscape(username), "'", "%27")
+}
+
+// applySetup records a finished sign-in in config.json. It edits the file as generic JSON so keys
+// this version doesn't know about (and everything else the user set) are preserved. Without
+// an sshHost the tunnel is off; with one, useTunnel is kept as the user had it.
+func applySetup(serverURL, username string) error {
+	raw := map[string]json.RawMessage{}
+	data, err := os.ReadFile(configFile())
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		d, _ := json.Marshal(defaultConfig())
+		_ = json.Unmarshal(d, &raw)
+	case err != nil:
+		return err
+	default:
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return fmt.Errorf("couldn't read %s: %w", configFile(), err)
+		}
+	}
+	set := func(k string, v any) { b, _ := json.Marshal(v); raw[k] = b }
+	set("serverURL", serverURL)
+	set("auth", authOIDC)
+	set("davPath", davPathFor(username))
+	var ssh string
+	_ = json.Unmarshal(raw["sshHost"], &ssh)
+	if ssh == "" {
+		set("useTunnel", false)
+	}
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(appDir(), 0o700); err != nil {
+		return err
+	}
+	tmp := configFile() + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, configFile())

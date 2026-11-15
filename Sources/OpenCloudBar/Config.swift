@@ -62,6 +62,12 @@ struct Config: Codable {
     var minServerAvailableMiB = 8192
     var stateDir = "~/Library/Application Support/OpenCloudBar/state"
     var kept: [KeptFolder] = []
+    // Browser sign-in (see Auth.swift). All optional: a config without them is a "legacy" config
+    // (SSH tunnel + named rclone remote) and behaves exactly as before. Same keys as the Go app.
+    var serverURL: String?     // https://cloud.example.com, no trailing slash
+    var auth: String?          // "oidc" or "rclone"; default oidc if serverURL is set
+    var useTunnel: Bool?       // default: true if sshHost is set
+    var webdavVendor: String?  // OIDC remote's rclone vendor; default "infinitescale" (tus chunked uploads)
     var commonFilters: [String] = [
         "- *.tmp", "- .*.bundle.tmp", "- *~", "- .DS_Store", "- ._*", "- Thumbs.db",
         "- .sync_*.db", "- .sync_*.db-*", "- .OpenCloudSync.log", "- .owncloudsync.log",
@@ -91,9 +97,29 @@ struct Config: Codable {
         stateDir = try c.decodeIfPresent(String.self, forKey: .stateDir) ?? def.stateDir
         kept = try c.decodeIfPresent([KeptFolder].self, forKey: .kept) ?? def.kept
         commonFilters = try c.decodeIfPresent([String].self, forKey: .commonFilters) ?? def.commonFilters
+        serverURL = try c.decodeIfPresent(String.self, forKey: .serverURL)
+        auth = try c.decodeIfPresent(String.self, forKey: .auth)
+        useTunnel = try c.decodeIfPresent(Bool.self, forKey: .useTunnel)
+        webdavVendor = try c.decodeIfPresent(String.self, forKey: .webdavVendor)
     }
 
-    var isConfigured: Bool { !sshHost.isEmpty && !davPath.contains("USER") }
+    /// "oidc" (browser sign-in) or "rclone" (the named rclone remote holds the credentials).
+    var authMode: String { auth ?? ((serverURL ?? "").isEmpty ? "rclone" : "oidc") }
+    var isOIDC: Bool { authMode == "oidc" }
+    /// Whether traffic goes through the SSH tunnel to 127.0.0.1:localPort.
+    var tunnel: Bool { useTunnel ?? !sshHost.isEmpty }
+    var vendor: String { (webdavVendor ?? "").isEmpty ? "infinitescale" : webdavVendor! }
+    /// Where rclone connects, before davPath.
+    var baseURL: String {
+        tunnel ? "http://127.0.0.1:\(localPort)" : (serverURL ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
+    /// Complete settings. Whether an OIDC config is also signed in is the model's business (Keychain).
+    var isConfigured: Bool {
+        if davPath.contains("USER") { return false }
+        if isOIDC { return !(serverURL ?? "").isEmpty }
+        return !sshHost.isEmpty || (!(serverURL ?? "").isEmpty && !tunnel)
+    }
 
     /// Problems that make the config unsafe to run with (nil if none).
     func validationError() -> String? {
@@ -108,6 +134,10 @@ struct Config: Codable {
             keys.append(k)
         }
         if davPath.contains("'") { return "davPath can't contain a single quote" }
+        if (serverURL ?? "").contains("'") { return "serverURL can't contain a single quote" }
+        if let v = webdavVendor, v.contains(where: { "',: ".contains($0) }) { return "webdavVendor isn't a valid rclone vendor name" }
+        if let a = auth, a != "oidc" && a != "rclone" { return "auth must be \"oidc\" or \"rclone\", not “\(a)”" }
+        if tunnel && sshHost.isEmpty { return "useTunnel needs sshHost" }
         return nil
     }
 
@@ -119,10 +149,16 @@ struct Config: Codable {
     /// and macOS may purge Caches under disk pressure.
     var cacheURL: URL { Config.supportURL.appendingPathComponent("vfs-cache") }
     var rcPort: Int { localPort + 100 }
-    /// rclone remote string that points the named remote at the SSH tunnel.
-    var remoteSpec: String { "\(rcloneRemote),url='http://127.0.0.1:\(localPort)\(davPath)':" }
+    /// rclone remote for the space root. Legacy: the named remote (credentials in rclone.conf).
+    /// OIDC: an on-the-fly webdav remote; the bearer token comes from the environment (AppModel).
+    var remoteSpec: String {
+        isOIDC ? ":webdav,vendor=\(vendor),url='\(baseURL)\(davPath)':" : "\(rcloneRemote),url='\(baseURL)\(davPath)':"
+    }
     /// Identifies "which server, which account" for a kept folder's sync history.
-    var serverIdentity: String { "\(sshHost)|\(serverPort)|\(rcloneRemote)|\(davPath)" }
+    /// The legacy format is unchanged so existing sync state stays valid.
+    var serverIdentity: String {
+        isOIDC ? "oidc|\(serverURL ?? "")|\(davPath)" : "\(sshHost)|\(serverPort)|\(rcloneRemote)|\(davPath)"
+    }
     /// Connection settings: changing any of these restarts the tunnel and drive.
     /// The rclone to run: rclonePath if set, else the copy inside the app bundle, else Homebrew's.
     var rclone: String {
@@ -134,7 +170,10 @@ struct Config: Codable {
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) } ?? "/opt/homebrew/bin/rclone"
     }
 
-    var connectionKey: String { "\(sshHost)|\(serverPort)|\(localPort)|\(rcloneRemote)|\(davPath)|\(mountPoint)|\(rclonePath)" }
+    var connectionKey: String {
+        "\(sshHost)|\(serverPort)|\(localPort)|\(rcloneRemote)|\(davPath)|\(mountPoint)|\(rclonePath)"
+            + "|\(serverURL ?? "")|\(authMode)|\(tunnel)|\(webdavVendor ?? "")"
+    }
 
     static func expand(_ p: String) -> String { (p as NSString).expandingTildeInPath }
     /// Case- and Unicode-insensitive form of a path, matching how macOS disks compare names.
@@ -166,6 +205,37 @@ struct Config: Codable {
         } catch {
             return (Config(), "Couldn't read the settings file (\(error.localizedDescription)). Fix it and choose Reload Settings.")
         }
+    }
+
+    /// WebDAV path of a user's files.
+    static func davPath(for username: String) -> String {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/'")   // ' would end the single-quoted rclone value
+        return "/remote.php/dav/files/" + (username.addingPercentEncoding(withAllowedCharacters: allowed) ?? username)
+    }
+
+    /// Records a finished sign-in in config.json. Edited as generic JSON so keys this version
+    /// doesn't know about are kept. Without an sshHost the tunnel is off; with one, useTunnel
+    /// stays as the user had it.
+    static func applySetup(serverURL: String, username: String) throws {
+        var obj: [String: Any] = [:]
+        if let data = try? Data(contentsOf: fileURL) {
+            guard let o = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw AuthError.message("Couldn't read the settings file")
+            }
+            obj = o
+        } else if let d = try? JSONEncoder().encode(Config()), let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+            obj = o
+        }
+        obj["serverURL"] = serverURL
+        obj["auth"] = "oidc"
+        obj["davPath"] = davPath(for: username)
+        if ((obj["sshHost"] as? String) ?? "").isEmpty { obj["useTunnel"] = false }
+        try FileManager.default.createDirectory(at: supportURL, withIntermediateDirectories: true)
+        let data = try JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+        let tmp = fileURL.appendingPathExtension("tmp")
+        FileManager.default.createFile(atPath: tmp.path, contents: data, attributes: [.posixPermissions: 0o600])
+        _ = try FileManager.default.replaceItemAt(fileURL, withItemAt: tmp)
     }
 
     func save() {

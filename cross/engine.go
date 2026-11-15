@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -45,6 +46,8 @@ type Status struct {
 	DriveMounted bool           `json:"driveMounted"`
 	DriveWanted  bool           `json:"driveWanted"`
 	Syncing      bool           `json:"syncing"`
+	UseTunnel    bool           `json:"useTunnel"`
+	SignedOut    bool           `json:"signedOut,omitempty"` // browser sign-in is missing or was revoked
 	Folders      []FolderStatus `json:"folders"`
 	ConfigError  string         `json:"configError,omitempty"`
 }
@@ -59,6 +62,9 @@ type Engine struct {
 	message  string
 	syncing  bool
 	quitting bool
+
+	signedOut   bool      // OIDC only: no usable sign-in; nothing runs until the user signs in
+	authRetryAt time.Time // after a transient token-refresh failure, don't retry every tick
 
 	tunnel        *exec.Cmd
 	tunnelDone    chan struct{}
@@ -82,8 +88,70 @@ func NewEngine() *Engine {
 	cfg, err := loadConfig()
 	e := &Engine{cfg: cfg, cfgErr: err, status: map[string]*FolderStatus{},
 		mountWanted: cfg.Mounting(), mountBackoff: 5 * time.Second, changed: make(chan struct{}, 1)}
+	e.signedOut = cfg.OIDC() && cfg.Configured() && !haveCredentials(cfg)
 	e.refreshStatusLocked()
 	return e
+}
+
+const signedOutMessage = "Signed out: choose Set Up / Sign In…"
+
+// markSignedOut stops all activity until the user signs in again.
+func (e *Engine) markSignedOut() {
+	e.mu.Lock()
+	e.signedOut = true
+	e.message = signedOutMessage
+	e.mu.Unlock()
+	e.logLine("signed out (sign-in missing or revoked)")
+	e.notify()
+}
+
+// authReady is true when work may proceed. In OIDC mode it also keeps the cached access token
+// fresh (rclone only asks for a new one after a 401), and notices a revoked sign-in.
+func (e *Engine) authReady() bool {
+	e.mu.Lock()
+	cfg := e.cfg
+	skip := e.quitting || e.cfgErr != nil || !cfg.OIDC() || !cfg.Configured()
+	out, retry := e.signedOut, e.authRetryAt
+	e.mu.Unlock()
+	if skip {
+		return true
+	}
+	if out {
+		return false
+	}
+	if time.Now().Before(retry) {
+		return true
+	}
+	if _, err := accessToken(cfg.ServerURL); errors.Is(err, errSignedOut) {
+		e.markSignedOut()
+		return false
+	} else if err != nil {
+		e.logLine("token refresh failed: %v", err)
+		e.mu.Lock()
+		e.authRetryAt = time.Now().Add(30 * time.Second)
+		e.mu.Unlock()
+	}
+	return true
+}
+
+// SignOut forgets the sign-in, stops the drive and waits for the next sign-in.
+func (e *Engine) SignOut() {
+	logout()
+	e.mu.Lock()
+	e.signedOut = true
+	e.message = signedOutMessage
+	m, t := e.mount, e.tunnel
+	if m != nil {
+		e.unmountRequest = true
+	}
+	e.mu.Unlock()
+	if m != nil {
+		_ = e.unmount(m)
+	}
+	if t != nil && t.Process != nil {
+		_ = t.Process.Kill()
+	}
+	e.notify()
 }
 
 func (e *Engine) notify() {
@@ -142,21 +210,27 @@ func (e *Engine) tunnelOurs() bool {
 }
 
 func (e *Engine) tick() {
+	if !e.authReady() {
+		return
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.quitting || e.cfgErr != nil || !e.cfg.Configured() {
 		return
 	}
-	open := portOpen(e.cfg.LocalPort)
-	if !e.tunnelOurs() && time.Now().After(e.tunnelRetryAt) {
-		if open {
-			e.message = fmt.Sprintf("Port %d is in use by another program; waiting for it to close.", e.cfg.LocalPort)
-			e.tunnelRetryAt = time.Now().Add(30 * time.Second)
-		} else {
-			e.startTunnelLocked()
+	up := true // without a tunnel the server is reached directly
+	if e.cfg.Tunnel() {
+		open := portOpen(e.cfg.LocalPort)
+		if !e.tunnelOurs() && time.Now().After(e.tunnelRetryAt) {
+			if open {
+				e.message = fmt.Sprintf("Port %d is in use by another program; waiting for it to close.", e.cfg.LocalPort)
+				e.tunnelRetryAt = time.Now().Add(30 * time.Second)
+			} else {
+				e.startTunnelLocked()
+			}
 		}
+		up = e.tunnelOurs() && open
 	}
-	up := e.tunnelOurs() && open
 	if e.cfg.Mounting() && e.mountWanted && up && e.mount == nil && time.Now().After(e.mountRetryAt) {
 		e.startMountLocked()
 	}
@@ -165,7 +239,17 @@ func (e *Engine) tick() {
 	}
 }
 
-func (e *Engine) logFile(name string) *os.File {
+func (e *Engine) logFile(name string) *os.File { return openLogFile(name) }
+
+// appLog writes to app.log from code that has no Engine (sign-in, token command).
+func appLog(format string, a ...any) {
+	if f := openLogFile("app.log"); f != nil {
+		fmt.Fprintf(f, "%s %s\n", time.Now().Format(time.RFC3339), fmt.Sprintf(format, a...))
+		f.Close()
+	}
+}
+
+func openLogFile(name string) *os.File {
 	_ = os.MkdirAll(logDir(), 0o700)
 	p := filepath.Join(logDir(), name)
 	if st, err := os.Stat(p); err == nil && st.Size() > 5_000_000 {
@@ -189,6 +273,10 @@ func (e *Engine) env() []string {
 	env := os.Environ()
 	if e.cfg.RcloneConfig != "" {
 		env = append(env, "RCLONE_CONFIG="+expand(e.cfg.RcloneConfig))
+	}
+	if e.cfg.OIDC() {
+		// rclone runs this at start and again after a 401; see accessToken in auth.go.
+		env = append(env, "RCLONE_WEBDAV_BEARER_TOKEN_COMMAND="+tokenCommand())
 	}
 	return env
 }
@@ -231,6 +319,9 @@ func (e *Engine) startTunnelLocked() {
 }
 
 func (e *Engine) waitForTunnel() bool {
+	if !e.cfg.Tunnel() {
+		return true
+	}
 	for i := 0; i < 20; i++ {
 		e.mu.Lock()
 		ok := e.tunnelOurs()
@@ -437,7 +528,7 @@ func (e *Engine) markNeedsRepair(f KeptFolder, reason string) {
 func (e *Engine) SyncNow() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if !e.syncing && e.cfgErr == nil && e.cfg.Configured() {
+	if !e.syncing && e.cfgErr == nil && e.cfg.Configured() && !e.signedOut {
 		e.startSyncAllLocked()
 	}
 }
@@ -469,7 +560,8 @@ func (e *Engine) startSyncAllLocked() {
 }
 
 func (e *Engine) serverTooBusy() string {
-	if e.cfg.MinServerAvailableMiB <= 0 {
+	// The memory check runs over ssh, so it only applies with the tunnel.
+	if !e.cfg.Tunnel() || e.cfg.MinServerAvailableMiB <= 0 {
 		return ""
 	}
 	out, err := e.run(20*time.Second, nil, e.cfg.SSH(), "-n", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
@@ -603,6 +695,10 @@ func (e *Engine) syncFolder(f KeptFolder, mode syncMode) bool {
 		return true
 	}
 	switch {
+	case e.cfg.OIDC() && strings.Contains(out, errSignedOut.Error()):
+		// The token command said the sign-in is gone; don't show rclone's raw error.
+		e.markSignedOut()
+		e.setState(f, StFailed, "signed out")
 	case strings.Contains(out, "Must run --resync") && !strings.Contains(out, "retryable without --resync"):
 		e.markNeedsRepair(f, "sync history is out of date")
 	case strings.Contains(out, "Safety abort") || strings.Contains(out, "too many deletes"):
@@ -796,14 +892,25 @@ func (e *Engine) Reload() error {
 		e.mu.Unlock()
 		return err
 	}
+	out := cfg.OIDC() && cfg.Configured() && !haveCredentials(cfg) // keyring access: not under the lock
 	e.mu.Lock()
 	if e.syncing {
 		e.mu.Unlock()
 		return fmt.Errorf("a sync is running; reload when it finishes")
 	}
 	reconnect := cfg.SSHHost != e.cfg.SSHHost || cfg.LocalPort != e.cfg.LocalPort || cfg.ServerPort != e.cfg.ServerPort ||
-		cfg.DavPath != e.cfg.DavPath || cfg.RcloneRemote != e.cfg.RcloneRemote || cfg.MountPoint != e.cfg.MountPoint
+		cfg.DavPath != e.cfg.DavPath || cfg.RcloneRemote != e.cfg.RcloneRemote || cfg.MountPoint != e.cfg.MountPoint ||
+		cfg.ServerURL != e.cfg.ServerURL || cfg.AuthMode() != e.cfg.AuthMode() || cfg.Tunnel() != e.cfg.Tunnel()
+	wasOut := e.signedOut
 	e.cfg, e.cfgErr = cfg, nil
+	e.signedOut = out
+	if out {
+		reconnect = true // signed out: stop the drive and tunnel
+		e.message = signedOutMessage
+	} else if wasOut {
+		// Just signed in: start right away instead of waiting out old retry timers.
+		e.message, e.authRetryAt, e.tunnelRetryAt, e.mountRetryAt, e.nextSyncAt = "", time.Time{}, time.Time{}, time.Time{}, time.Time{}
+	}
 	e.refreshStatusLocked()
 	m, t := e.mount, e.tunnel
 	e.mu.Unlock()
@@ -860,7 +967,8 @@ func (e *Engine) Status() Status {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	st := Status{Message: e.message, Syncing: e.syncing, DriveWanted: e.mountWanted && e.cfg.Mounting()}
-	st.TunnelUp = e.tunnelOurs() && portOpen(e.cfg.LocalPort)
+	st.UseTunnel, st.SignedOut = e.cfg.Tunnel(), e.cfg.OIDC() && e.signedOut
+	st.TunnelUp = !e.cfg.Tunnel() || (e.tunnelOurs() && portOpen(e.cfg.LocalPort))
 	st.DriveMounted = e.cfg.Mounting() && isMounted(e.mountTarget())
 	if e.cfgErr != nil {
 		st.ConfigError = e.cfgErr.Error()
@@ -890,7 +998,9 @@ func (e *Engine) Status() Status {
 	case st.ConfigError != "":
 		st.Summary = st.ConfigError
 	case !e.cfg.Configured():
-		st.Summary = "Not set up: edit " + configFile()
+		st.Summary = "Not set up: choose Set Up / Sign In… (or edit " + configFile() + ")"
+	case st.SignedOut:
+		st.Summary = signedOutMessage
 	case e.syncing:
 		st.Summary = "Syncing…"
 	case problem != "":
