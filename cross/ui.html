@@ -291,11 +291,11 @@ function folderDetail(f, busy) {
     subfolderBox(f));
 }
 function filtersChangeText(name) {
-  return "Change what syncs in " + name + "?\n\nAfter this, the folder needs a one-time Repair before it syncs again. A Repair merges both sides: the newer copy of each file wins, the older copy is kept in the backups, and nothing is deleted.";
+  return "Change what syncs in " + name + "?\n\nNothing is deleted from OpenCloud, and the copy on this computer stays where it is. " + name + " syncs again right after, comparing both sides: the newer copy of each file wins, and replaced files are kept in the backups.";
 }
 
 // Choose Subfolders: a checklist of the folder's subfolders in OpenCloud, two levels deep.
-// Unchecked ones get an exclude rule "- /<name>/**" (other rules stay as they are).
+// Unchecked ones get a rule "- /<name>/**" at the top of the folder's excludes (see setSubfolders).
 let subPick = null; // { folder, items, children: { name: items }, changes: { "A" | "A/B": included } }
 async function loadSubfolders(f, name) {
   try {
@@ -318,7 +318,7 @@ function subfolderBox(f) {
     cb.checked = !parentOff && included(rel, it);
     cb.disabled = parentOff || !it.choosable;
     cb.addEventListener("change", () => { subPick.changes[rel] = cb.checked; drawFolders(); });
-    return h("label", { class: "check", title: it.choosable ? "" : "This name can't be chosen here; use the excludes above" }, cb, h("span", { text: it.name + "/" }));
+    return h("label", { class: "check", title: it.choosable ? "" : "This folder's name can't be unchecked here" }, cb, h("span", { text: it.name + "/" }));
   };
   const list = h("div", { class: "card" });
   if (!subPick.items.length) list.append("No subfolders in OpenCloud.");
@@ -335,11 +335,11 @@ function subfolderBox(f) {
     }
   }
   const changed = Object.keys(subPick.changes).length > 0;
-  box.append(h("p", { class: "hint", text: "Unchecked subfolders stop syncing. Nothing is deleted: they stay in OpenCloud, and the copy already on this computer stays where it is (no longer synced; delete it yourself if you don't need it)." }),
+  box.append(h("p", { class: "hint", text: "Unchecked folders stop syncing. Nothing is deleted from OpenCloud, and the copy on this computer stays where it is; move it to the trash yourself if you don't need it." }),
     list,
     h("div", { class: "row" },
       h("button", { class: "btn primary", disabled: !changed, onclick: () => {
-        if (!confirm(filtersChangeText(f.name) + "\n\nUnchecked subfolders stay in OpenCloud. Their copy on this computer stays where it is, no longer synced; move it to the trash yourself if you don't need it.")) return;
+        if (!confirm(filtersChangeText(f.name).replace("?\n\n", "?\n\nUnchecked folders stop syncing. "))) return;
         const changes = subPick.changes; subPick = null;
         save({ keptSubfolders: { [f.path]: changes } });
       } }, "Save Subfolders"),
@@ -350,6 +350,7 @@ async function stopKeeping(f) {
   let text = "Your changes are synced to OpenCloud first. Then the copy on this computer is moved to the trash. The folder stays in OpenCloud.";
   if (f.state === "failed" && (f.detail || "").includes("is empty or missing")) text = "The copy on this computer is missing or empty, so there is nothing to sync or move to the trash. OpenCloud Bar just stops keeping it here. The folder stays in OpenCloud.";
   try { const u = await get("unsynced?path=" + encodeURIComponent(f.path)); if (u.unsynced > 0) text += "\n\n" + u.unsynced + " file(s) in it are never synced (build folders, excluded items) and exist only here. They move with it."; } catch (e) { /* ignore */ }
+  if ((f.extraFilters || []).some(l => /^- \/.+\/\*\*$/.test(l))) text += "\n\nSubfolders you unchecked are in OpenCloud as they were; their old copy on this computer goes to the trash with the folder.";
   if (confirm("Stop keeping " + f.name + " here?\n\n" + text)) act(() => post("unkeep", { path: f.path }), "Started; see the status above");
 }
 
@@ -516,7 +517,7 @@ async function syncPage(main, r) {
   main.append(h("div", { class: "card" }, h("h3", { text: "Common excludes" }),
     h("p", { class: "hint", text: "Files matching these rules are never synced, in any kept folder. One rule per line, like - *.tmp (exclude) or + keep.txt (include)." }),
     ta, h("div", { class: "row" },
-      h("button", { class: "btn", onclick: () => save({ commonFilters: ta.value.split("\n") }) }, "Save Excludes"),
+      h("button", { class: "btn", onclick: () => { if (confirm(filtersChangeText("every kept folder").replace("every kept folder syncs", "Every kept folder syncs"))) save({ commonFilters: ta.value.split("\n") }); } }, "Save Excludes"),
       h("button", { class: "btn", onclick: () => { ta.value = S.defaults.commonFilters.join("\n"); save({ commonFilters: S.defaults.commonFilters }); } }, "Restore Defaults"))));
   const blocked = h("div", { class: "card" }, h("h3", { text: "File names the server doesn't accept" }), h("p", { class: "hint", text: "Loading…" }));
   main.append(blocked);

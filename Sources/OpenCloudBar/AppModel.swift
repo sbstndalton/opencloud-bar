@@ -64,6 +64,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var activeKey: String?
     /// Folders kept while a sync ran: their first sync runs right after it (keys).
     private var queuedKeys = Set<String>()
+    /// The folders the running sync still has to do (from its start, server check included).
+    @Published private(set) var runRemaining = Set<String>()
+
+    /// Whether a folder's excludes must wait: it is being synced, or the running sync has yet
+    /// to do it.
+    func folderBusy(_ f: KeptFolder) -> Bool { activeKey == f.key || runRemaining.contains(f.key) }
     @Published private(set) var activeFiles = 0
     private var activeIndex = 0, activeCount = 0
     private var settingsWindow: SettingsWindowController?
@@ -470,12 +476,14 @@ final class AppModel: ObservableObject {
         }
         guard !folders.isEmpty else { return }
         syncing = true
+        runRemaining = Set(folders.map(\.key))
         syncTask = Task { [weak self] in
             guard let self else { return }
             if await self.serverTooBusy() {
                 for f in folders { self.status[f.key]?.state = .skipped("server busy") }
             } else {
                 for (i, f) in folders.enumerated() where !Task.isCancelled && !self.quitting {
+                    defer { self.runRemaining.remove(f.key) }
                     self.activeIndex = i + 1
                     self.activeCount = folders.count
                     // skip folders removed while this run was waiting
@@ -501,6 +509,7 @@ final class AppModel: ObservableObject {
     /// Ends a sync activity, then starts the first sync of folders kept meanwhile.
     private func syncEnded() {
         syncing = false
+        runRemaining = []
         guard !queuedKeys.isEmpty, !config.paused, !quitting else { return }
         let q = queuedKeys
         queuedKeys = []
@@ -675,9 +684,10 @@ final class AppModel: ObservableObject {
         return true
     }
 
-    /// The one merge after an upgrade changed only the app's own filter line: a normal
-    /// backed-up merge, tried once, not counted toward the daily automatic-merge limit. An
-    /// emptied side is never merged into.
+    /// The one merge after the folder's filters changed (an upgrade changed the app's own
+    /// filter line, or the user changed the excludes or subfolders): a normal backed-up merge,
+    /// tried once, not counted toward the daily automatic-merge limit. An emptied side is never
+    /// merged into.
     private func filtersUpgradeMerge(_ run: FolderRun) async -> Bool {
         let f = run.f
         if localMissingOrEmpty(run.local) {
@@ -688,8 +698,8 @@ final class AppModel: ObservableObject {
         }
         let marker = stateFile(f, ".filters-upgraded")
         try? FileManager.default.removeItem(at: marker)   // once: if it fails, Repair as usual
-        Log.line("\(f.path): the app's filters changed with the upgrade; merging once, newer copy wins")
-        let (ok, outcome) = await merge(run, kind: "merge (app filters updated)")
+        Log.line("\(f.path): the excludes changed; merging once, newer copy wins")
+        let (ok, outcome) = await merge(run, kind: "merge (excludes changed)")
         if !ok, outcome == .interrupted { FileManager.default.createFile(atPath: marker.path, contents: nil) }
         return ok
     }
@@ -1097,21 +1107,25 @@ final class AppModel: ObservableObject {
 
     /// The text of the confirmation before a folder's excludes change (Change Excludes and
     /// Choose Subfolders): what rclone then needs, and that it deletes nothing.
-    static let filtersChangeText = "After this, the folder needs a one-time Repair before it syncs again. A Repair merges both sides: the newer copy of each file wins, the older copy is kept in the backups, and nothing is deleted."
+    static func filtersChangeText(_ name: String) -> String {
+        "Nothing is deleted from OpenCloud, and the copy on this Mac stays where it is. \(name) syncs again right after, comparing both sides: the newer copy of each file wins, and replaced files are kept in the backups."
+    }
+
+    enum SaveResult { case saved, cancelled, failed(String) }
 
     /// Choose Subfolders ▸ Save: asks, then applies the checklist's changes to the folder's
-    /// excludes like Change Excludes. Returns an error to show, nil when done or cancelled.
-    func saveSubfolders(_ f: KeptFolder, changes: [String: Bool]) async -> String? {
-        guard let cur = config.kept.first(where: { $0.key == f.key }) else { return "That folder isn't kept any more." }
-        let next = SubfolderRules.apply(cur.extraFilters, changes)
-        if next == cur.extraFilters { return nil }
+    /// excludes like Change Excludes.
+    func saveSubfolders(_ f: KeptFolder, changes: [String: Bool]) async -> SaveResult {
+        guard let cur = config.kept.first(where: { $0.key == f.key }) else { return .failed("That folder isn't kept any more.") }
+        if SubfolderRules.apply(cur.extraFilters, changes) == cur.extraFilters { return .saved }
         let off = changes.contains { !$0.value }
         guard confirm("Change which subfolders of “\(f.displayName)” sync?",
-                      Self.filtersChangeText + (off ? "\n\nUnchecked subfolders stay in OpenCloud. Their copy on this Mac stays where it is, no longer synced; move it to the Trash yourself if you don't need it." : ""),
-                      button: "Change Subfolders") else { return nil }
-        return await updateConfig { c in
+                      (off ? "Unchecked folders stop syncing. " : "") + Self.filtersChangeText("“\(f.displayName)”"),
+                      button: "Change Subfolders") else { return .cancelled }
+        if let e = await updateConfig({ c in
             if let i = c.kept.firstIndex(where: { $0.key == f.key }) { c.kept[i].extraFilters = SubfolderRules.apply(c.kept[i].extraFilters, changes) }
-        }
+        }) { return .failed(e) }
+        return .saved
     }
 
     /// The folders directly in `path` (relative to the space root) of f's space, from the server.
@@ -1142,6 +1156,9 @@ final class AppModel: ObservableObject {
                 text = "Your changes are synced to OpenCloud first. Then the copy on this Mac is moved to the Trash. The folder stays in OpenCloud and in the OpenCloud drive."
                 if let n = await countUnsyncedFiles(f), n > 0 {
                     text += "\n\n\(n) file(s) in it are never synced (for example build folders, node_modules, or folders excluded in Settings). They exist only on this Mac and will go to the Trash with it."
+                }
+                if !SubfolderRules.excluded(f.extraFilters).isEmpty {
+                    text += "\n\nSubfolders you unchecked are in OpenCloud as they were; their old copy on this Mac goes to the Trash with the folder."
                 }
             }
             guard confirm("Stop keeping “\(f.displayName)” on this Mac?", text, button: "Stop Keeping") else { return }
@@ -1351,8 +1368,12 @@ final class AppModel: ObservableObject {
         let reconnect = c.connectionKey != old.connectionKey
         // A folder's own excludes may change while another folder syncs: each run uses the
         // folder as it was when the run started, and the change applies from its next sync.
-        let changedKeys = Set(c.kept.filter { n in old.kept.first { $0.key == n.key }?.extraFilters != n.extraFilters }.map(\.key))
-        if syncing && (reconnect || c.commonFilters != old.commonFilters || changedKeys.contains(activeKey ?? "")) {
+        let changedKeys = Set(c.kept.filter { n in
+            guard let o = old.kept.first(where: { $0.key == n.key }) else { return false }
+            return o.extraFilters != n.extraFilters
+        }.map(\.key))
+        let commonChanged = c.commonFilters != old.commonFilters
+        if syncing && (reconnect || commonChanged || c.kept.contains { changedKeys.contains($0.key) && folderBusy($0) }) {
             return "A sync is running. Try again when it finishes."
         }
         do { try c.write() } catch { return "Couldn't save the settings: \(error.localizedDescription)" }
@@ -1360,6 +1381,20 @@ final class AppModel: ObservableObject {
         config = c
         applyEnvironment()
         refreshStatusEntries()
+        // Changed excludes: rclone wants these folders' sync started over. That is one
+        // automatic backed-up merge each, right away (filtersUpgradeMerge), not a Repair.
+        let refiltered = c.kept.filter { f in commonChanged ? old.kept.contains { $0.key == f.key } : changedKeys.contains(f.key) }
+        if !refiltered.isEmpty {
+            for f in refiltered where FileManager.default.fileExists(atPath: stateFile(f, ".initialised").path) {
+                FileManager.default.createFile(atPath: stateFile(f, ".filters-upgraded").path, contents: nil)
+            }
+            queuedKeys.formUnion(refiltered.map(\.key))
+            if !syncing, !config.paused {
+                let q = queuedKeys
+                queuedKeys = []
+                startSyncAll(manual: false, only: q)
+            }
+        }
         if c.syncIntervalSeconds != old.syncIntervalSeconds {
             nextSyncAt = min(nextSyncAt, Date().addingTimeInterval(TimeInterval(max(60, c.syncIntervalSeconds))))
         }

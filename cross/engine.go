@@ -1054,7 +1054,9 @@ func (e *Engine) syncFolder(f KeptFolder, mode syncMode) bool {
 	return true
 }
 
-// filtersUpgradeMerge is the one merge after an upgrade changed only the app's own filter line.
+// filtersUpgradeMerge is the one merge after the folder's filters changed: an upgrade changed
+// the app's own filter line, or the user changed the excludes (Change Excludes, Choose
+// Subfolders, the common excludes; the marker is written when the change is applied).
 // It is a normal backed-up merge (newer wins, older copies kept), tried once, and doesn't count
 // toward the daily automatic-merge limit. An emptied side is never merged into.
 func (e *Engine) filtersUpgradeMerge(r folderRun) bool {
@@ -1069,8 +1071,8 @@ func (e *Engine) filtersUpgradeMerge(r folderRun) bool {
 	}
 	marker := r.cfg.statePath(f, ".filters-upgraded")
 	_ = os.Remove(marker) // once: if it doesn't work, the folder asks for Repair as usual
-	e.logLine("%s: the app's filters changed with the upgrade; merging once, newer copy wins", f.Path)
-	ok, outcome := e.merge(r, "merge (app filters updated)", "")
+	e.logLine("%s: the excludes changed; merging once, newer copy wins", f.Path)
+	ok, outcome := e.merge(r, "merge (excludes changed)", "")
 	if !ok && outcome == outcomeInterrupted {
 		_ = os.WriteFile(marker, nil, 0o600) // it didn't happen: try again next time
 	}
@@ -1320,17 +1322,40 @@ func (e *Engine) exclusive(body func()) error {
 	return nil
 }
 
-// syncFinished ends a sync activity, then starts the first sync of folders kept meanwhile.
+// syncFinished ends a sync activity. Settings saved while it ran are applied first, so the
+// next run uses them; then the folders kept (or whose excludes changed) meanwhile sync.
 func (e *Engine) syncFinished() {
 	e.mu.Lock()
 	e.syncing = false
-	if len(e.queued) > 0 && !e.quitting && e.cfgErr == nil && e.cfg.Configured() && !e.signedOut && !e.cfg.Paused {
+	e.mu.Unlock()
+	if reloadRetrying.Load() {
+		if err := e.Reload(); err == nil {
+			e.logLine("settings applied after the sync finished")
+		}
+	}
+	e.mu.Lock()
+	e.startQueuedLocked()
+	e.mu.Unlock()
+	e.notify()
+}
+
+// startQueuedLocked syncs the queued folders now, unless something else runs or syncing is off.
+func (e *Engine) startQueuedLocked() {
+	if len(e.queued) > 0 && !e.syncing && !e.quitting && e.cfgErr == nil && e.cfg.Configured() && !e.signedOut && !e.cfg.Paused {
 		only := e.queued
 		e.queued = nil
 		e.startRunLocked(false, only)
 	}
-	e.mu.Unlock()
-	e.notify()
+}
+
+// queueLocked adds folders to the next queued run.
+func (e *Engine) queueLocked(keys ...string) {
+	if e.queued == nil {
+		e.queued = map[string]bool{}
+	}
+	for _, k := range keys {
+		e.queued[k] = true
+	}
 }
 
 func (e *Engine) find(path string) (KeptFolder, bool) {
@@ -1472,10 +1497,7 @@ func (e *Engine) keepIn(space *SpaceRef, path, localPath string) error {
 	e.refreshStatusLocked()
 	if e.syncing {
 		// Keeping doesn't wait for a running sync: the new folder syncs right after it.
-		if e.queued == nil {
-			e.queued = map[string]bool{}
-		}
-		e.queued[f.Key()] = true
+		e.queueLocked(f.Key())
 		if s := e.status[f.Key()]; s != nil {
 			s.Detail = "starts when the running sync finishes"
 		}
@@ -1579,6 +1601,18 @@ func (e *Engine) Reload() error {
 		cfg.DavPath != e.cfg.DavPath || cfg.RcloneRemote != e.cfg.RcloneRemote || cfg.MountPoint != e.cfg.MountPoint ||
 		cfg.ServerURL != e.cfg.ServerURL || cfg.AuthMode() != e.cfg.AuthMode() || cfg.Tunnel() != e.cfg.Tunnel()
 	remount := cfg.BwLimitUp != e.cfg.BwLimitUp || cfg.BwLimitDown != e.cfg.BwLimitDown // the drive's limit
+	// Folders whose excludes changed (their own, or the common ones): rclone will want their
+	// sync started over. That is one automatic backed-up merge, right away, not a Repair.
+	var refiltered []KeptFolder
+	if e.cfgErr == nil {
+		for _, f := range cfg.Kept {
+			for _, old := range e.cfg.Kept {
+				if old.Key() == f.Key() && filtersText(e.cfg, old) != filtersText(cfg, f) {
+					refiltered = append(refiltered, f)
+				}
+			}
+		}
+	}
 	wasOut := e.signedOut
 	e.cfg, e.cfgErr = cfg, nil
 	e.signedOut = out
@@ -1590,6 +1624,15 @@ func (e *Engine) Reload() error {
 		e.message, e.authRetryAt, e.tunnelRetryAt, e.mountRetryAt, e.nextSyncAt = "", time.Time{}, time.Time{}, time.Time{}, time.Time{}
 	}
 	e.refreshStatusLocked()
+	for _, f := range refiltered {
+		if exists(cfg.statePath(f, ".initialised")) {
+			_ = os.WriteFile(cfg.statePath(f, ".filters-upgraded"), nil, 0o600)
+		}
+		e.queueLocked(f.Key())
+	}
+	if !reconnect {
+		e.startQueuedLocked()
+	}
 	m, t := e.mount, e.tunnel
 	e.mu.Unlock()
 	if remount && !reconnect && m != nil {

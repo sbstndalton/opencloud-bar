@@ -74,7 +74,7 @@ On the Mac, **Settings…** (⌘,) opens these pages. Windows and Linux have the
 | **General** | Open at Login, the version, update checks (**Check Now**) and notifications. With an SSH tunnel: whether to check the server's memory before syncing. Under **Advanced**: the SSH tunnel settings, the rclone path, **Open Settings File** and **Reload Settings**. |
 | **Logs** | The app log, the drive and tunnel logs, and each folder's sync log: the last 3000 lines, refreshed every 2 seconds, with errors in red. **Copy**, **Reveal in Finder** and **Clear…**. |
 
-Changing exclude rules (for one folder or for all) means each affected folder needs a one-time **Repair** before it syncs again. A Repair merges both sides and never deletes anything; the window asks before it applies the change.
+Changing exclude rules (for one folder or for all) asks first. Each affected folder then syncs right away, comparing both sides once (newer copy wins, replaced files kept in the backups, nothing deleted), without a Repair. A filters file changed by hand outside the app still asks for a Repair.
 
 ### Command line (Windows and Linux)
 
@@ -112,14 +112,15 @@ You can sync only some subfolders of a kept folder:
 
 The list comes from OpenCloud: the folder's subfolders, and with **Show Subfolders** the ones inside those. Uncheck what you don't need here and save.
 
-- Each unchecked subfolder becomes one exclude rule in the folder's excludes, `- /<name>/**` (or `- /<name>/<name>/**`), with `* ? [ ] { } \` in names escaped. The checklist only adds and removes rules of exactly that form. Your own rules stay as they are and where they are; a rule you wrote by hand in that form shows as unchecked.
-- Saving works like changing the excludes: the folder then needs a one-time **Repair**, a merge of both sides that deletes nothing.
-- Nothing is deleted on either side. An unchecked subfolder stays in OpenCloud, and its copy on this computer stays where it is, no longer synced. Move it to the trash yourself if you don't need it. Checking it again brings it back with the Repair (the newer copy of each file wins).
+- Each unchecked subfolder becomes one exclude rule in the folder's excludes, `- /<name>/**` (or `- /<name>/<name>/**`), with `* ? [ ] { } \` in names escaped. Names match exactly, case included (`Photos` and `photos` are two folders).
+- These rules go first, as one block at the top of the folder's excludes: rclone uses the first rule that matches, so an unchecked subfolder stays unsynced whatever your own rules say. Your own rules follow, in their order and unchanged. A rule you wrote by hand in exactly that form counts as the checklist's: it shows as unchecked, and checking that subfolder removes it.
+- After saving, the folder syncs right away, comparing both sides once: the newer copy of each file wins, and replaced files are kept in the backups (see [Safety](#safety)). No Repair is needed. Changing a folder's excludes, or the common excludes, works the same way.
+- Nothing is deleted on either side. An unchecked subfolder stays in OpenCloud, and its copy on this computer stays where it is, no longer synced. Move it to the trash yourself if you don't need it; **Stop Keeping** moves it to the trash with the rest of the folder. Checking it again brings it back with that comparison.
 - A folder name with control characters or leading or trailing spaces can't be unchecked here; use the excludes instead.
 
 ## Keeping a folder while a sync runs
 
-**Keep a Folder…** and **Keep from a Space…** work while a sync is running. The folder is added at once and its first sync starts as soon as the running sync finishes. Only the new folder syncs then; the others follow at the next interval. A folder's own excludes or subfolders can be changed while another folder syncs; only the folder being synced right now waits.
+**Keep a Folder…** and **Keep from a Space…** work while a sync is running. The folder is added at once and its first sync starts as soon as the running sync finishes. Only the new folder syncs then; the others follow at the next interval. On the Mac, a folder's own excludes or subfolders can be changed while a sync runs, unless that sync still has to do this folder. On Windows and Linux they are saved at once and applied when the running sync finishes; the folder then syncs right after.
 
 ## Conflicts
 

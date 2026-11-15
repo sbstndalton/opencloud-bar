@@ -105,10 +105,13 @@ func excludedSubfolders(rules []string) map[string]bool {
 	return out
 }
 
-// setSubfolders applies the checklist's changes (subfolder → included) to rules. Rules of
-// other forms, and checklist rules for subfolders not in changes, stay as they are and where
-// they are; a newly excluded subfolder's rule goes at the end. Unchecking a folder also drops
-// the rules for its own subfolders (it excludes them all already).
+// setSubfolders applies the checklist's changes (subfolder → included) to rules. The rules
+// of the checklist's form come first, as one block (rclone uses the first rule that matches,
+// so an unchecked subfolder stays unsynced whatever the other rules say); the other rules
+// follow in their order, unchanged. In the block, rules for subfolders not in changes keep
+// their order and new ones go at its end. Unchecking a folder also drops the rules for its
+// own subfolders (it excludes them all already). Names match exactly, case included: Photos
+// and photos are two folders on the server.
 func setSubfolders(rules []string, changes map[string]bool) ([]string, error) {
 	for sub := range changes {
 		parts := strings.Split(sub, "/")
@@ -121,54 +124,42 @@ func setSubfolders(rules []string, changes map[string]bool) ([]string, error) {
 			}
 		}
 	}
-	drop := func(s string) bool {
-		if inc, ok := changes[s]; ok {
-			return inc // included now: its rule goes; still excluded: the rule stays where it is
-		}
+	parentOff := func(s string) bool {
 		if i := strings.Index(s, "/"); i > 0 {
-			if inc, ok := changes[s[:i]]; ok && !inc {
-				return true // inside a folder that is now excluded as a whole
-			}
+			inc, ok := changes[s[:i]]
+			return ok && !inc
 		}
 		return false
 	}
-	out := []string{}
+	var managed, other []string
 	have := map[string]bool{}
 	for _, l := range rules {
-		if s, ok := parseSubfolderRule(l); ok {
-			if drop(s) {
-				continue
-			}
-			have[foldKey(s)] = true
+		s, ok := parseSubfolderRule(l)
+		if !ok {
+			other = append(other, l)
+			continue
 		}
-		out = append(out, l)
+		if inc, changed := changes[s]; (changed && inc) || parentOff(s) || have[s] {
+			continue // included now, inside a folder now excluded as a whole, or a duplicate
+		}
+		have[s] = true
+		managed = append(managed, l)
 	}
 	var add []string
 	for sub, inc := range changes {
-		if !inc && !have[foldKey(sub)] {
-			if i := strings.Index(sub, "/"); i > 0 {
-				if pinc, ok := changes[sub[:i]]; (ok && !pinc) || excludedIn(out, sub[:i]) {
-					continue // its parent is excluded: this rule would add nothing
-				}
-			}
-			add = append(add, sub)
-			have[foldKey(sub)] = true
+		if inc || have[sub] || parentOff(sub) {
+			continue
 		}
+		if i := strings.Index(sub, "/"); i > 0 && have[sub[:i]] {
+			continue // its parent is excluded already: this rule would add nothing
+		}
+		add = append(add, sub)
 	}
-	sort.Slice(add, func(i, j int) bool { return foldKey(add[i]) < foldKey(add[j]) })
+	sort.Strings(add)
 	for _, s := range add {
-		out = append(out, subfolderRule(s))
+		managed = append(managed, subfolderRule(s))
 	}
-	return out, nil
-}
-
-func excludedIn(rules []string, sub string) bool {
-	for _, l := range rules {
-		if s, ok := parseSubfolderRule(l); ok && foldKey(s) == foldKey(sub) {
-			return true
-		}
-	}
-	return false
+	return append(managed, other...), nil
 }
 
 // Subfolder is one line of the checklist.
@@ -214,6 +205,9 @@ func (e *Engine) Subfolders(key, sub string) ([]Subfolder, error) {
 	if strings.Contains(sub, "/") {
 		return nil, errors.New("only two levels of subfolders can be chosen")
 	}
+	if sub != "" && !subfolderName(sub) { // "..", ".", control characters
+		return nil, fmt.Errorf("%q isn't a subfolder name", sub)
+	}
 	p := f.Path
 	if sub != "" {
 		p += "/" + sub
@@ -238,17 +232,14 @@ func (e *Engine) Subfolders(key, sub string) ([]Subfolder, error) {
 			}
 		}
 	}
-	ex := map[string]bool{}
-	for s := range excludedSubfolders(rules) {
-		ex[foldKey(s)] = true
-	}
+	ex := excludedSubfolders(rules)
 	out := []Subfolder{}
 	for _, d := range dirs {
 		rel := d
 		if sub != "" {
 			rel = sub + "/" + d
 		}
-		out = append(out, Subfolder{Name: d, Excluded: ex[foldKey(rel)], Choosable: subfolderName(d)})
+		out = append(out, Subfolder{Name: d, Excluded: ex[rel], Choosable: subfolderName(d)})
 	}
 	return out, nil
 }

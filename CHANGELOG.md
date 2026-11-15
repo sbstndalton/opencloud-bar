@@ -7,12 +7,13 @@ The release workflow copies the section for a tag into that tag's GitHub release
 ## [1.3.0] - 2026-11-15
 
 ### Added
-- **Choose Subfolders…** for a kept folder (Mac: Settings ▸ Kept Folders and the folder's Actions menu; Windows and Linux: the folder's detail on the settings page). A checklist of the folder's subfolders in OpenCloud, two levels deep. An unchecked subfolder becomes the exclude rule `- /<name>/**` in that folder's excludes (glob characters in names are escaped). Other rules, including hand-written ones, are kept as they are and where they are.
-  - Saving asks first and works like changing the excludes: the folder then needs a one-time Repair, which deletes nothing. Unchecked subfolders stay in OpenCloud, and their copy on this computer stays there, no longer synced.
+- **Choose Subfolders…** for a kept folder (Mac: Settings ▸ Kept Folders and the folder's Actions menu; Windows and Linux: the folder's detail on the settings page). A checklist of the folder's subfolders in OpenCloud, two levels deep. An unchecked subfolder becomes the exclude rule `- /<name>/**` (glob characters escaped, names matched exactly). These rules go first in the folder's excludes, so they win; your own rules follow, unchanged and in order.
+  - Saving asks first. Nothing is deleted: unchecked subfolders stay in OpenCloud, and their copy on this computer stays there, no longer synced. Stop Keeping says that this copy goes to the trash with the folder.
 
 ### Changed
+- **No more Repair after changing what syncs.** After Choose Subfolders, a folder's excludes or the common excludes change, the affected folders sync right away with one automatic comparison of both sides (newer copy wins, replaced files kept in the backups, an emptied side never merged into). It doesn't count toward the once-a-day automatic merge.
 - **Keep a Folder…** and **Keep from a Space…** no longer wait for a running sync. The folder is saved at once and syncs as soon as the running sync finishes, on its own.
-- A folder's own excludes can be changed while another folder syncs; only the folder being synced waits. Windows and Linux: **Save Excludes** for a folder now asks first, as on the Mac.
+- Mac: a folder's own excludes can be changed while a sync runs, unless that sync still has to do the folder. Windows and Linux: settings saved during a sync are applied before the next run starts, and **Save Excludes** asks first, as on the Mac.
 
 ### Not included
 - The checklist lists subfolders from OpenCloud only. A subfolder that exists only on this computer isn't listed.

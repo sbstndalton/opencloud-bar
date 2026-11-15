@@ -60,30 +60,31 @@ enum SubfolderRules {
         return names.joined(separator: "/")
     }
 
-    static func excluded(_ rules: [String]) -> Set<String> {
-        Set(rules.compactMap { parse($0).map(Config.foldKey) })
-    }
+    /// Names match exactly, case included: Photos and photos are two folders on the server.
+    static func excluded(_ rules: [String]) -> Set<String> { Set(rules.compactMap(parse)) }
 
-    /// Applies the checklist's changes (subfolder → included). Other rules, and checklist rules
-    /// for subfolders not changed, stay where they are; new rules go at the end. Unchecking a
-    /// folder drops its own subfolders' rules (it excludes them already).
+    /// Applies the checklist's changes (subfolder → included). The checklist's rules come first,
+    /// as one block (rclone uses the first rule that matches), the other rules follow in their
+    /// order. In the block, unchanged rules keep their order and new ones go at its end.
+    /// Unchecking a folder drops its own subfolders' rules (it excludes them already).
     static func apply(_ rules: [String], _ changes: [String: Bool]) -> [String] {
-        func parent(_ s: String) -> String? { s.contains("/") ? String(s.split(separator: "/")[0]) : nil }
-        var out: [String] = [], have = Set<String>()
+        func parentOff(_ s: String) -> Bool {
+            guard s.contains("/") else { return false }
+            return changes[String(s.split(separator: "/")[0])] == false
+        }
+        var managed: [String] = [], other: [String] = [], have = Set<String>()
         for l in rules {
-            if let s = parse(l) {
-                if let inc = changes[s], inc { continue }
-                if let p = parent(s), changes[p] == false { continue }
-                have.insert(Config.foldKey(s))
-            }
-            out.append(l)
+            guard let s = parse(l) else { other.append(l); continue }
+            if changes[s] == true || parentOff(s) || have.contains(s) { continue }
+            have.insert(s)
+            managed.append(l)
         }
         let add = changes.filter { sub, inc in
-            guard !inc, !have.contains(Config.foldKey(sub)) else { return false }
-            if let p = parent(sub), changes[p] == false || excluded(out).contains(Config.foldKey(p)) { return false }
+            if inc || have.contains(sub) || parentOff(sub) { return false }
+            if sub.contains("/"), have.contains(String(sub.split(separator: "/")[0])) { return false }
             return true
-        }.keys.sorted { Config.foldKey($0) < Config.foldKey($1) }
-        return out + add.map(rule)
+        }.keys.sorted()
+        return managed + add.map(rule) + other
     }
 }
 
@@ -101,19 +102,19 @@ struct ChooseSubfoldersSheet: View {
     private var excluded: Set<String> { SubfolderRules.excluded(currentRules) }
     private var currentRules: [String] { model.config.kept.first { $0.key == folder.key }?.extraFilters ?? folder.extraFilters }
 
-    private func included(_ rel: String) -> Bool { changes[rel] ?? !excluded.contains(Config.foldKey(rel)) }
+    private func included(_ rel: String) -> Bool { changes[rel] ?? !excluded.contains(rel) }
 
     private func toggle(_ rel: String, on: Bool, enabled: Bool, name: String) -> some View {
         Toggle(isOn: Binding(get: { on }, set: { changes[rel] = $0 })) { Text(name + "/") }
             .toggleStyle(.checkbox)
             .disabled(!enabled)
-            .help(SubfolderRules.choosable(name) ? "" : "This name can't be chosen here; use the excludes instead.")
+            .help(SubfolderRules.choosable(name) ? "" : "This folder's name can't be unchecked here.")
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Choose Subfolders of “\(folder.displayName)”").font(.headline)
-            Text("Unchecked subfolders stop syncing to this Mac. Nothing is deleted: they stay in OpenCloud, and the copy already on this Mac stays where it is, no longer synced. Your own exclude rules stay as they are.")
+            Text("Unchecked folders stop syncing to this Mac. Nothing is deleted from OpenCloud, and the copy on this Mac stays where it is; move it to the Trash yourself if you don't need it.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if let top {
                 List {
@@ -147,9 +148,13 @@ struct ChooseSubfoldersSheet: View {
                 Button("Save") {
                     busy = true
                     Task {
-                        let e = await model.saveSubfolders(folder, changes: changes)
+                        let r = await model.saveSubfolders(folder, changes: changes)
                         busy = false
-                        if let e { error = e } else { close() }
+                        switch r {
+                        case .saved: close()
+                        case .cancelled: break   // the sheet stays, choices as they were
+                        case .failed(let e): error = e
+                        }
                     }
                 }
                 .keyboardShortcut(.defaultAction)

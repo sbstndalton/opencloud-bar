@@ -228,7 +228,7 @@ struct FoldersPage: View {
             EmptyView()
         }
         Button("Choose Subfolders…") { choosingSubfolders = f }
-            .disabled(model.needsSignIn || model.activeKey == f.key)
+            .disabled(model.needsSignIn || model.folderBusy(f))
         Divider()
         Button("Stop Keeping on This Mac…") { model.stopKeeping(f) }.disabled(model.syncing)
     }
@@ -258,18 +258,18 @@ struct FoldersPage: View {
                     Text("Subfolders").font(.headline)
                     Spacer()
                     Button("Choose Subfolders…") { choosingSubfolders = f }
-                        .disabled(model.needsSignIn || model.activeKey == f.key)
+                        .disabled(model.needsSignIn || model.folderBusy(f))
                 }
-                Text("Choose which subfolders sync to this Mac; unchecked ones become exclude rules below.")
+                Text("Choose which subfolders sync to this Mac.")
                     .font(.caption).foregroundStyle(.secondary)
                 Text("Excludes for this folder").font(.headline)
                 Text("Files matching these rules are not synced, on top of the excludes under Sync. One rule per line, for example “- /Old backups/**”.")
                     .font(.caption).foregroundStyle(.secondary)
                 FilterEditor(rules: f.extraFilters,
-                             disabledReason: model.activeKey == f.key ? "Wait for this folder's sync to finish to change its excludes." : nil,
+                             disabledReason: model.folderBusy(f) ? "Wait for this folder's sync to finish to change its excludes." : nil,
                              restoreDefaults: nil) { lines in
                     guard model.confirm("Change the excludes for “\(f.displayName)”?",
-                                        AppModel.filtersChangeText,
+                                        AppModel.filtersChangeText("“\(f.displayName)”"),
                                         button: "Change Excludes") else { return nil }
                     return await model.updateConfig { c in
                         if let i = c.kept.firstIndex(where: { $0.key == f.key }) { c.kept[i].extraFilters = lines }

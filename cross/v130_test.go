@@ -38,20 +38,31 @@ func TestSetSubfoldersKeepsHandRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"+ /keep.txt", "- *.iso", "- /Media/Raw/**", "- /Gone/**", "- /Music/Live/**", "- /New/**"}
+	// The checklist's rules come first (rclone uses the first match); the others follow, in order.
+	want := []string{"- /Media/Raw/**", "- /Gone/**", "- /Music/Live/**", "- /New/**", "+ /keep.txt", "- *.iso"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got  %q\nwant %q", got, want)
 	}
 	// Unchecking a folder drops its subfolders' rules (it excludes them already) and adds one.
 	got, _ = setSubfolders(want, map[string]bool{"Music": false, "Music/Other": false})
-	if want := []string{"+ /keep.txt", "- *.iso", "- /Media/Raw/**", "- /Gone/**", "- /New/**", "- /Music/**"}; !reflect.DeepEqual(got, want) {
+	if want := []string{"- /Media/Raw/**", "- /Gone/**", "- /New/**", "- /Music/**", "+ /keep.txt", "- *.iso"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("parent: %q", got)
 	}
 	// No change: the same rules, in the same order; nothing is added twice.
 	if again, _ := setSubfolders(got, map[string]bool{"New": false}); !reflect.DeepEqual(again, got) {
 		t.Errorf("not idempotent: %q", again)
 	}
-	for _, bad := range []string{"a/b/c", "", " x", "a\nb"} {
+	// Names match exactly: Photos and photos are two folders.
+	if got, _ := setSubfolders([]string{"- /Photos/**"}, map[string]bool{"photos": true}); !reflect.DeepEqual(got, []string{"- /Photos/**"}) {
+		t.Errorf("case folded: %q", got)
+	}
+	if got, _ := setSubfolders([]string{"- /Photos/**"}, map[string]bool{"photos": false}); !reflect.DeepEqual(got, []string{"- /Photos/**", "- /photos/**"}) {
+		t.Errorf("case folded: %q", got)
+	}
+	if ex := excludedSubfolders([]string{"- /Photos/**"}); !ex["Photos"] || ex["photos"] {
+		t.Errorf("excluded: %v", ex)
+	}
+	for _, bad := range []string{"a/b/c", "", " x", "a\nb", "..", "a/..", "."} {
 		if _, err := setSubfolders(nil, map[string]bool{bad: false}); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
@@ -70,7 +81,7 @@ func TestSubfoldersSavedLikeExcludes(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := e.config()
-	if want := []string{"- *.psd", `- /Big \[1\]/**`}; !reflect.DeepEqual(c.Kept[0].ExtraFilters, want) || len(c.Kept[1].ExtraFilters) != 0 {
+	if want := []string{`- /Big \[1\]/**`, "- *.psd"}; !reflect.DeepEqual(c.Kept[0].ExtraFilters, want) || len(c.Kept[1].ExtraFilters) != 0 {
 		t.Errorf("filters: %q / %q", c.Kept[0].ExtraFilters, c.Kept[1].ExtraFilters)
 	}
 	data, _ := os.ReadFile(configFile())
