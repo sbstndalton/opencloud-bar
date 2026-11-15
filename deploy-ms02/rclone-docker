@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# rclone via the official Docker image, capped at 3 GB, with $HOME mounted at the same path
+# so local paths, the work dir and the config file work unchanged. Used by opencloud-bar.
+exec docker run --rm -i --init --memory 3g --memory-swap 3g --network host \
+  --user "$(id -u):$(id -g)" -e HOME="$HOME" ${RCLONE_CONFIG:+-e RCLONE_CONFIG="$RCLONE_CONFIG"} \
+  -v "$HOME:$HOME" -w "$HOME" rclone/rclone:latest "$@"

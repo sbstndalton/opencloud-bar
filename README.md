@@ -56,13 +56,45 @@ On first launch the app writes `~/Library/Application Support/OpenCloudBar/confi
 ## Safety notes
 
 - A folder's first sync is a `--resync --resync-mode newer`. It merges both sides, keeps the newer copy of each file, and never deletes anything.
-- If bisync ever loses track (for example, files changed mid-run), the app schedules another merge-style resync instead of guessing.
 - "Stop keeping" runs a final sync first and only moves the local copy to the Trash if that sync succeeds.
 - Ejecting the drive in Finder keeps it ejected until you choose **Connect Drive**. If rclone crashes, the app remounts automatically.
 - Eject and Quit wait for files written to the drive to finish uploading. The upload cache lives in Application Support, not Caches, so macOS won't purge it.
 - If bisync's history goes stale, or the server settings change, the folder is marked **needs repair** rather than resynced automatically. Repair is a merge: the newer copy of each file wins and nothing is deleted.
 - If more than half a folder's files would be deleted, bisync refuses. The menu then offers **Allow Large Deletion…**.
 - Kept folder paths are limited to about 90 characters. That's a limit of rclone bisync's history file names.
+
+## Linux and Windows
+
+`cross/` is a Go port of the same engine: the same `config.json` format, the same rclone backbone and the same safety rules. It has a tray icon, a command-line interface, and a headless mode for servers.
+
+```bash
+cd cross && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o opencloud-bar .
+```
+
+```bash
+cd cross && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "-H windowsgui" -o opencloud-bar.exe .
+```
+
+| | Linux | Windows |
+|---|---|---|
+| On-demand drive | `rclone mount` (FUSE 3) | `rclone mount` to a drive letter such as `O:` (needs [WinFsp](https://winfsp.dev)) |
+| Settings file | `~/.config/OpenCloudBar/config.json` | `%AppData%\OpenCloudBar\config.json` |
+| Tray | StatusNotifier (most desktops) | notification area |
+| Dialogs | `zenity` | built-in Windows dialogs (via PowerShell) |
+
+Start it with `opencloud-bar run`, or `opencloud-bar run --no-tray` on a server. Then control it with `status`, `sync`, `keep PATH [--local DIR]`, `unkeep PATH`, `repair PATH`, `allow-delete PATH`, `connect`, `eject`, `reload` and `quit`. On Windows, build a second copy without `-H windowsgui` to use the commands from a terminal.
+
+Extra settings for the port:
+
+| Key | Meaning |
+|---|---|
+| `mountEnabled` | `false` turns the drive off (servers) |
+| `kept[].localPath` | keep a folder at an absolute local path instead of `localRoot/path` |
+| `rcloneConfig` | path to an rclone.conf |
+| `sshPath` | path to the ssh client |
+| `transfers` / `checkers` | rclone parallelism |
+
+`deploy-ms02/` shows a headless server setup: a systemd user service, plus an `rclone` wrapper that runs the official Docker image with a memory cap.
 
 ## License
 
