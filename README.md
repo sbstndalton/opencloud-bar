@@ -84,6 +84,8 @@ cd cross && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "-H window
 
 Start it with `opencloud-bar run`, or `opencloud-bar run --no-tray` on a server. Then control it with `status`, `sync`, `keep PATH [--local DIR]`, `unkeep PATH`, `repair PATH`, `allow-delete PATH`, `connect`, `eject`, `reload` and `quit`. On Windows, build a second copy without `-H windowsgui` to use the commands from a terminal.
 
+Windows Smart App Control blocks unsigned builds, so use the signed build from the **Windows (signed)** workflow. See [docs/windows-signing.md](docs/windows-signing.md). The Windows build hasn't been tested end to end yet.
+
 Extra settings for the port:
 
 | Key | Meaning |

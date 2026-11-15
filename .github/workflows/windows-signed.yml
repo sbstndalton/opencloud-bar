@@ -1,0 +1,107 @@
+# Builds the Windows binaries and signs them with Azure Artifact Signing (formerly Trusted Signing),
+# so Windows Smart App Control and SmartScreen accept them.
+#
+# Needs these repository variables (Settings > Secrets and variables > Actions > Variables).
+# None of them are secrets; sign-in uses GitHub OIDC, so no password or key is stored.
+#   AZURE_CLIENT_ID        app registration with a federated credential for this repo
+#   AZURE_TENANT_ID
+#   AZURE_SUBSCRIPTION_ID
+#   SIGNING_ENDPOINT       e.g. https://eus.codesigning.azure.net/ (region of the signing account)
+#   SIGNING_ACCOUNT        Artifact Signing account name
+#   SIGNING_PROFILE        certificate profile name
+name: Windows (signed)
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  id-token: write
+  contents: write
+
+jobs:
+  build-sign:
+    runs-on: windows-latest
+    environment: signing # the Azure federated credential trusts this environment
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cross/go.mod
+          cache-dependency-path: cross/go.sum
+
+      - name: Build
+        shell: pwsh
+        working-directory: cross
+        env:
+          CGO_ENABLED: "0"
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          New-Item -ItemType Directory -Force ..\dist | Out-Null
+          go build -trimpath -ldflags "-s -w -H windowsgui" -o ..\dist\opencloud-bar.exe .
+          go build -trimpath -ldflags "-s -w" -o ..\dist\opencloud-bar-cli.exe .
+
+      - name: Check signing settings
+        shell: pwsh
+        run: |
+          $missing = @('AZURE_CLIENT_ID','AZURE_TENANT_ID','AZURE_SUBSCRIPTION_ID','SIGNING_ENDPOINT','SIGNING_ACCOUNT','SIGNING_PROFILE') |
+            Where-Object { -not [Environment]::GetEnvironmentVariable("V_$_") }
+          if ($missing) { Write-Error "Missing repository variables: $($missing -join ', ')"; exit 1 }
+        env:
+          V_AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          V_AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          V_AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          V_SIGNING_ENDPOINT: ${{ vars.SIGNING_ENDPOINT }}
+          V_SIGNING_ACCOUNT: ${{ vars.SIGNING_ACCOUNT }}
+          V_SIGNING_PROFILE: ${{ vars.SIGNING_PROFILE }}
+
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}\dist
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: Verify signatures
+        shell: pwsh
+        run: |
+          Get-ChildItem dist\*.exe | ForEach-Object {
+            $s = Get-AuthenticodeSignature $_.FullName
+            "{0}: {1} ({2})" -f $_.Name, $s.Status, $s.SignerCertificate.Subject
+            if ($s.Status -ne 'Valid') { exit 1 }
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opencloud-bar-windows-amd64
+          path: dist/*.exe
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
