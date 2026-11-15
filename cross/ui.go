@@ -21,6 +21,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -286,11 +287,16 @@ func (u *webUI) handler(e *Engine) http.Handler {
 	})
 	mux.HandleFunc("POST /ui/api/pause", func(w http.ResponseWriter, r *http.Request) {
 		var b struct {
-			Paused bool `json:"paused"`
+			Paused *bool `json:"paused"`
 		}
-		if readJSON(w, r, &b) {
-			jsonOK(w, e.SetPaused(b.Paused))
+		if !readJSON(w, r, &b) {
+			return
 		}
+		if b.Paused == nil {
+			jsonErr(w, http.StatusBadRequest, errors.New(`bad request: "paused" (true or false) is missing`))
+			return
+		}
+		jsonOK(w, e.SetPaused(*b.Paused))
 	})
 	mux.HandleFunc("POST /ui/api/check-updates", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, e.CheckForUpdates(r.Context()))

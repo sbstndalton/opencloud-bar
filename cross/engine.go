@@ -1318,8 +1318,8 @@ func (e *Engine) CheckForUpdates(ctx context.Context) UpdateState {
 
 // Keep adds a kept folder. localPath is optional (absolute).
 func (e *Engine) Keep(path, localPath string) error {
-	path = strings.Trim(filepath.ToSlash(path), "/")
-	if p := pathProblem(path); p != "" {
+	path = normalizeKeptPath(path)
+	if p := newPathProblem(path); p != "" {
 		return fmt.Errorf("%s", p)
 	}
 	e.mu.Lock()

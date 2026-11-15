@@ -39,8 +39,30 @@ struct KeptFolder: Codable, Hashable, Identifiable {
         if path.hasPrefix("/") { return "path must be relative to the drive" }
         if path.split(separator: "/").contains(where: { $0 == ".." || $0 == "." }) { return "path can't contain . or .." }
         if path.contains("'") { return "path can't contain a single quote" }
-        if let top = path.split(separator: "/").first, Config.foldKey(String(top)) == Config.foldKey(Backups.folderName) {
+        if path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) {
+            return "path can't contain control characters (such as a line break)"
+        }
+        // Trailing spaces and dots are dropped by some disks and servers: the same folder.
+        if let top = path.split(separator: "/", omittingEmptySubsequences: false).first,
+           Config.foldKey(String(top).trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: " ."))) == Config.foldKey(Backups.folderName) {
             return "\(Backups.folderName) holds the app's backup copies; it can't be kept"
+        }
+        for part in path.split(separator: "/", omittingEmptySubsequences: false) where part.isEmpty {
+            return "path can't contain an empty folder name (two slashes in a row, or a slash at the end)"
+        }
+        return nil
+    }
+
+    /// `problem(with:)` plus folder-name rules that only apply when a folder is added (a
+    /// settings file with such a folder kept by an earlier version still loads): no name that is
+    /// only spaces, starts or ends with one, or ends with a dot. Same rules as the Windows/Linux app.
+    static func problem(newPath path: String) -> String? {
+        if let p = problem(with: path) { return p }
+        for part in path.split(separator: "/") {
+            let trimmed = part.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { return "a folder name can't be only spaces" }
+            if trimmed != String(part) { return "folder name “\(part)” starts or ends with a space" }
+            if part.hasSuffix(".") { return "folder name “\(part)” ends with a dot" }
         }
         return nil
     }
@@ -150,6 +172,35 @@ struct Config: Codable {
         if let v = webdavVendor, v.contains(where: { "',: ".contains($0) }) { return "webdavVendor isn't a valid rclone vendor name" }
         if let a = auth, a != "oidc" && a != "rclone" { return "auth must be \"oidc\" or \"rclone\", not “\(a)”" }
         if tunnel && sshHost.isEmpty { return "useTunnel needs sshHost" }
+        return nil
+    }
+
+    /// localRoot / mountPoint: a full path (or ~/…), not the disk root, no "..", no control
+    /// characters or surrounding spaces. Same rules as the Windows/Linux app.
+    static func folderSettingProblem(_ name: String, _ v: String) -> String? {
+        let t = v.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.isEmpty { return "\(name) can't be empty" }
+        if t != v { return "\(name) can't start or end with a space" }
+        if v.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) { return "\(name) can't contain control characters" }
+        if v.split(separator: "/").contains("..") { return "\(name) can't contain .." }
+        let p = Config.expand(v)
+        guard p.hasPrefix("/") else { return "\(name) must be a full path (or start with ~/)" }
+        if (p as NSString).standardizingPath == "/" { return "\(name) can't be the root of the disk" }
+        return nil
+    }
+
+    /// Checks localRoot and mountPoint together (nil if fine).
+    func folderSettingsError() -> String? {
+        if let p = Config.folderSettingProblem("The local folder", localRoot) { return p }
+        if let p = Config.folderSettingProblem("The mount location", mountPoint) { return p }
+        let home = (NSHomeDirectory() as NSString).standardizingPath
+        let m = (Config.expand(mountPoint) as NSString).standardizingPath
+        let l = (Config.expand(localRoot) as NSString).standardizingPath
+        if Config.foldKey(m) == Config.foldKey(home) { return "The mount location can't be your home folder" }
+        let (mk, lk) = (Config.foldKey(m), Config.foldKey(l))
+        if mk == lk || mk.hasPrefix(lk + "/") || lk.hasPrefix(mk + "/") {
+            return "The mount location and the local folder can't be the same, or one inside the other"
+        }
         return nil
     }
 

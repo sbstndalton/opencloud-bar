@@ -907,8 +907,9 @@ final class AppModel: ObservableObject {
             alert("That folder isn't in OpenCloud", "Choose a folder inside the OpenCloud drive.")
             return
         }
-        let rel = String(picked.dropFirst(root.count))
-        if let p = KeptFolder.problem(with: rel) { alert("Can't keep that folder", p.prefix(1).uppercased() + p.dropFirst() + "."); return }
+        // One spelling per folder: no doubled or trailing slashes.
+        let rel = picked.dropFirst(root.count).split(separator: "/").joined(separator: "/")
+        if let p = KeptFolder.problem(newPath: rel) { alert("Can't keep that folder", p.prefix(1).uppercased() + p.dropFirst() + "."); return }
         if rel.utf8.count > 90 {
             alert("That path is too long", "rclone's sync history can't handle folder paths longer than about 90 characters. Choose a folder higher up, or rename a folder.")
             return
@@ -1141,6 +1142,7 @@ final class AppModel: ObservableObject {
         var c = config
         edit(&c)
         if let e = c.validationError() { return e }
+        if c.localRoot != config.localRoot || c.mountPoint != config.mountPoint, let e = c.folderSettingsError() { return e }
         if config.isConfigured && !c.isConfigured { return "That would leave OpenCloud Bar without a server to connect to." }
         let old = config
         let reconnect = c.connectionKey != old.connectionKey

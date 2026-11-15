@@ -458,7 +458,7 @@ struct DrivePage: View {
 
     private func apply() {
         let mp = mountPoint.trimmingCharacters(in: .whitespaces), vn = volumeName.trimmingCharacters(in: .whitespaces)
-        guard !mp.isEmpty, mp.hasPrefix("/") || mp.hasPrefix("~") else {
+        guard !mp.isEmpty, mp.hasPrefix("/") || mp.hasPrefix("~/") else {
             error = "The mount location must be a full path, for example ~/OpenCloud-Drive."; return
         }
         guard !vn.isEmpty, !vn.contains("/"), !vn.contains(":") else {

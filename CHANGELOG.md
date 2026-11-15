@@ -4,6 +4,14 @@ All notable changes to OpenCloud Bar. The format follows [Keep a Changelog](http
 
 The release workflow copies the section for a tag into that tag's GitHub release, so every version heading must stay in the form `## [X.Y.Z] - date`.
 
+## [1.0.2] - 2026-11-15
+
+### Fixed
+- **A folder could be kept twice under two spellings** (`a//b` next to `a/b`), giving two syncs of the same local folder. Kept-folder paths are now normalised (no doubled, leading or trailing slashes), and new folders with control characters (such as a line break), a name that is only spaces, starts or ends with a space, or ends with a dot are refused. Variants of the backup folder's name (`.opencloud-bar-backups.`, with a trailing space, other case) can't be kept either. A folder's own local path can't contain control characters. Folders kept by an earlier version with such names still load.
+- **Windows and Linux settings page:** the local folder must be a full path (or `~/…`), not empty, not the disk root and without `..`. The mount location can't be the disk root, your home folder, a relative path, or the local folder (or inside it, or contain it). The Mac app checks the same.
+- Saving settings with nothing to change (`{}` or only empty values) no longer rewrites the settings file. Pause without a `paused` value is refused (400) instead of resuming.
+- When two kept folders' local copies clash, the message names the folder being added, not the one already kept.
+
 ## [1.0.1] - 2026-11-15
 
 ### Fixed

@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -131,6 +133,27 @@ func (p configPatch) validate(next Config, current Config) error {
 	if p.CacheMaxAge != nil && !cacheAgeRe.MatchString(*p.CacheMaxAge) {
 		return errors.New("Cache age looks like 72h")
 	}
+	if p.LocalRoot != nil {
+		if err := folderSettingProblem("Local folder", *p.LocalRoot); err != nil {
+			return err
+		}
+	}
+	if p.MountPoint != nil && !driveRe.MatchString(*p.MountPoint) {
+		if err := folderSettingProblem("Mount location", *p.MountPoint); err != nil {
+			return err
+		}
+		if samePath(filepath.Clean(expand(*p.MountPoint)), filepath.Clean(home())) {
+			return errors.New("Mount location can't be your home folder")
+		}
+	}
+	if (p.LocalRoot != nil || p.MountPoint != nil) && !driveRe.MatchString(next.MountPoint) {
+		// The drive shows the server's files; the local folder holds the synced copies. One
+		// inside the other would sync the drive into itself.
+		m, l := filepath.Clean(expand(next.MountPoint)), filepath.Clean(expand(next.LocalRoot))
+		if samePath(m, l) || within(m, l) || within(l, m) {
+			return errors.New("Mount location and Local folder can't be the same, or one inside the other")
+		}
+	}
 	if p.LocalRoot != nil && len(current.Kept) > 0 && *p.LocalRoot != current.LocalRoot {
 		return errors.New("the local folder can't change while folders are kept; stop keeping them first")
 	}
@@ -151,6 +174,9 @@ func (p configPatch) validate(next Config, current Config) error {
 // applyConfigPatch edits config.json as generic JSON (so keys this version doesn't know are
 // kept), validates the result with Config.Validate, and writes it. It doesn't touch the running
 // app; the caller calls Engine.Reload.
+// isEmpty: nothing to change ({}, null, or only nulls).
+func (p configPatch) isEmpty() bool { return reflect.DeepEqual(p, configPatch{}) }
+
 func applyConfigPatch(p configPatch) (restartPort bool, err error) {
 	configMu.Lock()
 	defer configMu.Unlock()
@@ -282,6 +308,10 @@ var reloadRetrying atomic.Bool
 func (e *Engine) serveConfigPost(w http.ResponseWriter, r *http.Request) {
 	var p configPatch
 	if !readJSON(w, r, &p) {
+		return
+	}
+	if p.isEmpty() {
+		writeJSON(w, 200, map[string]any{"saved": false}) // nothing changed: the file stays as it is
 		return
 	}
 	restart, err := applyConfigPatch(p)

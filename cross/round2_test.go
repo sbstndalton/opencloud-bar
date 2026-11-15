@@ -235,8 +235,6 @@ func TestConfigEditsDontLoseUpdates(t *testing.T) {
 	}
 }
 
-func ptr[T any](v T) *T { return &v }
-
 // N9: a failed update check isn't the daily check, and is retried after a growing wait.
 func TestUpdateCheckFailureBacksOff(t *testing.T) {
 	testEnv(t)

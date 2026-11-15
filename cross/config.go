@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"unicode"
 
 	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
@@ -250,7 +251,36 @@ func makeStateName(path string) string {
 	return slug + "-" + hex.EncodeToString(sum[:4])
 }
 
+// normalizeKeptPath is how a kept folder's path is stored: forward slashes, no leading,
+// trailing or doubled slashes ("a//b/" is "a/b"), so one folder can't be kept twice under two
+// spellings. pathProblem then checks what is left.
+func normalizeKeptPath(p string) string {
+	var parts []string
+	for _, s := range strings.Split(filepath.ToSlash(p), "/") {
+		if s != "" {
+			parts = append(parts, s)
+		}
+	}
+	return strings.Join(parts, "/")
+}
+
+func hasControl(s string) bool {
+	return strings.IndexFunc(s, unicode.IsControl) >= 0
+}
+
+// isBackupFolder: the backup folder's name as the server and the disks see it. Trailing spaces
+// and dots are dropped by Windows and some servers, so ".opencloud-bar-backups." is the same.
+func isBackupFolder(seg string) bool {
+	return foldKey(strings.TrimRight(strings.TrimSpace(seg), " .")) == foldKey(backupFolderName)
+}
+
 func pathProblem(p string) string {
+	if hasControl(p) {
+		return "path can't contain control characters (such as a line break)"
+	}
+	if first, _, _ := strings.Cut(p, "/"); p != "" && isBackupFolder(first) {
+		return backupFolderName + " holds the app's backup copies; it can't be kept"
+	}
 	switch {
 	case p == "":
 		return "the whole drive can't be kept; choose a folder inside it"
@@ -260,12 +290,34 @@ func pathProblem(p string) string {
 		return "path can't contain a single quote"
 	case len(p) > 90:
 		return "path is longer than about 90 characters (an rclone bisync limit)"
-	case foldKey(strings.SplitN(p, "/", 2)[0]) == foldKey(backupFolderName):
-		return backupFolderName + " holds the app's backup copies; it can't be kept"
 	}
 	for _, part := range strings.Split(p, "/") {
-		if part == ".." || part == "." {
+		switch {
+		case part == ".." || part == ".":
 			return "path can't contain . or .."
+		case part == "":
+			return "path can't contain an empty folder name (two slashes in a row, or a slash at the end)"
+		}
+	}
+	return ""
+}
+
+// newPathProblem is pathProblem plus rules for folder names that only apply when a folder is
+// added (a settings file with such a folder kept from an earlier version still loads): no name
+// that is only spaces, starts or ends with one, or ends with a dot (Windows can't store those,
+// and some servers drop them, so two spellings would be one folder).
+func newPathProblem(p string) string {
+	if pp := pathProblem(p); pp != "" {
+		return pp
+	}
+	for _, part := range strings.Split(p, "/") {
+		switch {
+		case strings.TrimSpace(part) == "":
+			return "a folder name can't be only spaces"
+		case strings.TrimSpace(part) != part:
+			return fmt.Sprintf("folder name %q starts or ends with a space", part)
+		case strings.HasSuffix(part, "."):
+			return fmt.Sprintf("folder name %q ends with a dot (Windows can't store that)", part)
 		}
 	}
 	return ""
@@ -321,6 +373,9 @@ func (c Config) localPathProblem(f KeptFolder, index int) error {
 	if f.LocalPath == "" {
 		return nil
 	}
+	if hasControl(f.LocalPath) {
+		return fmt.Errorf("kept folder %q: localPath can't contain control characters", f.Path)
+	}
 	p := filepath.Clean(expand(f.LocalPath))
 	if !filepath.IsAbs(p) {
 		return fmt.Errorf("kept folder %q: localPath must be a full path", f.Path)
@@ -328,13 +383,14 @@ func (c Config) localPathProblem(f KeptFolder, index int) error {
 	if p == filepath.Dir(p) || (runtime.GOOS == "windows" && len(p) <= 3) {
 		return fmt.Errorf("kept folder %q: localPath can't be a drive root", f.Path)
 	}
-	guarded := []struct{ what, path string }{
-		{"your home folder", home()},
-		{"the local folder (localRoot)", expand(c.LocalRoot)},
+	type guard struct {
+		what, path string
+		other      int // the other kept folder's index, or -1
 	}
+	guarded := []guard{{"your home folder", home(), -1}, {"the local folder (localRoot)", expand(c.LocalRoot), -1}}
 	for j, g := range c.Kept {
 		if j != index {
-			guarded = append(guarded, struct{ what, path string }{fmt.Sprintf("the local copy of %q", g.Path), c.Local(g)})
+			guarded = append(guarded, guard{fmt.Sprintf("the local copy of %q", g.Path), c.Local(g), j})
 		}
 	}
 	for _, g := range guarded {
@@ -342,12 +398,47 @@ func (c Config) localPathProblem(f KeptFolder, index int) error {
 			continue
 		}
 		gp := filepath.Clean(g.path)
+		clash := samePath(p, gp) || within(gp, p) || (g.other >= 0 && within(p, gp))
+		if !clash {
+			continue
+		}
+		// A clash between two kept folders is reported for the one added later (the one the
+		// user is adding now), naming the one that was there first.
+		if g.other > index {
+			return fmt.Errorf("kept folder %q: its local copy (%s) can't be, contain or be inside the local copy of %q",
+				c.Kept[g.other].Path, c.Local(c.Kept[g.other]), f.Path)
+		}
 		if samePath(p, gp) || within(gp, p) {
 			return fmt.Errorf("kept folder %q: localPath can't be or contain %s", f.Path, g.what)
 		}
-		if strings.HasPrefix(g.what, "the local copy") && within(p, gp) {
-			return fmt.Errorf("kept folder %q: localPath is inside %s", f.Path, g.what)
+		return fmt.Errorf("kept folder %q: localPath is inside %s", f.Path, g.what)
+	}
+	return nil
+}
+
+// folderSettingProblem checks the folder that holds all kept folders (localRoot) or the drive's
+// mount point: a full path (or ~/…), not the disk root, no "..", no control characters.
+func folderSettingProblem(name, v string) error {
+	t := strings.TrimSpace(v)
+	switch {
+	case t == "":
+		return fmt.Errorf("%s can't be empty", name)
+	case t != v:
+		return fmt.Errorf("%s can't start or end with a space", name)
+	case hasControl(v):
+		return fmt.Errorf("%s can't contain control characters", name)
+	}
+	for _, part := range strings.FieldsFunc(v, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if part == ".." {
+			return fmt.Errorf("%s can't contain ..", name)
 		}
+	}
+	p := expand(v)
+	if !filepath.IsAbs(p) {
+		return fmt.Errorf("%s must be a full path (or start with ~/)", name)
+	}
+	if c := filepath.Clean(p); c == filepath.Dir(c) {
+		return fmt.Errorf("%s can't be the root of a disk", name)
 	}
 	return nil
 }
