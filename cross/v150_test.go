@@ -289,11 +289,14 @@ type fakeWatcher struct {
 	once   sync.Once
 	addErr error
 	flood  func(i int) (fsnotify.Event, bool)
+	inject chan fsnotify.Event
+	hang   atomic.Bool  // requests are taken and never answered (fsnotify on Windows, closed meanwhile)
+	adds   atomic.Int64 // requests taken
 }
 
 func newFakeWatcher(addErr error, flood func(i int) (fsnotify.Event, bool)) *fakeWatcher {
 	w := &fakeWatcher{events: make(chan fsnotify.Event), errs: make(chan error), input: make(chan chan error),
-		done: make(chan struct{}), addErr: addErr, flood: flood}
+		done: make(chan struct{}), addErr: addErr, flood: flood, inject: make(chan fsnotify.Event)}
 	go w.reader()
 	return w
 }
@@ -307,7 +310,13 @@ func (w *fakeWatcher) reader() {
 		if !more {
 			select {
 			case r := <-w.input:
-				r <- w.addErr
+				w.answer(r)
+			case ev := <-w.inject:
+				select {
+				case w.events <- ev:
+				case <-w.done:
+					return
+				}
 			case <-w.done:
 				return
 			}
@@ -315,7 +324,7 @@ func (w *fakeWatcher) reader() {
 		}
 		select {
 		case r := <-w.input:
-			r <- w.addErr
+			w.answer(r)
 		default:
 		}
 		select {
@@ -326,11 +335,18 @@ func (w *fakeWatcher) reader() {
 	}
 }
 
+func (w *fakeWatcher) answer(r chan error) {
+	w.adds.Add(1)
+	if !w.hang.Load() {
+		r <- w.addErr
+	}
+}
+
 func (w *fakeWatcher) call() error {
 	r := make(chan error)
 	select {
 	case w.input <- r:
-		return <-r
+		return <-r // like fsnotify on Windows: no way out if the answer never comes
 	case <-w.done:
 		return fsnotify.ErrClosed
 	}
@@ -526,4 +542,101 @@ func TestLiveRootReplacedAndSymlinked(t *testing.T) {
 	// The root itself removed: restart (nothing to watch now) and a sync.
 	_ = os.RemoveAll(other)
 	waitFor(t, func() bool { return e.Status().Folders[0].Pending && watchOf(e, "Docs") != fw2 })
+}
+
+// fakeRig: one kept folder watched through a fakeWatcher.
+func fakeRig(t *testing.T) (*Engine, *fakeWatcher, string) {
+	t.Helper()
+	e := pausedRig(t, `,"liveSync":true,"kept":[{"path":"Docs","stateName":"docs-1"}]`)
+	local := e.cfg.Local(e.cfg.Kept[0])
+	_ = os.MkdirAll(local, 0o700)
+	resetLive(e)
+	var fake *fakeWatcher
+	e.mu.Lock()
+	e.live().newWatcher = func() (fsWatcher, error) { fake = newFakeWatcher(nil, nil); return fake, nil }
+	e.mu.Unlock()
+	e.reconcileWatches()
+	if watchOf(e, "Docs") == nil || fake == nil {
+		t.Fatal("not watched")
+	}
+	real, _ := resolveRoot(local)
+	return e, fake, real
+}
+
+// An Add that never comes back (fsnotify on Windows, watcher closed meanwhile): the watch is
+// dead, starts over, and the folder syncs. After stop, no Add or Remove is tried at all, and
+// nothing is counted for a stopped watch.
+func TestLiveHungAddRestarts(t *testing.T) {
+	e, fake, root := fakeRig(t)
+	l := e.live()
+	l.callTimeout.Store(int64(100 * time.Millisecond))
+	fw := watchOf(e, "Docs")
+	fake.hang.Store(true)
+	_ = os.MkdirAll(filepath.Join(root, "new"), 0o700)
+	fake.inject <- fsnotify.Event{Name: filepath.Join(root, "new"), Op: fsnotify.Create}
+	waitFor(t, func() bool { return fw.dead.Load() && watchOf(e, "Docs") != fw })
+	waitFor(t, func() bool { return e.Status().Folders[0].Pending })
+	select {
+	case <-fw.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the dead watch wasn't stopped")
+	}
+	// The restart (reconcile after the kick) watches it again with a new watcher.
+	e.mu.Lock()
+	e.live().newWatcher = func() (fsWatcher, error) { return newFakeWatcher(nil, nil), nil }
+	e.mu.Unlock()
+	e.reconcileWatches()
+	fw2 := watchOf(e, "Docs")
+	if fw2 == nil || fw2 == fw {
+		t.Fatal("not watched again")
+	}
+	// Stopped: Add isn't called, nothing is counted.
+	before, total := fake.adds.Load(), l.watchDirs.Load()
+	fw.stop()
+	if err := fw.addTree(root, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	fw.forget(filepath.Join(root, "new"))
+	if fake.adds.Load() != before || l.watchDirs.Load() != total || fw.count() != 0 {
+		t.Errorf("after stop: adds %d→%d, watched %d→%d, count %d", before, fake.adds.Load(), total, l.watchDirs.Load(), fw.count())
+	}
+	// A dead watch that nobody noticed yet: the next reconcile restarts it and syncs.
+	e.mu.Lock()
+	e.live().folders["Docs"].pending = false
+	e.status["Docs"].Pending = false
+	e.mu.Unlock()
+	fw2.dead.Store(true)
+	e.reconcileWatches()
+	if w := watchOf(e, "Docs"); w == nil || w == fw2 || !e.Status().Folders[0].Pending {
+		t.Fatalf("dead watch kept: %v", w == fw2)
+	}
+}
+
+// Files made in a new folder before its watch was added count as changes (also during the
+// app's own sync, so they aren't taken for its writes unless it wrote them).
+func TestLiveNewFolderFiles(t *testing.T) {
+	e, fake, root := fakeRig(t)
+	e.mu.Lock()
+	e.ownSyncLocked("Docs", true, time.Now())
+	e.mu.Unlock()
+	_ = os.MkdirAll(filepath.Join(root, "new", "deep"), 0o700)
+	_ = os.WriteFile(filepath.Join(root, "new", "a.txt"), []byte("x"), 0o600)
+	_ = os.WriteFile(filepath.Join(root, "new", "deep", "b.txt"), []byte("x"), 0o600)
+	_ = os.WriteFile(filepath.Join(root, "new", ".DS_Store"), []byte("x"), 0o600)
+	fake.inject <- fsnotify.Event{Name: filepath.Join(root, "new"), Op: fsnotify.Create}
+	waitFor(t, func() bool {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		p := e.live().folders["Docs"].ownPaths
+		return p["new/a.txt"] && p["new/deep/b.txt"]
+	})
+	e.mu.Lock()
+	ds := e.live().folders["Docs"].ownPaths["new/.DS_Store"]
+	e.mu.Unlock()
+	if ds {
+		t.Error("noise listed")
+	}
+	if n := watchOf(e, "Docs").count(); n != 3 {
+		t.Errorf("watched %d folders, want 3", n)
+	}
 }

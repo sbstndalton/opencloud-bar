@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path"
@@ -123,7 +124,10 @@ type liveState struct {
 	noticed   bool          // the one-time notice was given
 	watchDirs atomic.Int64  // directories watched, all folders
 	maxDirs   atomic.Int64
-	rmu       sync.Mutex // one reconcile at a time
+	// callTimeout: the longest a watcher Add/Remove may take (nanoseconds); past it the
+	// watch is dead (fsnotify on Windows can wait forever on a watcher closed meanwhile).
+	callTimeout atomic.Int64
+	rmu         sync.Mutex // one reconcile at a time
 	// Hooks for tests (read under e.mu).
 	now        func() time.Time
 	newWatcher func() (fsWatcher, error)
@@ -134,6 +138,7 @@ func (e *Engine) live() *liveState {
 		e.liveS = &liveState{folders: map[string]*liveFolder{}, triggered: map[string]bool{},
 			kick: make(chan struct{}, 1), now: time.Now, newWatcher: newRealWatcher}
 		e.liveS.maxDirs.Store(defaultWatchCap())
+		e.liveS.callTimeout.Store(int64(5 * time.Second))
 	}
 	return e.liveS
 }
@@ -231,8 +236,12 @@ type folderWatch struct {
 	any, top map[string]bool
 	names    []string
 
-	mu   sync.Mutex
-	dirs map[string]bool // watched directories
+	mu     sync.Mutex
+	dirs   map[string]bool // watched directories (nil once stopped)
+	closed bool            // stop was asked: no more Add/Remove
+
+	dead atomic.Bool  // an Add/Remove never came back: start over
+	busy atomic.Int64 // when watchLoop started on the current batch (unix ns), 0 idle
 
 	qmu   sync.Mutex
 	queue []fsnotify.Event
@@ -244,9 +253,38 @@ type folderWatch struct {
 }
 
 var (
-	errWatchLimit = errors.New(limitText)
-	errNoRoot     = errors.New("local folder missing")
+	errWatchLimit  = errors.New(limitText)
+	errNoRoot      = errors.New("local folder missing")
+	errWatchClosed = errors.New("watch stopped")
+	errWatchDead   = errors.New("the watcher stopped answering")
 )
+
+// liveStall: a batch taking longer than this means watchLoop is stuck; the watch starts over.
+const liveStall = time.Minute
+
+// call runs a watcher Add or Remove, never after stop, and gives up on one that doesn't come
+// back (the watch is dead then; reconcile starts it over and the folder syncs).
+func (fw *folderWatch) call(f func() error) error {
+	fw.mu.Lock()
+	closed := fw.closed
+	fw.mu.Unlock()
+	if closed {
+		return errWatchClosed
+	}
+	res := make(chan error, 1)
+	go func() { res <- f() }()
+	t := time.NewTimer(time.Duration(fw.l.callTimeout.Load()))
+	defer t.Stop()
+	select {
+	case err := <-res:
+		return err
+	case <-fw.done:
+		return errWatchClosed
+	case <-t.C:
+		fw.dead.Store(true)
+		return errWatchDead
+	}
+}
 
 // excluded: rel (slash-separated, relative to the root) is in or is a folder not watched.
 func (fw *folderWatch) excluded(rel string) bool {
@@ -324,17 +362,25 @@ func (fw *folderWatch) drain() {
 // stop closes the watcher (never under e.mu: on Windows Close talks to fsnotify's goroutine).
 func (fw *folderWatch) stop() {
 	fw.once.Do(func() {
-		close(fw.done)
-		_ = fw.w.Close()
 		fw.mu.Lock()
+		fw.closed = true
 		fw.l.watchDirs.Add(-int64(len(fw.dirs)))
-		fw.dirs = map[string]bool{}
+		fw.dirs = nil
 		fw.mu.Unlock()
+		close(fw.done)
+		go func() { _ = fw.w.Close() }() // may wait on fsnotify's goroutine: not here
 	})
 }
 
-// valid: the configured root still leads to the folder being watched.
+// valid: the watch works (not dead, not stuck) and the configured root still leads to the
+// folder being watched.
 func (fw *folderWatch) valid() bool {
+	if fw.dead.Load() {
+		return false
+	}
+	if b := fw.busy.Load(); b != 0 && time.Since(time.Unix(0, b)) > liveStall {
+		return false
+	}
 	real, err := resolveRoot(fw.cfgRoot)
 	if err != nil || real != fw.root {
 		return false
@@ -351,8 +397,9 @@ func resolveRoot(root string) (string, error) {
 	return filepath.Abs(real)
 }
 
-// addTree watches dir and the folders in it (without e.mu).
-func (fw *folderWatch) addTree(dir string) error {
+// addTree watches dir and the folders in it (without e.mu). files, if given, gets the files
+// found in it (relative, at most liveOwnCap; more: *over), which no watch saw being made.
+func (fw *folderWatch) addTree(dir string, files *[]string, over *bool) error {
 	return filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		select {
 		case <-fw.done:
@@ -365,10 +412,17 @@ func (fw *folderWatch) addTree(dir string) error {
 			}
 			return nil // a folder that went away or can't be read: skip it
 		}
+		rel, _ := filepath.Rel(fw.root, p)
 		if !d.IsDir() {
+			if files != nil && !fw.ignored(rel) {
+				if len(*files) < liveOwnCap {
+					*files = append(*files, slash(rel))
+				} else {
+					*over = true
+				}
+			}
 			return nil
 		}
-		rel, _ := filepath.Rel(fw.root, p)
 		if fw.excluded(rel) {
 			return filepath.SkipDir
 		}
@@ -381,14 +435,19 @@ func (fw *folderWatch) addTree(dir string) error {
 		if fw.l.watchDirs.Load() >= fw.l.maxDirs.Load() {
 			return errWatchLimit
 		}
-		if err := fw.w.Add(p); err != nil {
-			if errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EMFILE) {
+		if err := fw.call(func() error { return fw.w.Add(p) }); err != nil {
+			switch {
+			case errors.Is(err, errWatchClosed):
+				return filepath.SkipAll
+			case errors.Is(err, errWatchDead):
+				return err
+			case errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EMFILE):
 				return errWatchLimit
 			}
 			return nil
 		}
 		fw.mu.Lock()
-		if fw.dirs != nil && !fw.dirs[p] {
+		if !fw.closed && !fw.dirs[p] {
 			fw.dirs[p] = true
 			fw.l.watchDirs.Add(1)
 		}
@@ -415,7 +474,9 @@ func (fw *folderWatch) forget(name string) {
 	fw.l.watchDirs.Add(-int64(len(gone)))
 	fw.mu.Unlock()
 	for _, d := range gone {
-		_ = fw.w.Remove(d) // inotify drops a deleted folder's watch itself
+		if err := fw.call(func() error { return fw.w.Remove(d) }); errors.Is(err, errWatchDead) || errors.Is(err, errWatchClosed) {
+			return // inotify drops a deleted folder's watch itself; others: the watch starts over
+		}
 	}
 }
 
@@ -478,13 +539,17 @@ func (e *Engine) reconcileWatches() {
 	newWatcher := l.newWatcher
 	e.mu.Unlock()
 
-	for key, fw := range cur { // the root moved, went away or is another folder now
+	for key, fw := range cur { // dead or stuck, or the root moved, went away or is another folder now
 		if fw.valid() {
 			continue
 		}
+		broken := fw.dead.Load() || fw.busy.Load() != 0
 		e.mu.Lock()
 		if lf := l.folders[key]; lf != nil && lf.watch == fw {
 			lf.watch = nil
+			if broken {
+				e.noteLocked(key, lf, nil, true) // changes may have been missed: sync
+			}
 		}
 		e.mu.Unlock()
 		stops = append(stops, fw)
@@ -501,8 +566,8 @@ func (e *Engine) reconcileWatches() {
 		if !need {
 			continue
 		}
-		fw, err := e.startWatch(key, w, newWatcher)
-		if errors.Is(err, errNoRoot) {
+		fw, err := e.startWatch(l, key, w, newWatcher)
+		if errors.Is(err, errNoRoot) || errors.Is(err, errWatchDead) {
 			e.mu.Lock()
 			l.folder(key) // not there (yet): the next reconcile tries again
 			e.mu.Unlock()
@@ -510,15 +575,19 @@ func (e *Engine) reconcileWatches() {
 		}
 		e.mu.Lock()
 		lf = l.folder(key)
+		logText := ""
 		switch {
 		case !e.cfg.LiveSync || e.quitting || lf.watch != nil:
 		case err != nil:
-			e.watchFallbackLocked(key, w, err)
+			logText = e.watchFallbackLocked(key, w, err)
 		default:
 			lf.watch, fw = fw, nil
 			go e.watchLoop(lf.watch)
 		}
 		e.mu.Unlock()
+		if logText != "" {
+			e.logLine("%s", logText)
+		}
 		if fw != nil {
 			fw.stop()
 		}
@@ -526,7 +595,7 @@ func (e *Engine) reconcileWatches() {
 }
 
 // startWatch makes a folder's watcher and watches its tree (I/O; not under e.mu).
-func (e *Engine) startWatch(key string, w watchWant, newWatcher func() (fsWatcher, error)) (*folderWatch, error) {
+func (e *Engine) startWatch(l *liveState, key string, w watchWant, newWatcher func() (fsWatcher, error)) (*folderWatch, error) {
 	if st, err := os.Stat(w.root); err != nil || !st.IsDir() {
 		return nil, errNoRoot
 	}
@@ -543,11 +612,11 @@ func (e *Engine) startWatch(key string, w watchWant, newWatcher func() (fsWatche
 		return nil, err
 	}
 	any, top := excludedDirs(w.filters)
-	fw := &folderWatch{w: fsw, l: e.live(), key: key, cfgRoot: w.root, root: real, rootInfo: info, sig: w.sig,
+	fw := &folderWatch{w: fsw, l: l, key: key, cfgRoot: w.root, root: real, rootInfo: info, sig: w.sig,
 		any: any, top: top, names: ignoredNames(w.filters), dirs: map[string]bool{},
 		wake: make(chan struct{}, 1), done: make(chan struct{})}
 	go fw.drain() // before the first Add (Windows)
-	if err := fw.addTree(real); err != nil {
+	if err := fw.addTree(real, nil, nil); err != nil {
 		fw.stop()
 		return nil, err
 	}
@@ -558,15 +627,16 @@ func (e *Engine) startWatch(key string, w watchWant, newWatcher func() (fsWatche
 	return fw, nil
 }
 
-// watchFallbackLocked: this folder can't be watched; it syncs on the timer. One notice.
-func (e *Engine) watchFallbackLocked(key string, w watchWant, err error) {
+// watchFallbackLocked: this folder can't be watched; it syncs on the timer. One notice. It
+// returns the line for app.log, written by the caller after unlocking (no file I/O under e.mu).
+func (e *Engine) watchFallbackLocked(key string, w watchWant, err error) string {
 	l := e.live()
 	l.folder(key).fallback = w.sig
-	e.logLine("live sync: can't watch %s (%v); it syncs on the timer", w.f.Path, err)
 	if !l.noticed {
 		l.noticed = true
 		e.message = "Live sync can't watch “" + w.f.DisplayName() + "”: " + limitText + ". It syncs every interval instead."
 	}
+	return fmt.Sprintf("live sync: can't watch %s (%v); it syncs on the timer", w.f.Path, err)
 }
 
 // watchLoop handles one folder's events: new folders are watched, changes noted.
@@ -577,6 +647,7 @@ func (e *Engine) watchLoop(fw *folderWatch) {
 			return
 		case <-fw.wake:
 		}
+		fw.busy.Store(time.Now().UnixNano())
 		fw.qmu.Lock()
 		batch, errs, lost := fw.queue, fw.errs, fw.lost
 		fw.queue, fw.errs, fw.lost = nil, nil, false
@@ -607,9 +678,17 @@ func (e *Engine) watchLoop(fw *folderWatch) {
 			}
 			if ev.Op&fsnotify.Create != 0 && limit == nil && !fw.excluded(rel) {
 				if st, err := os.Lstat(name); err == nil && st.IsDir() {
-					if err := fw.addTree(name); errors.Is(err, errWatchLimit) {
+					// Files made in it before its watch was added: no event saw them.
+					var files []string
+					over := false
+					switch err := fw.addTree(name, &files, &over); {
+					case errors.Is(err, errWatchLimit):
 						limit = err
+					case errors.Is(err, errWatchDead):
+						restart, full = true, true
 					}
+					rels = append(rels, files...)
+					full = full || over
 				}
 			}
 			if ev.Op == fsnotify.Chmod || fw.ignored(rel) {
@@ -617,7 +696,12 @@ func (e *Engine) watchLoop(fw *folderWatch) {
 			}
 			rels = append(rels, slash(rel))
 		}
-		if !e.liveEvents(fw, rels, full, restart, limit) {
+		if fw.dead.Load() {
+			restart, full = true, true
+		}
+		ok := e.liveEvents(fw, rels, full, restart, limit)
+		fw.busy.Store(0)
+		if !ok {
 			return
 		}
 	}
@@ -633,11 +717,12 @@ func (e *Engine) liveEvents(fw *folderWatch, rels []string, full, restart bool, 
 		fw.stop()
 		return false
 	}
+	logText := ""
 	if limit != nil {
 		lf.watch = nil
 		for _, f := range e.cfg.Kept {
 			if f.Key() == fw.key {
-				e.watchFallbackLocked(fw.key, watchWant{f: f, sig: fw.sig}, limit)
+				logText = e.watchFallbackLocked(fw.key, watchWant{f: f, sig: fw.sig}, limit)
 			}
 		}
 		full = true // what happened in the folders not watched isn't known
@@ -653,6 +738,9 @@ func (e *Engine) liveEvents(fw *folderWatch, rels []string, full, restart bool, 
 		}
 	}
 	e.mu.Unlock()
+	if logText != "" {
+		e.logLine("%s", logText)
+	}
 	if detached {
 		fw.stop()
 		return false
