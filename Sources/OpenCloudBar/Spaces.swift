@@ -54,7 +54,7 @@ enum SpacesAPI {
 
     /// The WebDAV URL of a folder in a space, for the server's API (not rclone).
     static func davURL(base: String, _ s: Space, path: String) -> URL? {
-        var u = base.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + s.davPath
+        var u = Config.origin(base) + s.davPath   // davPath already holds the server's path prefix
         for part in path.split(separator: "/") {
             u += "/" + (String(part).addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))) ?? "")
         }
@@ -99,6 +99,7 @@ struct KeepFromSpaceSheet: View {
     @Local private var folders: [String]?
     @Local private var error: String?
     @Local private var busy = false
+    @Local private var loadFailed = false
 
     private var space: Space? { spaces?.first { $0.id == spaceID } }
 
@@ -107,7 +108,9 @@ struct KeepFromSpaceSheet: View {
             Text("Keep a Folder from a Space").font(.headline)
             Text("Project spaces and folders shared with you. Kept folders from a space go to \(model.config.localRoot)/<space name>/…. Read-only folders can't be kept, and the OpenCloud drive shows the personal space only.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            if let spaces {
+            if loadFailed {
+                Button("Retry") { Task { await load() } }
+            } else if let spaces {
                 if spaces.isEmpty {
                     Text("No project spaces or shares are available to you.").foregroundStyle(.secondary)
                 } else {
@@ -149,15 +152,20 @@ struct KeepFromSpaceSheet: View {
         }
         .padding(20)
         .frame(width: 480)
-        .task {
-            do {
-                let s = try await SpacesAPI.list(serverURL: model.config.serverURL ?? "")
-                spaces = s
-                if spaceID.isEmpty, let first = s.first { spaceID = first.id; browse() }
-            } catch {
-                spaces = []
-                self.error = error.localizedDescription
-            }
+        .task { await load() }
+    }
+
+    private func load() async {
+        loadFailed = false
+        spaces = nil
+        error = nil
+        do {
+            let s = try await SpacesAPI.list(serverURL: model.config.serverURL ?? "")
+            spaces = s
+            if spaceID.isEmpty, let first = s.first { spaceID = first.id; browse() }
+        } catch {
+            loadFailed = true
+            self.error = error.localizedDescription
         }
     }
 

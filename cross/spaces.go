@@ -145,7 +145,7 @@ func readOnly(perms string) bool {
 
 // davURLFor is the WebDAV URL of a folder in a space, for the server's API (not rclone).
 func davURLFor(base string, s Space, path string) string {
-	u := strings.TrimSuffix(base, "/") + s.DavPath
+	u := urlOrigin(base) + s.DavPath // davPath already holds the server's path prefix
 	for _, part := range strings.Split(path, "/") {
 		if part != "" {
 			u += "/" + url.PathEscape(part)
@@ -191,7 +191,7 @@ func (e *Engine) KeepInSpace(spaceID, path, localPath string) error {
 		return fmt.Errorf("couldn't check “%s” in %s: %w", path, sp.Name, err)
 	}
 	if readOnly(perms) {
-		return fmt.Errorf("“%s” in %s is read-only for you, so it can't be kept here (a kept folder syncs both ways). Open it on the drive or in the browser instead", path, sp.Name)
+		return fmt.Errorf("“%s” in %s is read-only for you, so it can't be kept here (a kept folder syncs both ways). Open it in the browser instead", path, sp.Name)
 	}
 	return e.keepIn(sp.Ref(), path, localPath)
 }

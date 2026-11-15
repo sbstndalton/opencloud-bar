@@ -16,6 +16,8 @@ struct KeptFolder: Codable, Hashable, Identifiable {
     /// Identifies the folder: its path in the personal space (as before 1.2), else
     /// "<space id>:<path>", so the same path can be kept from two spaces. Same as the Go app.
     var key: String { space.map { "\($0.id):\(path)" } ?? path }
+    /// For messages: “path”, or “path” in <space name>.
+    var label: String { space.map { "“\(path)” in \($0.name)" } ?? "“\(path)”" }
     var id: String { key }
     var displayName: String { (path as NSString).lastPathComponent }
 
@@ -84,12 +86,21 @@ struct SpaceRef: Codable, Hashable {
     var name: String
     var davPath: String
 
-    /// The space's folder under localRoot: its name, made safe for a folder name.
+    /// The space's folder under localRoot: its name, made safe for a folder the same way on
+    /// every system (a settings file moves between computers; same rules as the Go app):
+    /// characters Windows can't store become "-", trailing dots and spaces go, and a reserved
+    /// Windows device name (CON, NUL, COM1, LPT1.txt, …) gets "_" appended.
     var dirName: String {
         var n = String(name.trimmingCharacters(in: .whitespaces).unicodeScalars.map {
-            "/\\:".unicodeScalars.contains($0) || CharacterSet.controlCharacters.contains($0) ? "-" : Character($0)
+            "/\\:<>\"|?*".unicodeScalars.contains($0) || CharacterSet.controlCharacters.contains($0) ? "-" : Character($0)
         })
         while n.hasSuffix(" ") || n.hasSuffix(".") { n.removeLast() }
+        let stem = String(n.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false).first ?? "")
+            .uppercased().trimmingCharacters(in: CharacterSet(charactersIn: " "))
+        if ["CON", "PRN", "AUX", "NUL"].contains(stem)
+            || (stem.count == 4 && (stem.hasPrefix("COM") || stem.hasPrefix("LPT")) && ("1"..."9").contains(String(stem.last!))) {
+            n += "_"
+        }
         if n.isEmpty || n == "." || n == ".." { n = "Space " + String(id.filter { $0.isLetter || $0.isNumber }.prefix(8)) }
         return n
     }
@@ -224,12 +235,13 @@ struct Config: Codable {
                 return "kept folders “\(f.path)” and “\(other.path)” overlap"
             }
             keys.append((sid, k))
-            // Folders from different spaces must not share a local folder either.
+            // No two kept folders, whatever their space, may share or nest a local folder
+            // (resolved paths, case-insensitive like the Mac's disks).
             let l = Config.foldKey((localURL(f).path as NSString).standardizingPath)
             if let other = locals.first(where: { l == $0.0 || l.hasPrefix($0.0 + "/") || $0.0.hasPrefix(l + "/") }) {
-                return "kept folder “\(f.key)” would share its folder on this Mac with “\(other.1)”"
+                return "kept folder \(f.label) would share its folder on this Mac with \(other.1)"
             }
-            locals.append((l, f.key))
+            locals.append((l, f.label))
         }
         if davPath.contains("'") { return "davPath can't contain a single quote" }
         if (serverURL ?? "").contains("'") { return "serverURL can't contain a single quote" }
@@ -289,11 +301,22 @@ struct Config: Codable {
     /// remote pointed at the space, so the sign-in applies.
     func remote(for f: KeptFolder) -> String {
         guard let s = f.space else { return remoteSpec }
-        return ":webdav,vendor=\(vendor),url='\(baseURL)\(s.davPath)':"
+        // davPath comes from the space's webDavUrl and already holds any path prefix the server
+        // lives under (https://host/opencloud/dav/spaces/…): it goes after the origin only.
+        return ":webdav,vendor=\(vendor),url='\(Config.origin(baseURL))\(s.davPath)':"
     }
     func serverIdentity(for f: KeptFolder) -> String {
         guard let s = f.space else { return serverIdentity }
         return serverIdentity + "|space|" + s.davPath
+    }
+
+    /// scheme://host[:port] of a URL, without its path.
+    static func origin(_ u: String) -> String {
+        guard let c = URLComponents(string: u), let scheme = c.scheme, let host = c.host, !host.isEmpty else {
+            return u.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        }
+        let h = host.contains(":") ? "[\(host)]" : host
+        return "\(scheme)://\(h)" + (c.port.map { ":\($0)" } ?? "")
     }
 
     var remoteSpec: String {
@@ -396,6 +419,17 @@ struct Config: Codable {
         // Never replace a settings file that can't be read (a hand edit in progress, or damage).
         if let existing, (try? JSONSerialization.jsonObject(with: existing)) as? [String: Any] == nil {
             throw AuthError.message("The settings file can't be read. Fix it, then choose Reload Settings.")
+        }
+        // Nor one that doesn't load as settings (a bad hand edit): the kept list written here
+        // would replace the folders in it.
+        if let existing {
+            do {
+                if let e = try JSONDecoder().decode(Config.self, from: existing).validationError() {
+                    throw AuthError.message("The settings file has a problem (\(e)). Fix or remove it, then choose Reload Settings.")
+                }
+            } catch let e as AuthError { throw e } catch {
+                throw AuthError.message("The settings file can't be read (\(error.localizedDescription)). Fix or remove it, then choose Reload Settings.")
+            }
         }
         if let existing,
            let old = try? JSONSerialization.jsonObject(with: existing) as? [String: Any],

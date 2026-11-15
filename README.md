@@ -97,9 +97,10 @@ Besides your personal files, OpenCloud has **project spaces** and folders **shar
 
 - **Mac:** Settings ▸ Kept Folders ▸ **Keep from a Space…**. Choose the space, then the folder (type its path or pick it from the list).
 - **Windows, Linux:** in the settings window, Folders ▸ **Keep a folder by its path, or from another space**: **Load Spaces**, choose one, then type or list the folder.
-- The app asks the server which spaces you have (`/graph/v1.0/me/drives`: project spaces and accepted shares, not disabled ones). A folder that is read-only for you is refused, since a kept folder syncs both ways.
-- A space's folders go to `<local folder>/<space name>/<folder>`, apart from your personal folders. The folder list shows which space each one is in. The same path can be kept from two spaces.
-- They sync like personal folders, with the same sign-in; merge backups go to `.opencloud-bar-backups` at the top of that space.
+- The app asks the server which spaces you have (`/graph/v1.0/me/drives`: project spaces and accepted shares, not disabled ones). Whether the folder is read-only for you is checked when you keep it: a read-only folder is refused, since a kept folder syncs both ways. Open it in the browser instead.
+- A space's folders go to `<local folder>/<space name>/<folder>`, apart from your personal folders. The folder list shows which space each one is in. Characters Windows can't use in a folder name become `-`, and names like `CON` or `NUL` get a `_`, on every system, so the settings file works on any computer.
+- The same path can be kept from two spaces with different names (`Docs` from Marketing and `Docs` from Sales go to `Marketing/Docs` and `Sales/Docs`). Two spaces with the same name would share a local folder, so keeping the second one is refused; so is any folder whose local copy would be, contain or sit inside another kept folder's copy.
+- They sync like personal folders, with the same sign-in; merge backups go to `.opencloud-bar-backups` at the top of that space (see [Safety](#safety)).
 - The drive still shows the personal space only.
 
 ## Conflicts
@@ -120,8 +121,8 @@ When a file changed on both sides between two syncs, the newer copy keeps its na
 ## Safety
 
 - A folder's first sync, a Repair and an automatic merge all merge both sides: the newer copy of each file wins. No file is deleted, but the older copy of a file is replaced, so a merge keeps it first:
-  - in OpenCloud, in `.opencloud-bar-backups/<folder>/<date and time>/` at the top of your space (shown on the drive, never synced). These are **not removed automatically**: delete old ones in the web UI or on the drive when you no longer need them;
-  - on this computer, in `backups/<folder>/<date and time>/` in the sync state folder (`stateDir`), removed after 30 days.
+  - in OpenCloud, in `.opencloud-bar-backups/<stateName>/<date and time>/` at the top of the folder's space (`<stateName>` is the folder's `stateName` in the settings file, its name plus a short code). For personal folders that is the top of your personal space, shown on the drive; for a folder from a project space or a share it is the top of that space, which you reach in the web UI (the drive shows the personal space only). They are never synced and **not removed automatically**: delete old ones when you no longer need them;
+  - on this computer, in `backups/<stateName>/<date and time>/` in the sync state folder (`stateDir`), removed after 30 days.
 - An automatic merge happens at most once per folder a day; after that, the folder waits for you to choose **Repair**. Until then, each sync interval tries a plain sync, and if that works the folder needs no repair after all.
 - A sync stopped by Quit, sleep or a timeout resumes the next time without a repair.
 - If more than half a folder's files would be deleted, the sync stops and the folder offers **Allow Large Deletion…**.

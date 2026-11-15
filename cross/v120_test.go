@@ -206,3 +206,98 @@ func TestDavPermissionsReadOnly(t *testing.T) {
 		t.Error("unknown permissions count as read-only")
 	}
 }
+
+// Council fixes on 1.2.0.
+
+func TestLocalClashAnyOrder(t *testing.T) {
+	c := spaceCfg(t)
+	shared := filepath.Join(t.TempDir(), "Shared")
+	cases := [][2]KeptFolder{
+		// A space folder's default local copy vs a personal folder's localPath pointing there.
+		{{Path: "Docs", StateName: "a", Space: marketing}, {Path: "Other", StateName: "b", LocalPath: filepath.Join(expand(c.LocalRoot), "Marketing", "docs")}},
+		// Two localPaths, one inside the other, different spaces.
+		{{Path: "A", StateName: "a", LocalPath: shared}, {Path: "B", StateName: "b", Space: marketing, LocalPath: filepath.Join(shared, "sub")}},
+		// Personal folder nested inside a space folder's default copy.
+		{{Path: "Marketing/Docs/x", StateName: "a"}, {Path: "Docs", StateName: "b", Space: marketing}},
+	}
+	for i, pair := range cases {
+		for _, order := range [][2]int{{0, 1}, {1, 0}} {
+			c.Kept = []KeptFolder{pair[order[0]], pair[order[1]]}
+			if err := c.Validate(); err == nil {
+				t.Errorf("case %d order %v: clash accepted", i, order)
+			}
+		}
+	}
+	c.Kept = []KeptFolder{{Path: "Docs", StateName: "a", Space: marketing}, {Path: "Marketing/Docs", StateName: "b"}}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "“Docs” in Marketing") || strings.Contains(err.Error(), marketing.ID) {
+		t.Errorf("clash message: %v", err)
+	}
+}
+
+func TestSpaceRemoteWithPathPrefix(t *testing.T) {
+	c := spaceCfg(t)
+	c.ServerURL, c.DavPath = "https://cloud.example.com/opencloud", "/opencloud/remote.php/dav/files/sam"
+	var d graphDrives
+	if err := json.Unmarshal([]byte(strings.ReplaceAll(drivesJSON, "https://cloud.example.com", "https://cloud.example.com/opencloud")), &d); err != nil {
+		t.Fatal(err)
+	}
+	sp := parseSpaces(d, c.ServerURL)[1]
+	f := KeptFolder{Path: "Docs", StateName: "s", Space: sp.Ref()}
+	if want := ":webdav,vendor=infinitescale,url='https://cloud.example.com/opencloud/dav/spaces/storage-users-1$2222':"; c.RemoteFor(f) != want {
+		t.Errorf("remote %q", c.RemoteFor(f))
+	}
+	if got := davURLFor(c.ServerURL+"/", sp, "A b"); got != "https://cloud.example.com/opencloud/dav/spaces/storage-users-1$2222/A%20b/" {
+		t.Errorf("dav url %q", got)
+	}
+	// Through the tunnel the origin is the local end.
+	yes := true
+	c.UseTunnel, c.SSHHost, c.LocalPort = &yes, "host", 8443
+	if want := ":webdav,vendor=infinitescale,url='http://127.0.0.1:8443/opencloud/dav/spaces/storage-users-1$2222':"; c.RemoteFor(f) != want {
+		t.Errorf("tunnel remote %q", c.RemoteFor(f))
+	}
+}
+
+func TestSpaceDirNamesPortable(t *testing.T) {
+	for in, want := range map[string]string{
+		`Q1: "plans" <draft>|?*`: `Q1- -plans- -draft----`,
+		"Team. . ":               "Team",
+		"con":                    "con_",
+		"NUL.txt":                "NUL.txt_",
+		"Com7":                   "Com7_",
+		"lpt9.tar.gz":            "lpt9.tar.gz_",
+		"COM0":                   "COM0",
+		"Console":                "Console",
+		"LPT10":                  "LPT10",
+	} {
+		if got := spaceDirName(&SpaceRef{ID: "x", Name: in}); got != want {
+			t.Errorf("%q: %q, want %q", in, got, want)
+		}
+	}
+}
+
+// A settings file that loads with a problem is never written over: the kept folders in it survive.
+func TestBrokenConfigNeverWritten(t *testing.T) {
+	testEnv(t)
+	_ = os.MkdirAll(appDir(), 0o700)
+	bad := `{"davPath":"/remote.php/dav/files/sam","serverURL":"https://cloud.example.com","auth":"rclone","useTunnel":false,
+	  "mountEnabled":false,"checkForUpdates":false,"kept":[{"path":"Docs","stateName":"d"},{"path":"Docs/x","stateName":"e"}]}`
+	if err := os.WriteFile(configFile(), []byte(bad), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine()
+	if e.cfgErr == nil {
+		t.Fatal("overlapping folders loaded")
+	}
+	for name, err := range map[string]error{
+		"keep":  e.Keep("New", ""),
+		"space": e.keepIn(marketing, "New", ""),
+		"pause": e.SetPaused(true),
+	} {
+		if err == nil || !strings.Contains(err.Error(), "fix or remove") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if data, _ := os.ReadFile(configFile()); string(data) != bad {
+		t.Errorf("settings file changed: %s", data)
+	}
+}

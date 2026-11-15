@@ -1351,7 +1351,7 @@ func (e *Engine) SetPaused(paused bool) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.cfgErr != nil {
-		return fmt.Errorf("the settings file has a problem; fix it first")
+		return settingsBroken(e.cfgErr)
 	}
 	if e.cfg.Paused == paused {
 		return nil
@@ -1400,7 +1400,7 @@ func (e *Engine) keepIn(space *SpaceRef, path, localPath string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.cfgErr != nil {
-		return fmt.Errorf("the settings file has a problem; fix it first")
+		return settingsBroken(e.cfgErr)
 	}
 	if e.syncing {
 		return fmt.Errorf("a sync is running; try again when it finishes")
@@ -1474,7 +1474,7 @@ func (e *Engine) Unkeep(path string, result func(error)) error {
 	bad := e.cfgErr
 	e.mu.Unlock()
 	if bad != nil {
-		return fmt.Errorf("the settings file has a problem; fix it first")
+		return settingsBroken(bad)
 	}
 	return e.exclusive(func() {
 		// This computer's copy is gone or empty (an unplugged disk, say): there is nothing to
@@ -1721,3 +1721,9 @@ func agoAt(t, now time.Time) string {
 }
 
 func init() { log.SetFlags(0) }
+
+// settingsBroken refuses a change while config.json couldn't be loaded: writing then could
+// replace the user's settings (kept folders included) with defaults.
+func settingsBroken(err error) error {
+	return fmt.Errorf("the settings file has a problem (%v); fix or remove %s first, then reload the settings", err, configFile())
+}

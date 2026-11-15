@@ -9,8 +9,10 @@ The release workflow copies the section for a tag into that tag's GitHub release
 ### Added
 - **Keep folders from project spaces and shares**, not just your personal files. Mac: **Keep from a Space…** in Settings ▸ Kept Folders. Windows and Linux: the settings window's "Keep a folder by its path, or from another space". Choose the space, then type the folder or pick it from a list.
   - The spaces come from the server (`/graph/v1.0/me/drives`: project spaces and accepted shares). A folder that is read-only for you is refused with a clear message (checked with WebDAV `oc:permissions`).
-  - A space's folders are stored in `<local folder>/<space name>/…`, and the folder list shows the space. The same path can be kept from two spaces; overlap and local-folder checks take the space into account.
-  - They use the same sign-in; merge backups go to `.opencloud-bar-backups` at the top of their space.
+  - A space's folders are stored in `<local folder>/<space name>/…`, and the folder list shows the space. The space's folder name is made safe for Windows on every system (invalid characters become `-`, reserved names like `CON` get `_`). The same path can be kept from spaces with different names; two spaces with the same name share a local folder, so the second is refused.
+  - Overlap checks are per space. No two kept folders may share or nest a local folder, whatever their space or `localPath`. Messages name a folder as “path” in <space name>.
+  - They use the same sign-in, also when the server lives under a path (`https://host/opencloud`); merge backups go to `.opencloud-bar-backups` at the top of their space, reachable in the web UI.
+- **Mac:** while the settings file can't be loaded, every change that would save it (keeping or stopping a folder, settings edits) is refused with the problem shown, and the app never writes over a settings file that doesn't load. Before, saving then could replace your kept folders with the new one. The Windows and Linux app already edited the file in place and refused; its message now says what is wrong.
   - Existing settings and kept folders are unchanged (a folder without `space` is in the personal space).
 
 ### Not included

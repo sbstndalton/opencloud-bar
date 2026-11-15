@@ -972,7 +972,14 @@ final class AppModel: ObservableObject {
     // MARK: - Adding and removing kept folders
 
     /// Lets the user pick a folder in the on-demand drive and keeps it on this Mac from now on.
+    /// While config.json couldn't be loaded the model runs on defaults; saving then would replace
+    /// the user's settings (kept folders included). Every settings change checks this first.
+    var settingsBrokenMessage: String? {
+        configError.map { "The settings file has a problem, so nothing is saved until it's fixed or removed (\(Config.fileURL.path)), then Reload Settings.\n\n\($0)" }
+    }
+
     func keepFolder() {
+        if let m = settingsBrokenMessage { alert("Can't change the settings", m); return }
         guard !needsSignIn else { alert("Sign in first", "Choose Set Up / Sign In… in the menu."); return }
         guard driveMounted else {
             alert("Connect the OpenCloud drive first", "Folders are chosen from the drive. Choose Connect Drive, then try again.")
@@ -1009,6 +1016,7 @@ final class AppModel: ObservableObject {
     /// Adds a kept folder (checked against the others in its space and on this Mac), saves the
     /// settings and starts its first sync. Returns why it can't, or nil.
     private func addKept(_ new: KeptFolder) -> String? {
+        if let m = settingsBrokenMessage { return m }
         var folder = new
         let key = Config.foldKey(folder.path), sid = folder.space?.id
         if let clash = config.kept.first(where: {
@@ -1036,6 +1044,7 @@ final class AppModel: ObservableObject {
     /// Keeps a folder from a project space or a share. Read-only folders are refused: a two-way
     /// sync can't send changes back. Returns why it can't, or nil.
     func keepFolder(in space: Space, path: String) async -> String? {
+        if let m = settingsBrokenMessage { return m }
         guard !needsSignIn else { return "Sign in first." }
         guard !syncing else { return "A sync is running. Try again when it finishes." }
         let rel = path.split(separator: "/").joined(separator: "/")
@@ -1069,6 +1078,7 @@ final class AppModel: ObservableObject {
 
     /// Final sync, then moves the local copy to the Trash and stops syncing it.
     func stopKeeping(_ f: KeptFolder) {
+        if let m = settingsBrokenMessage { alert("Can't change the settings", m); return }
         guard !syncing else { alert("A sync is running", "Try again when it finishes."); return }
         Task {
             let local = config.localURL(f)
@@ -1102,8 +1112,13 @@ final class AppModel: ObservableObject {
                 try? fm.removeItem(at: self.workDir(f))
                 for s in [".initialised", ".needs-repair", ".auto-merge", ".drift-parked", ".filters-upgraded", ".conflicts.json"] { try? fm.removeItem(at: self.stateFile(f, s)) }
                 try? fm.removeItem(at: self.config.stateURL.appendingPathComponent("filters-\(f.stateName).txt"))
-                self.config.kept.removeAll { $0.key == f.key }
-                self.config.save()
+                var c = self.config
+                c.kept.removeAll { $0.key == f.key }
+                do { try c.write() } catch {
+                    self.alert("Couldn't save the settings", error.localizedDescription)
+                    return
+                }
+                self.config = c
                 self.refreshStatusEntries()
                 self.saveLastSuccess()
                 self.lastMessage = "“\(f.displayName)” is now only in OpenCloud"
@@ -1270,9 +1285,7 @@ final class AppModel: ObservableObject {
     /// the file are kept) and applies it. Returns an error message, or nil on success.
     /// Changes that restart the connection or alter sync filters wait until no sync is running.
     func updateConfig(_ edit: (inout Config) -> Void) async -> String? {
-        if configError != nil {
-            return "The settings file has a problem (shown at the top of this window). Fix it, then choose Reload Settings."
-        }
+        if let m = settingsBrokenMessage { return m }
         var trial = config
         edit(&trial)
         if trial.connectionKey != config.connectionKey, driveMounted, let n = await pendingUploads(), n > 0 {

@@ -309,8 +309,9 @@ function keepBox(busy) {
   const box = h("details", { class: "keep" }, h("summary", { text: "Keep a folder by its path, or from another space" }),
     h("p", { class: "hint", text: "Choose the space (Personal, a project space, or a folder shared with you), then type the folder's path in it or pick it from the list. Folders from other spaces go to " + (S.config.localRoot || "the local folder") + "/<space name>/…. Read-only folders can't be kept. The drive shows the personal space only." }),
     h("div", { class: "row" }, h("label", { text: "Space" }), sel,
-      keepSpaces === null ? h("button", { class: "btn", onclick: async () => { try { keepSpaces = (await get("spaces")).spaces; keepSpacesErr = ""; } catch (e) { keepSpaces = []; keepSpacesErr = e.message; } drawFolders(); } }, "Load Spaces") : null,
-      keepSpacesErr ? h("span", { class: "inline-err", text: keepSpacesErr }) : null),
+      keepSpaces === null ? h("button", { class: "btn", onclick: async () => { try { keepSpaces = (await get("spaces")).spaces || []; keepSpacesErr = ""; } catch (e) { keepSpaces = null; keepSpacesErr = e.message; } drawFolders(); } }, keepSpacesErr ? "Retry" : "Load Spaces") : null,
+      keepSpacesErr ? h("span", { class: "inline-err", text: keepSpacesErr }) : null,
+      keepSpaces && !keepSpaces.length ? h("span", { class: "hint", text: "No project spaces or shares are available to you." }) : null),
     h("div", { class: "row" }, h("input", { type: "text", id: "keep-path", placeholder: "Documents/Projects" }),
       h("button", { class: "btn", onclick: browse }, "List Folders"),
       h("button", { class: "btn", disabled: busy, onclick: () => { const p = pathOf(); if (p) act(() => post("keep", { path: p, space: keepSpace }), "Folder kept; the first sync starts shortly"); } }, "Keep")));

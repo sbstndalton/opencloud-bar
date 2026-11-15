@@ -51,6 +51,14 @@ func (f KeptFolder) Key() string {
 	return f.Space.ID + ":" + f.Path
 }
 
+// Label names a kept folder in messages: “path”, or “path” in <space name>.
+func (f KeptFolder) Label() string {
+	if f.Space == nil {
+		return "“" + f.Path + "”"
+	}
+	return "“" + f.Path + "” in " + f.Space.Name
+}
+
 func (f KeptFolder) spaceID() string {
 	if f.Space == nil {
 		return ""
@@ -58,15 +66,21 @@ func (f KeptFolder) spaceID() string {
 	return f.Space.ID
 }
 
-// spaceDirName is a space's folder name under localRoot: its name, made safe for a folder.
+// spaceDirName is a space's folder name under localRoot: its name, made safe for a folder on
+// every system the same way (so a settings file moves between computers): characters Windows
+// can't store become "-", trailing dots and spaces go, and a reserved Windows device name
+// (CON, NUL, COM1, LPT1.txt, …) gets "_" appended.
 func spaceDirName(s *SpaceRef) string {
 	name := strings.Map(func(r rune) rune {
-		if r == '/' || r == '\\' || r == ':' || unicode.IsControl(r) {
+		if strings.ContainsRune(`/\\:<>"|?*`, r) || unicode.IsControl(r) {
 			return '-'
 		}
 		return r
 	}, strings.TrimSpace(s.Name))
 	name = strings.TrimRight(name, " .")
+	if reservedWindowsName(name) {
+		name += "_"
+	}
 	if name == "" || name == "." || name == ".." {
 		name = "Space " + strings.Map(func(r rune) rune {
 			if unicode.IsLetter(r) || unicode.IsDigit(r) {
@@ -79,6 +93,17 @@ func spaceDirName(s *SpaceRef) string {
 		}
 	}
 	return name
+}
+
+// reservedWindowsName: CON, PRN, AUX, NUL, COM1–9, LPT1–9, any case, with or without an
+// extension ("nul.txt" is the device too).
+func reservedWindowsName(name string) bool {
+	base := strings.ToUpper(strings.TrimRight(strings.SplitN(name, ".", 2)[0], " "))
+	switch base {
+	case "CON", "PRN", "AUX", "NUL":
+		return true
+	}
+	return len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) && base[3] >= '1' && base[3] <= '9'
 }
 
 // Config uses the same JSON format as the macOS app; unknown keys are ignored and
@@ -207,6 +232,15 @@ func (c Config) BaseURL() string {
 	return strings.TrimRight(c.ServerURL, "/")
 }
 
+// urlOrigin is scheme://host[:port] of u, without any path.
+func urlOrigin(u string) string {
+	p, err := url.Parse(u)
+	if err != nil || p.Scheme == "" || p.Host == "" {
+		return strings.TrimRight(u, "/")
+	}
+	return p.Scheme + "://" + p.Host
+}
+
 func defaultConfig() Config {
 	mnt := "~/OpenCloud-Drive"
 	if runtime.GOOS == "windows" {
@@ -331,7 +365,9 @@ func (c Config) RemoteFor(f KeptFolder) string {
 	if f.Space == nil {
 		return c.RemoteSpec()
 	}
-	return fmt.Sprintf(":webdav,vendor=%s,url='%s%s':", c.Vendor(), c.BaseURL(), f.Space.DavPath)
+	// davPath comes from the space's webDavUrl, which already holds any path prefix the server
+	// lives under (https://host/opencloud/dav/spaces/…), so it goes after the origin only.
+	return fmt.Sprintf(":webdav,vendor=%s,url='%s%s':", c.Vendor(), urlOrigin(c.BaseURL()), f.Space.DavPath)
 }
 
 // ServerIdentityFor is what a folder's sync history was made with (personal: ServerIdentity).
@@ -481,16 +517,17 @@ func (c Config) Validate() error {
 			if f.spaceID() == g.spaceID() && overlaps(f.Path, g.Path) {
 				return fmt.Errorf("kept folders %q and %q overlap", f.Path, g.Path)
 			}
-			// Folders from different spaces must not share a local folder either.
-			if f.spaceID() != g.spaceID() && f.LocalPath == "" && g.LocalPath == "" {
-				a, b := filepath.Clean(c.Local(f)), filepath.Clean(c.Local(g))
-				if samePath(a, b) || within(a, b) || within(b, a) {
-					return fmt.Errorf("kept folder %q would share its folder on this computer (%s) with %q", f.Key(), a, g.Key())
-				}
-			}
 		}
 		if err := c.localPathProblem(f, i); err != nil {
 			return err
+		}
+		// No two kept folders, whatever their space or localPath, may share (or nest) a local
+		// folder: two sync histories on one folder would undo each other's work.
+		for _, g := range c.Kept[:i] {
+			a, b := filepath.Clean(c.Local(f)), filepath.Clean(c.Local(g))
+			if samePath(a, b) || within(a, b) || within(b, a) {
+				return fmt.Errorf("kept folder %s would share its folder on this computer (%s) with %s", f.Label(), a, g.Label())
+			}
 		}
 	}
 	if strings.Contains(c.DavPath, "'") {
