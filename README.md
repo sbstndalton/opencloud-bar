@@ -84,7 +84,7 @@ cd cross && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "-H window
 
 Start it with `opencloud-bar run`, or `opencloud-bar run --no-tray` on a server. Then control it with `status`, `sync`, `keep PATH [--local DIR]`, `unkeep PATH`, `repair PATH`, `allow-delete PATH`, `connect`, `eject`, `reload` and `quit`. On Windows, build a second copy without `-H windowsgui` to use the commands from a terminal.
 
-Download Windows builds from [Releases](https://github.com/sbstndalton/opencloud-bar/releases). They are built by the **Windows** workflow and signed through SignPath (see [Code signing policy](#code-signing-policy)). The Windows build hasn't been tested end to end yet.
+Download Windows builds from [Releases](https://github.com/sbstndalton/opencloud-bar/releases). They are built by the **Windows** workflow and signed through SignPath (see [Code signing policy](#code-signing-policy)). Tested on Windows 11: two-way sync, the O: drive, eject, stop keeping and quit. On Windows, Stop Keeping moves the local copy to "Removed by OpenCloud Bar" in your user folder rather than the Recycle Bin.
 
 Extra settings for the port:
 
