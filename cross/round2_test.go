@@ -312,3 +312,94 @@ func TestSyncUsesSettingsSnapshot(t *testing.T) {
 	}
 	<-done
 }
+
+// Round 3: an upgrade that only adds the app's own filter line merges once by itself (backed
+// up, not counted as the daily automatic merge) instead of asking for Repair.
+func TestUpgradeFilterChangeMergesOnce(t *testing.T) {
+	e, fr, f := syncRig(t, false)
+	old := strings.TrimSuffix(filtersText(e.cfg, f), backupFilter+"\n") // what 0.5 wrote
+	_ = os.WriteFile(e.cfg.filtersPath(f), []byte(old), 0o600)
+	_ = os.WriteFile(filepath.Join(e.cfg.Local(f), "a.txt"), []byte("x"), 0o600)
+	fr.lsf("a.txt\n")
+	fr.bisync("ERROR : Bisync critical error: filters file has changed (must run --resync): /x/filters.txt\n"+
+		"ERROR : Bisync aborted. Error is retryable without --resync due to --resilient mode.", 1)
+	// The fake answers every bisync the same way, so the merge "fails" too; what matters is
+	// that a backed-up merge is tried, once, and the daily automatic merge is untouched.
+	e.syncFolder(f, modeNormal)
+	c := fr.calls()
+	if strings.Count(c, "--resync") < 1 || !strings.Contains(c, "--backup-dir1") || !strings.Contains(c, "--backup-dir2") {
+		t.Fatalf("no backed-up merge: %s", c)
+	}
+	if exists(e.cfg.statePath(f, ".auto-merge")) {
+		t.Error("the upgrade merge used the daily automatic merge")
+	}
+	if exists(e.cfg.statePath(f, ".filters-upgraded")) {
+		t.Error("the upgrade merge would be tried again")
+	}
+	// Next time (still failing) it's an ordinary Repair, not another merge.
+	fr.reset()
+	e.syncFolder(f, modeNormal)
+	if strings.Contains(fr.calls(), "--resync") {
+		t.Errorf("merged twice: %s", fr.calls())
+	}
+	if s := state(e, f); s.State != StNeedsRepair {
+		t.Errorf("state: %+v", s)
+	}
+
+	// Success path: marker cleared, folder OK.
+	_ = os.Remove(e.cfg.statePath(f, ".needs-repair"))
+	_ = os.WriteFile(e.cfg.filtersPath(f), []byte(old), 0o600)
+	fr.bisync("", 0)
+	if !e.syncFolder(f, modeNormal) || state(e, f).State != StOK {
+		t.Errorf("after upgrade: %+v", state(e, f))
+	}
+
+	// The user's own excludes changed too: that's a Repair, never automatic.
+	_ = os.WriteFile(e.cfg.filtersPath(f), []byte("- *.tmp\n"), 0o600)
+	fr.bisync("ERROR : Bisync critical error: filters file has changed (must run --resync): /x\n", 1)
+	fr.reset()
+	e.syncFolder(f, modeNormal)
+	if strings.Contains(fr.calls(), "--resync") || state(e, f).State != StNeedsRepair {
+		t.Errorf("user filter change merged automatically: %s %+v", fr.calls(), state(e, f))
+	}
+	// An emptied side is never merged into.
+	_ = os.Remove(e.cfg.statePath(f, ".needs-repair"))
+	_ = os.WriteFile(e.cfg.filtersPath(f), []byte(old), 0o600)
+	_ = os.Remove(filepath.Join(e.cfg.Local(f), "a.txt"))
+	fr.reset()
+	e.syncFolder(f, modeNormal)
+	if strings.Contains(fr.calls(), "--resync") || state(e, f).Detail != missingLocalText("Docs") {
+		t.Errorf("merged into an empty local copy: %s %+v", fr.calls(), state(e, f))
+	}
+}
+
+// Round 3: Stop Keeping a folder whose local copy is gone doesn't sync or trash anything.
+func TestUnkeepMissingLocalCopy(t *testing.T) {
+	e, fr, f := syncRig(t, false)
+	_ = os.RemoveAll(e.cfg.Local(f))
+	done := make(chan error, 1)
+	if err := e.Unkeep("Docs", func(err error) { done <- err }); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(fr.calls(), "bisync") {
+		t.Errorf("synced: %s", fr.calls())
+	}
+	if len(e.config().Kept) != 0 || exists(e.cfg.statePath(f, ".initialised")) {
+		t.Errorf("still kept: %+v", e.config().Kept)
+	}
+}
+
+func TestClassifyFiltersChanged(t *testing.T) {
+	out := "ERROR : Bisync critical error: filters file has changed (must run --resync): /x\n" +
+		"ERROR : Bisync aborted. Error is retryable without --resync due to --resilient mode."
+	if r := classifyBisync(out, false); r.outcome != outcomeFiltersChanged {
+		t.Errorf("got %v", r.outcome)
+	}
+	if !onlyAppFilterChanged("- a\n", "- a\n"+backupFilter+"\n") || onlyAppFilterChanged("- a\n", "- b\n"+backupFilter+"\n") ||
+		onlyAppFilterChanged("- a\n", "- a\n") {
+		t.Error("onlyAppFilterChanged")
+	}
+}

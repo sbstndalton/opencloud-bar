@@ -8,8 +8,10 @@ struct BisyncResult: Equatable {
         case interrupted
         /// the listings say the two sides differ ("out of sync"): a merge fixes it
         case drift
-        /// sync history unusable for another reason (filters changed, listings lost)
+        /// sync history unusable for another reason (listings lost)
         case needsResync
+        /// the filters file changed since the last sync: rclone wants a resync
+        case filtersChanged
         /// safety abort: too many deletes, or all files changed on one side
         case bigChange
         case signedOut
@@ -53,6 +55,8 @@ struct BisyncResult: Equatable {
             }
             return r
         }
+        // rclone also says "retryable" here (--resilient), but retrying would fail forever.
+        if out.contains("filters file has changed") { return .init(outcome: .filtersChanged) }
         if out.contains("retryable without --resync") { return .init(outcome: .failed) }
         if out.contains("Must run --resync") || out.contains("--resync to recover") { return .init(outcome: .needsResync) }
         return .init(outcome: .failed)
@@ -121,6 +125,15 @@ enum Backups {
     }
 
     /// Removes this Mac's backups of a folder older than 30 days (by the date in their name).
+    /// True when two filters files differ only in the app's own line (new in 1.0): the user's
+    /// excludes are the same, so an upgrade merges once by itself instead of asking for Repair.
+    static func onlyAppFilterChanged(_ old: String, _ new: String) -> Bool {
+        func strip(_ s: String) -> String {
+            s.components(separatedBy: "\n").filter { $0.trimmingCharacters(in: .whitespaces) != filter }.joined(separator: "\n")
+        }
+        return old != new && strip(old) == strip(new)
+    }
+
     static func prune(_ stateURL: URL, _ stateName: String, now: Date = Date()) {
         let dir = stateURL.appendingPathComponent("backups/\(stateName)")
         let fm = FileManager.default

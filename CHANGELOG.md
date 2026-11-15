@@ -25,12 +25,15 @@ The first stable release. It gathers the reliability work and features of 0.4 an
 
 ### Fixed
 - Windows and Linux: **About OpenCloud Bar** in the tray now switches an already open settings window to About. Before, it did nothing.
-- **An empty or missing copy on this computer** (an unplugged disk, a moved folder) is no longer offered as a "large deletion" to apply to OpenCloud. The folder says "This computer's copy of “X” is empty or missing — reconnect the disk or Stop Keeping". Allow Large Deletion checks both sides again before it runs, and its dialog says on which side the files were deleted.
+- **An empty or missing copy on this computer** (an unplugged disk, a moved folder) is no longer offered as a "large deletion" to apply to OpenCloud. The folder says the copy is empty or missing, and to reconnect the disk or choose Stop Keeping. Allow Large Deletion checks both sides again before it runs, and its dialog says on which side the files were deleted.
 - The automatic-merge notification said "nothing was deleted", but a merge replaces the older copy of a file. Those copies are now kept (see Merge backups) and the text says where.
 - An automatic merge only runs if its once-a-day record could be saved. A merge that was interrupted doesn't count toward the daily limit.
 - Windows and Linux: Pause, Keep, Stop Keeping, sign-in and the settings page each change only their own settings, so one no longer undoes another's change, and settings of other versions inside kept folders are kept. A running sync uses its own copy of the settings.
 - A failed update check is retried after 15 minutes (doubling, up to 6 hours) instead of counting as the day's check. The update notification isn't used up while notifications are off.
 - macOS: the single-instance lock is no longer inherited by rclone and ssh; two notifications at once no longer lose the second while permission is asked; the sign-in is saved under the same lock as token refreshes; a sync that ignores SIGTERM after a timeout or on Quit is killed.
+- **Upgrading doesn't send every folder to Repair.** 1.0 adds a line to each folder's sync filters (the backup folder), and rclone then insists on starting the sync history over. Each kept folder now does that as one automatic merge (backed up, newer wins, not counted as the day's automatic merge, never into an empty side) instead of waiting for Repair. A change to your own excludes still asks for Repair, with that reason; before, it failed on every sync.
+- **Stop Keeping works when this computer's copy is missing or empty:** it skips the final sync and the trash and just stops keeping the folder (the folder in OpenCloud is untouched). Before, it failed because the sync failed.
+- Windows installer and uninstaller: they no longer force the app to quit while files written to the drive may still be uploading. They stop and ask you to try again. `opencloud-bar quit` exits with code 2 in that case, and 0 when the app isn't running.
 - Per-folder **Sync Now** (also in the menu's problem submenu) is disabled while syncing is paused.
 - Linux without zenity: Quit while files may still be uploading keeps running and says so in a notification, with `opencloud-bar quit --force` to quit anyway.
 

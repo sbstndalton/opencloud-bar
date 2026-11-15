@@ -34,7 +34,7 @@ Get the latest version from [Releases](https://github.com/sbstndalton/opencloud-
   3. Scroll down to the message about OpenCloud Bar and choose **Open Anyway**, then confirm.
 
   This is needed only once per download.
-- **Windows:** until the Windows builds are code-signed (see [Code signing policy](#code-signing-policy)), SmartScreen may say "Windows protected your PC". Choose **More info ▸ Run anyway**.
+- **Windows:** the installer isn't code-signed (see [Code signing policy](#code-signing-policy)), so SmartScreen may say "Windows protected your PC". Choose **More info ▸ Run anyway**. Signing the programs inside it doesn't change that warning.
 - **Linux:** start **OpenCloud Bar** from your applications menu, or run `opencloud-bar` in a terminal.
 
 ## Getting started
@@ -88,20 +88,21 @@ On Windows there are two programs in one folder:
 - `OpenCloud Bar.exe` is the tray app, with no console window.
 - `opencloud-bar.exe` is the same program as a console app, so commands print their output in a terminal.
 
-`deploy-ms02/` shows a headless server set-up: a systemd user service and an `rclone` wrapper that runs rclone's official Docker image.
+`deploy-ms02/` shows a headless server set-up: a systemd user service and an `rclone` wrapper that runs rclone's official Docker image. The memory cap is on that container (3 GB), not on the service: a limit on the service would kill it mid-sync.
 
 ## Safety
 
 - A folder's first sync, a Repair and an automatic merge all merge both sides: the newer copy of each file wins. No file is deleted, but the older copy of a file is replaced, so a merge keeps it first:
-  - in OpenCloud, in `.opencloud-bar-backups/<folder>/<date and time>/` at the top of your space (shown on the drive, never synced; delete old ones in the web UI when you no longer need them);
+  - in OpenCloud, in `.opencloud-bar-backups/<folder>/<date and time>/` at the top of your space (shown on the drive, never synced). These are **not removed automatically**: delete old ones in the web UI or on the drive when you no longer need them;
   - on this computer, in `backups/<folder>/<date and time>/` in the sync state folder (`stateDir`), removed after 30 days.
 - An automatic merge happens at most once per folder a day; after that, the folder waits for you to choose **Repair**. Until then, each sync interval tries a plain sync, and if that works the folder needs no repair after all.
 - A sync stopped by Quit, sleep or a timeout resumes the next time without a repair.
 - If more than half a folder's files would be deleted, the sync stops and the folder offers **Allow Large Deletion…**.
   - The dialog says on which side the files were deleted.
-  - That override is never offered when the copy on either side is missing or empty: for example the folder is gone from OpenCloud, or the disk with this computer's copy isn't connected. There, applying the "deletion" would empty the other copy. The folder says so ("…is empty or missing — reconnect the disk or Stop Keeping") instead.
+  - That override is never offered when the copy on either side is missing or empty: for example the folder is gone from OpenCloud, or the disk with this computer's copy isn't connected. There, applying the "deletion" would empty the other copy. The folder says so instead: reconnect the disk, or choose **Stop Keeping**, which then just stops syncing it here (no final sync, nothing moved to the trash, the folder in OpenCloud stays as it is).
+- After upgrading to 1.0, each kept folder does one merge on its own (backed up as above, and not counted as the day's automatic merge), because the app added a line to its sync filters and rclone then insists on starting the sync history over. No Repair is needed.
 - **Stop Keeping** runs a final sync first, and only moves the local copy if that sync succeeds. It goes to the Trash (Mac and Linux), or to "Removed by OpenCloud Bar" in your user folder (Windows).
-- Eject, Quit and Sign Out wait for files written to the drive to finish uploading. If the app can't tell, they ask first.
+- Eject, Quit and Sign Out wait for files written to the drive to finish uploading. If the app can't tell, they ask first. The Windows installer and uninstaller don't force it either: while files may still be uploading they stop and ask you to try again (or to quit from the tray). Only `opencloud-bar quit --force` / `logout --force` skip the check.
 - Ejecting the drive in Finder keeps it ejected until you choose **Connect Drive**. If rclone crashes, the drive is mounted again automatically.
 - Kept folder paths are limited to about 90 characters (a limit of rclone bisync's state file names).
 

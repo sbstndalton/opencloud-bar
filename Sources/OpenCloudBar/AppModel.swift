@@ -580,6 +580,12 @@ final class AppModel: ObservableObject {
         let filters = stateFile(f, "").deletingLastPathComponent().appendingPathComponent("filters-\(f.stateName).txt")
         let filterText = (f.extraFilters + config.commonFilters + [Backups.filter]).joined(separator: "\n") + "\n"
         // only rewrite when changed: bisync insists on a resync after a filters change
+        if let old = try? String(contentsOf: filters, encoding: .utf8), old != filterText,
+           Backups.onlyAppFilterChanged(old, filterText) {
+            // Only the app's own line changed (an upgrade): rclone will want a resync, which is
+            // then one automatic merge instead of a Repair for the user.
+            fm.createFile(atPath: stateFile(f, ".filters-upgraded").path, contents: nil)
+        }
         if (try? String(contentsOf: filters, encoding: .utf8)) != filterText {
             try? filterText.write(to: filters, atomically: true, encoding: .utf8)
         }
@@ -611,6 +617,9 @@ final class AppModel: ObservableObject {
             Log.line("\(f.path): still needs repair (plain sync failed)")
             return stillParked()
         }
+        if res.outcome == .filtersChanged, fm.fileExists(atPath: stateFile(f, ".filters-upgraded").path) {
+            return await filtersUpgradeMerge(run)
+        }
         guard res.outcome == .drift else { await failed(run, res, r.output); return false }
 
         // The two sides' listings disagree. bisync won't continue (and --recover only falls back
@@ -636,6 +645,25 @@ final class AppModel: ObservableObject {
         lastMessage = "“\(f.displayName)” was out of sync and was merged automatically (the newer copy of each file was kept; older copies are in the backups)"
         autoMerged.append(f.displayName)
         return true
+    }
+
+    /// The one merge after an upgrade changed only the app's own filter line: a normal
+    /// backed-up merge, tried once, not counted toward the daily automatic-merge limit. An
+    /// emptied side is never merged into.
+    private func filtersUpgradeMerge(_ run: FolderRun) async -> Bool {
+        let f = run.f
+        if localMissingOrEmpty(run.local) {
+            status[f.path]?.state = .failed(Self.missingLocalText(f.displayName)); return false
+        }
+        if await remoteMissingOrEmpty(f) {
+            status[f.path]?.state = .failed(Self.missingRemoteText); return false
+        }
+        let marker = stateFile(f, ".filters-upgraded")
+        try? FileManager.default.removeItem(at: marker)   // once: if it fails, Repair as usual
+        Log.line("\(f.path): the app's filters changed with the upgrade; merging once, newer copy wins")
+        let (ok, outcome) = await merge(run, kind: "merge (app filters updated)")
+        if !ok, outcome == .interrupted { FileManager.default.createFile(atPath: marker.path, contents: nil) }
+        return ok
     }
 
     /// `bisync --resync --resync-mode newer`: for each file the newer copy wins and no file is
@@ -686,6 +714,7 @@ final class AppModel: ObservableObject {
         fm.createFile(atPath: run.marker.path, contents: nil)
         try? fm.removeItem(at: stateFile(run.f, ".needs-repair"))
         try? fm.removeItem(at: stateFile(run.f, ".drift-parked"))
+        try? fm.removeItem(at: stateFile(run.f, ".filters-upgraded"))
         try? config.serverIdentity.write(to: run.serverFile, atomically: true, encoding: .utf8)
         status[run.f.path]?.state = .ok
         status[run.f.path]?.lastSuccess = Date()
@@ -696,7 +725,7 @@ final class AppModel: ObservableObject {
     /// This Mac's copy vanished (an unplugged disk, a moved folder). The large-deletion override
     /// is never offered then: it would empty the copy in OpenCloud.
     nonisolated static func missingLocalText(_ name: String) -> String {
-        "This computer's copy of “\(name)” is empty or missing — reconnect the disk or Stop Keeping"
+        "This Mac's copy of “\(name)” is empty or missing. If it is on a disk, reconnect it; to stop syncing it here instead, choose Stop Keeping (the folder in OpenCloud stays as it is)"
     }
 
     /// Shows why a run failed (drift is handled by the caller).
@@ -726,6 +755,8 @@ final class AppModel: ObservableObject {
             } else {
                 status[f.path]?.state = .bigDeletion(res.side == "Path1" ? "on this Mac" : res.side == "Path2" ? "in OpenCloud" : "")
             }
+        case .filtersChanged:
+            markNeedsRepair(f, "the excludes changed, so the sync history must start over; choose Repair")
         case .needsResync:
             if out.contains("directory not found"), await remoteMissingOrEmpty(f) {
                 status[f.path]?.state = .failed(Self.missingRemoteText)
@@ -907,25 +938,36 @@ final class AppModel: ObservableObject {
     func stopKeeping(_ f: KeptFolder) {
         guard !syncing else { alert("A sync is running", "Try again when it finishes."); return }
         Task {
-            let unsynced = await countUnsyncedFiles(f)
-            var text = "Your changes are synced to OpenCloud first. Then the copy on this Mac is moved to the Trash. The folder stays in OpenCloud and in the OpenCloud drive."
-            if let n = unsynced, n > 0 {
-                text += "\n\n\(n) file(s) in it are never synced (for example build folders, node_modules, or folders excluded in Settings). They exist only on this Mac and will go to the Trash with it."
+            let local = config.localRootURL.appendingPathComponent(f.path)
+            // This Mac's copy is gone or empty (an unplugged disk, say): nothing to upload or to
+            // move to the Trash, so it just stops being kept. A final sync would only fail.
+            let gone = localMissingOrEmpty(local)
+            var text: String
+            if gone {
+                text = "The copy on this Mac is missing or empty, so there is nothing to sync or move to the Trash. OpenCloud Bar just stops keeping it here. The folder stays in OpenCloud and in the OpenCloud drive."
+            } else {
+                text = "Your changes are synced to OpenCloud first. Then the copy on this Mac is moved to the Trash. The folder stays in OpenCloud and in the OpenCloud drive."
+                if let n = await countUnsyncedFiles(f), n > 0 {
+                    text += "\n\n\(n) file(s) in it are never synced (for example build folders, node_modules, or folders excluded in Settings). They exist only on this Mac and will go to the Trash with it."
+                }
             }
             guard confirm("Stop keeping “\(f.displayName)” on this Mac?", text, button: "Stop Keeping") else { return }
             _ = exclusive { [self] in
-                guard await self.syncFolder(f, mode: .normal) else {
-                    self.alert("Couldn't sync “\(f.displayName)”", "Nothing was removed. Check the sync log and try again.")
-                    return
-                }
                 let fm = FileManager.default
-                let local = self.config.localRootURL.appendingPathComponent(f.path)
-                do { try fm.trashItem(at: local, resultingItemURL: nil) } catch {
-                    self.alert("Couldn't move it to the Trash", error.localizedDescription)
-                    return
+                if gone, localMissingOrEmpty(local) {
+                    Log.line("\(f.path): local copy is missing or empty; stopped keeping it without a final sync")
+                } else {
+                    guard await self.syncFolder(f, mode: .normal) else {
+                        self.alert("Couldn't sync “\(f.displayName)”", "Nothing was removed. Check the sync log and try again.")
+                        return
+                    }
+                    do { try fm.trashItem(at: local, resultingItemURL: nil) } catch {
+                        self.alert("Couldn't move it to the Trash", error.localizedDescription)
+                        return
+                    }
                 }
                 try? fm.removeItem(at: self.workDir(f))
-                for s in [".initialised", ".needs-repair", ".auto-merge", ".drift-parked"] { try? fm.removeItem(at: self.stateFile(f, s)) }
+                for s in [".initialised", ".needs-repair", ".auto-merge", ".drift-parked", ".filters-upgraded"] { try? fm.removeItem(at: self.stateFile(f, s)) }
                 try? fm.removeItem(at: self.config.stateURL.appendingPathComponent("filters-\(f.stateName).txt"))
                 self.config.kept.removeAll { $0.path == f.path }
                 self.config.save()

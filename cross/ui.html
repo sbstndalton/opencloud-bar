@@ -288,6 +288,7 @@ function folderDetail(f, busy) {
 }
 async function stopKeeping(f) {
   let text = "Your changes are synced to OpenCloud first. Then the copy on this computer is moved to the trash. The folder stays in OpenCloud.";
+  if (f.state === "failed" && (f.detail || "").includes("is empty or missing")) text = "The copy on this computer is missing or empty, so there is nothing to sync or move to the trash. OpenCloud Bar just stops keeping it here. The folder stays in OpenCloud.";
   try { const u = await get("unsynced?path=" + encodeURIComponent(f.path)); if (u.unsynced > 0) text += "\n\n" + u.unsynced + " file(s) in it are never synced (build folders, excluded items) and exist only here. They move with it."; } catch (e) { /* ignore */ }
   if (confirm("Stop keeping " + f.name + " here?\n\n" + text)) act(() => post("unkeep", { path: f.path }), "Started; see the status above");
 }

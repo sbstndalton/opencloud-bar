@@ -61,9 +61,8 @@ Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\winfsp.msi"" /qn /norestart"; S
 Filename: "{app}\OpenCloud Bar.exe"; Description: "Start OpenCloud Bar now"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [UninstallRun]
-; Stop the app (even with uploads pending: the user chose to uninstall), then forget the sign-in
+; The app was stopped in InitializeUninstall (only once nothing is uploading). Forget the sign-in
 ; (the stored refresh token only; settings and kept folders stay).
-Filename: "{app}\opencloud-bar.exe"; Parameters: "quit --force"; Flags: runhidden waituntilterminated; RunOnceId: "QuitApp"
 Filename: "{app}\opencloud-bar.exe"; Parameters: "logout --force"; Flags: runhidden waituntilterminated; RunOnceId: "Logout"
 
 [Code]
@@ -85,6 +84,12 @@ begin
   Result := WinFspAt(HKLM32) or WinFspAt(HKLM64);
 end;
 
+// `opencloud-bar quit` exits 2 when it refused because files written to the drive may still be
+// uploading (0: stopped or not running). Installer and uninstaller never force it: they stop
+// and say so, as the README's Safety section promises.
+const UploadsPendingMsg = 'OpenCloud Bar is still uploading files written to the OpenCloud drive (or can''t tell whether it is). ' +
+  'Wait a moment, or quit it from its tray icon (it asks before quitting), then try again.';
+
 // Before files are replaced on an update: stop the running app cleanly (as the signed-in
 // user, whose app it is), so the drive is ejected and a running sync saves its state.
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -92,7 +97,21 @@ var Code: Integer;
 begin
   Result := '';
   if FileExists(ExpandConstant('{app}\opencloud-bar.exe')) then
-    ExecAsOriginalUser(ExpandConstant('{app}\opencloud-bar.exe'), 'quit --force', '', SW_HIDE, ewWaitUntilTerminated, Code);
+    if ExecAsOriginalUser(ExpandConstant('{app}\opencloud-bar.exe'), 'quit', '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 2) then
+      Result := UploadsPendingMsg + ' Then choose Back and Next.';
+end;
+
+function InitializeUninstall(): Boolean;
+var Code: Integer;
+begin
+  Result := True;
+  if Exec(ExpandConstant('{app}\opencloud-bar.exe'), 'quit', '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 2) then
+  begin
+    Log('Uninstall stopped: ' + UploadsPendingMsg);
+    if not UninstallSilent then
+      MsgBox(UploadsPendingMsg + ' Then uninstall again.', mbInformation, MB_OK);
+    Result := False;
+  end;
 end;
 
 function NeedsAddPath(Param: String): Boolean;

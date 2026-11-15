@@ -16,13 +16,14 @@ import (
 type syncOutcome int
 
 const (
-	outcomeOK          syncOutcome = iota
-	outcomeInterrupted             // quit, sleep or a timeout: --recover picks up on the next run
-	outcomeDrift                   // listings say the two sides differ ("out of sync"): a merge fixes it
-	outcomeNeedsResync             // sync history unusable for another reason (filters changed, listings lost)
-	outcomeBigChange               // safety abort: too many deletes, or all files changed on one side
-	outcomeSignedOut               // the token command said the sign-in is gone
-	outcomeFailed                  // anything else: retried on the next run
+	outcomeOK             syncOutcome = iota
+	outcomeInterrupted                // quit, sleep or a timeout: --recover picks up on the next run
+	outcomeDrift                      // listings say the two sides differ ("out of sync"): a merge fixes it
+	outcomeNeedsResync                // sync history unusable for another reason (listings lost)
+	outcomeFiltersChanged             // the filters file changed since the last sync: rclone wants a resync
+	outcomeBigChange                  // safety abort: too many deletes, or all files changed on one side
+	outcomeSignedOut                  // the token command said the sign-in is gone
+	outcomeFailed                     // anything else: retried on the next run
 )
 
 // The path follows the first " - " after Path2's value (paths may contain " - " themselves).
@@ -69,6 +70,10 @@ func classifyBisync(out string, timedOut bool) bisyncResult {
 			}
 		}
 		return r
+	// rclone v1.76 says "filters file has changed (must run --resync)" and, with --resilient,
+	// "retryable without --resync" too: retrying would fail forever, so check this first.
+	case strings.Contains(out, "filters file has changed"):
+		return bisyncResult{outcome: outcomeFiltersChanged}
 	case strings.Contains(out, "retryable without --resync"):
 		return bisyncResult{outcome: outcomeFailed}
 	case strings.Contains(out, "Must run --resync") || strings.Contains(out, "--resync to recover"):
@@ -113,7 +118,8 @@ const missingRemoteText = "Folder is missing or empty in OpenCloud"
 // missingLocalText is shown when this computer's copy vanished (an unplugged disk, a moved
 // folder). Never offer the large-deletion override then: it would empty the server copy.
 func missingLocalText(name string) string {
-	return "This computer's copy of “" + name + "” is empty or missing — reconnect the disk or Stop Keeping"
+	return "This computer's copy of “" + name + "” is empty or missing. If it is on a disk, reconnect it; " +
+		"to stop syncing it here instead, choose Stop Keeping (the folder in OpenCloud stays as it is)"
 }
 
 // localMissingOrEmpty is true when dir doesn't exist or holds no files (empty folders and
@@ -146,6 +152,22 @@ const (
 
 // backupFilter keeps the backup folder out of every sync.
 const backupFilter = "- " + backupFolderName + "/**"
+
+// onlyAppFilterChanged is true when two filters files differ only in the line the app adds
+// itself (the backup folder, new in 1.0): the user's excludes are the same. An upgrade then
+// merges once on its own instead of asking for Repair.
+func onlyAppFilterChanged(old, new string) bool {
+	strip := func(s string) string {
+		var keep []string
+		for _, l := range strings.Split(s, "\n") {
+			if strings.TrimSpace(l) != backupFilter {
+				keep = append(keep, l)
+			}
+		}
+		return strings.Join(keep, "\n")
+	}
+	return old != new && strip(old) == strip(new)
+}
 
 func backupStamp(now time.Time) string { return now.UTC().Format(backupStampFmt) }
 

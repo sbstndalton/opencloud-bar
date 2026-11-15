@@ -896,7 +896,12 @@ func (e *Engine) syncFolder(f KeptFolder, mode syncMode) bool {
 		_ = os.WriteFile(serverFile, []byte(cfg.ServerIdentity()), 0o600)
 	}
 	filters := cfg.filtersPath(f)
-	if b, _ := os.ReadFile(filters); string(b) != filtersText(cfg, f) {
+	if b, err := os.ReadFile(filters); string(b) != filtersText(cfg, f) {
+		if err == nil && onlyAppFilterChanged(string(b), filtersText(cfg, f)) {
+			// Only the app's own line changed (an upgrade): rclone will want a resync, which
+			// is then one automatic merge instead of a Repair for the user.
+			_ = os.WriteFile(cfg.statePath(f, ".filters-upgraded"), nil, 0o600)
+		}
 		_ = os.WriteFile(filters, []byte(filtersText(cfg, f)), 0o600)
 	}
 	r := folderRun{cfg: cfg, f: f, local: local, work: work, filters: filters, serverFile: serverFile, marker: marker}
@@ -937,6 +942,9 @@ func (e *Engine) syncFolder(f KeptFolder, mode syncMode) bool {
 		e.logLine("%s: still needs repair (plain sync failed)", f.Path)
 		return stillParked()
 	}
+	if res.outcome == outcomeFiltersChanged && exists(cfg.statePath(f, ".filters-upgraded")) {
+		return e.filtersUpgradeMerge(r)
+	}
 	if res.outcome != outcomeDrift {
 		e.syncFailed(r, res, out)
 		return false
@@ -967,6 +975,29 @@ func (e *Engine) syncFolder(f KeptFolder, mode syncMode) bool {
 	e.autoMerged = append(e.autoMerged, f.DisplayName())
 	e.mu.Unlock()
 	return true
+}
+
+// filtersUpgradeMerge is the one merge after an upgrade changed only the app's own filter line.
+// It is a normal backed-up merge (newer wins, older copies kept), tried once, and doesn't count
+// toward the daily automatic-merge limit. An emptied side is never merged into.
+func (e *Engine) filtersUpgradeMerge(r folderRun) bool {
+	f := r.f
+	if localMissingOrEmpty(r.local) {
+		e.setState(f, StFailed, missingLocalText(f.DisplayName()))
+		return false
+	}
+	if e.remoteMissingOrEmpty(r.cfg, f) {
+		e.setState(f, StFailed, missingRemoteText)
+		return false
+	}
+	marker := r.cfg.statePath(f, ".filters-upgraded")
+	_ = os.Remove(marker) // once: if it doesn't work, the folder asks for Repair as usual
+	e.logLine("%s: the app's filters changed with the upgrade; merging once, newer copy wins", f.Path)
+	ok, outcome := e.merge(r, "merge (app filters updated)", "")
+	if !ok && outcome == outcomeInterrupted {
+		_ = os.WriteFile(marker, nil, 0o600) // it didn't happen: try again next time
+	}
+	return ok
 }
 
 // filtersText is the folder's filters file: its own excludes, the common ones, and the
@@ -1069,6 +1100,7 @@ func (e *Engine) syncSucceeded(r folderRun) {
 	_ = os.WriteFile(r.marker, nil, 0o600)
 	_ = os.Remove(r.cfg.statePath(r.f, ".needs-repair"))
 	_ = os.Remove(r.cfg.statePath(r.f, ".drift-parked"))
+	_ = os.Remove(r.cfg.statePath(r.f, ".filters-upgraded"))
 	_ = os.WriteFile(r.serverFile, []byte(r.cfg.ServerIdentity()), 0o600)
 	e.setState(r.f, StOK, "")
 }
@@ -1105,6 +1137,8 @@ func (e *Engine) syncFailed(r folderRun, res bisyncResult, out string) {
 			return
 		}
 		e.setState(f, StBigDeletion, bigDeletionSide(res.side))
+	case outcomeFiltersChanged:
+		e.markNeedsRepair(f, "the excludes changed, so the sync history must start over; choose Repair")
 	case outcomeNeedsResync:
 		if strings.Contains(out, "directory not found") && e.remoteMissingOrEmpty(r.cfg, f) {
 			e.setState(f, StFailed, missingRemoteText)
@@ -1368,16 +1402,22 @@ func (e *Engine) Unkeep(path string, result func(error)) error {
 		return fmt.Errorf("the settings file has a problem; fix it first")
 	}
 	return e.exclusive(func() {
-		if !e.syncFolder(f, modeNormal) {
-			result(fmt.Errorf("couldn't sync %q; nothing was removed", f.DisplayName()))
-			return
-		}
-		if err := moveToTrash(e.config().Local(f)); err != nil {
-			result(fmt.Errorf("couldn't move it to %s: %w", trashName(), err))
-			return
+		// This computer's copy is gone or empty (an unplugged disk, say): there is nothing to
+		// upload or move away, so just stop keeping it. Syncing would only fail (or worse).
+		if local := e.config().Local(f); localMissingOrEmpty(local) {
+			e.logLine("%s: local copy is missing or empty; stopped keeping it without a final sync", f.Path)
+		} else {
+			if !e.syncFolder(f, modeNormal) {
+				result(fmt.Errorf("couldn't sync %q; nothing was removed", f.DisplayName()))
+				return
+			}
+			if err := moveToTrash(local); err != nil {
+				result(fmt.Errorf("couldn't move it to %s: %w", trashName(), err))
+				return
+			}
 		}
 		_ = os.RemoveAll(e.workDir(f))
-		for _, s := range []string{".initialised", ".needs-repair", ".auto-merge", ".drift-parked"} {
+		for _, s := range []string{".initialised", ".needs-repair", ".auto-merge", ".drift-parked", ".filters-upgraded"} {
 			_ = os.Remove(e.stateFile(f, s))
 		}
 		_ = os.Remove(e.filtersFile(f))

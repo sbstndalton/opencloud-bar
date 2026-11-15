@@ -8,9 +8,10 @@ Restart=on-failure
 RestartSec=30
 KillSignal=SIGTERM
 TimeoutStopSec=180
-# No MemoryMax: rclone's memory grows with the size of the kept folders (bisync holds the
-# listings in memory). A hard limit made systemd kill the service mid-sync; see
-# packaging/linux/opencloud-bar.service.
+# No MemoryMax on this service: the app itself is small, and a limit here would also cover
+# rclone (bisync holds the listings in memory), so systemd would kill the whole service
+# mid-sync. On this server rclone runs in Docker instead (see rclone-docker), and that
+# container is capped at 3 GB: the memory cap lives there.
 
 [Install]
 WantedBy=default.target

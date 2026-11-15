@@ -77,8 +77,17 @@ func main() {
 		if len(os.Args) > 2 && os.Args[2] == "--force" {
 			q.Set("force", "1")
 		}
-		if err := call("POST", "/quit", q, nil); err != nil {
-			fail(err)
+		// Exit codes for installers: 0 stopped (or wasn't running), 2 refused because files may
+		// still be uploading (the user should quit from the tray, which asks), 1 anything else.
+		if err := call("POST", "/quit", q, nil); errors.Is(err, errNotRunning) {
+			fmt.Println("opencloud-bar isn't running")
+			return
+		} else if err != nil {
+			fmt.Fprintln(os.Stderr, "opencloud-bar:", err)
+			if strings.Contains(err.Error(), "--force") {
+				os.Exit(2)
+			}
+			os.Exit(1)
 		}
 		// Wait until it has stopped (a running sync saves its state, the drive is ejected), so
 		// an installer can replace the files right after.
@@ -255,11 +264,13 @@ func apiToken(create bool) (string, error) {
 	return t, os.WriteFile(tokenFile(), []byte(t), 0o600)
 }
 
+var errNotRunning = errors.New("opencloud-bar isn't running (start it with `opencloud-bar run`)")
+
 func call(method, path string, q url.Values, out any) error {
 	cfg, _ := loadConfig()
 	tok, err := apiToken(false)
 	if err != nil {
-		return err
+		return errNotRunning
 	}
 	u := fmt.Sprintf("http://127.0.0.1:%d%s", cfg.APIPort(), path)
 	if q != nil {
@@ -269,7 +280,7 @@ func call(method, path string, q url.Values, out any) error {
 	req.Header.Set("Authorization", "Bearer "+tok)
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
-		return fmt.Errorf("opencloud-bar isn't running (start it with `opencloud-bar run`)")
+		return errNotRunning
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
