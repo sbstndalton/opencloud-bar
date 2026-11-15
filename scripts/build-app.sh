@@ -13,6 +13,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/OpenCloudBar "$APP/Contents/MacOS/OpenCloudBar"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+cp packaging/icon/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # Bundle rclone if a folder holding it is given (RCLONE_DIR=... ./scripts/build-app.sh).
 if [ -n "${RCLONE_DIR:-}" ]; then
   mkdir -p "$APP/Contents/Helpers"

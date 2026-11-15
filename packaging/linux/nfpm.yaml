@@ -37,3 +37,9 @@ contents:
     dst: /usr/share/applications/opencloud-bar.desktop
   - src: packaging/linux/opencloud-bar.service
     dst: /usr/lib/systemd/user/opencloud-bar.service
+  - src: packaging/icon/icon-256.png
+    dst: /usr/share/icons/hicolor/256x256/apps/opencloud-bar.png
+  - src: packaging/icon/icon-512.png
+    dst: /usr/share/icons/hicolor/512x512/apps/opencloud-bar.png
+  - src: packaging/icon/icon.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/opencloud-bar.svg

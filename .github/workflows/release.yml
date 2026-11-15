@@ -46,7 +46,7 @@ jobs:
           GOOS: windows
           GOARCH: amd64
         run: |
-          go run github.com/tc-hib/go-winres@v0.3.3 simply --arch amd64 `
+          go run github.com/tc-hib/go-winres@v0.3.3 simply --arch amd64 --icon ..\packaging\icon\icon.ico `
             --product-name "OpenCloud Bar" --file-description "OpenCloud Bar" `
             --product-version "${{ steps.ver.outputs.version }}" --file-version "${{ steps.ver.outputs.version }}" `
             --copyright "Copyright (c) 2026 Sebastian Dalton, MIT License"
@@ -127,6 +127,7 @@ jobs:
             ./scripts/fetch-rclone.sh linux $arch "$d"
             cp LICENSE README.md "$d/"
             cp packaging/linux/opencloud-bar.desktop packaging/linux/opencloud-bar.service "$d/"
+            cp packaging/icon/icon-256.png "$d/opencloud-bar.png"
             tar -C stage -czf "dist/opencloud-bar-linux-$arch.tar.gz" "opencloud-bar-linux-$arch"
             for fmt in deb rpm; do
               VERSION=$v ARCH=$arch SRC="$PWD/$d" envsubst < packaging/linux/nfpm.yaml > "$RUNNER_TEMP/nfpm.yaml"

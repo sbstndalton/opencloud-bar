@@ -28,6 +28,7 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\OpenCloud Bar.exe
+SetupIconFile=..\icon\icon.ico
 LicenseFile={#Src}\LICENSE.txt
 
 [Tasks]
