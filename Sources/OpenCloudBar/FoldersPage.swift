@@ -125,9 +125,18 @@ struct FoldersPage: View {
                     Text(localPath(f)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 }
                 TableColumn("Status") { f in
-                    Label(state(f).text, systemImage: state(f).symbol)
-                        .lineLimit(1)
-                        .foregroundStyle(model.hasProblem(f) ? Color.orange : Color.primary)
+                    if case .syncing = state(f) {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text(model.activeFiles > 0 && model.activeFolder == f.displayName
+                                 ? "Syncing… · \(model.activeFiles) file\(model.activeFiles == 1 ? "" : "s")" : "Syncing…")
+                                .lineLimit(1)
+                        }
+                    } else {
+                        Label(state(f).text, systemImage: state(f).symbol)
+                            .lineLimit(1)
+                            .foregroundStyle(model.hasProblem(f) ? Color.orange : Color.primary)
+                    }
                 }
                 TableColumn("Last Synced") { f in
                     TimelineView(.periodic(from: .now, by: 30)) { _ in

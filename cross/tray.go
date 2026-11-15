@@ -55,6 +55,7 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 	pause := systray.AddMenuItem("Pause Syncing", "Stop syncing kept folders; the drive keeps working")
 	settings := systray.AddMenuItem("Settings…", "")
 	checkUpdates := systray.AddMenuItem("Check for Updates…", "")
+	about := systray.AddMenuItem("About OpenCloud Bar", "")
 	systray.AddSeparator()
 	quitItem := systray.AddMenuItem("Quit OpenCloud Bar", "")
 
@@ -202,6 +203,8 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 				alertErr(e.SetPaused(!e.Status().Paused))
 			case <-update.ClickedCh:
 				openRelease(e.Status().Update)
+			case <-about.ClickedCh:
+				openSettings("about")
 			case <-checkUpdates.ClickedCh:
 				go checkUpdatesNow(e) // a network call: don't block the menu
 			case <-settings.ClickedCh:

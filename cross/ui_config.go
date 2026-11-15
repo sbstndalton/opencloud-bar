@@ -34,6 +34,7 @@ type configPatch struct {
 	LocalPort             *int                `json:"localPort"`
 	RclonePath            *string             `json:"rclonePath"`
 	CheckForUpdates       *bool               `json:"checkForUpdates"`
+	Notifications         *bool               `json:"notifications"`
 	KeptFilters           map[string][]string `json:"keptFilters"` // kept folder path -> its own excludes
 }
 
@@ -223,6 +224,9 @@ func applyConfigPatch(p configPatch) (restartPort bool, err error) {
 	}
 	if p.CheckForUpdates != nil {
 		set("checkForUpdates", *p.CheckForUpdates)
+	}
+	if p.Notifications != nil {
+		set("notifications", *p.Notifications)
 	}
 	if p.KeptFilters != nil {
 		var kept []map[string]json.RawMessage // per-folder unknown keys survive too

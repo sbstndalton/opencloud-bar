@@ -68,9 +68,12 @@ type Config struct {
 	Paused bool `json:"paused,omitempty"`
 	// CheckForUpdates: look for a new release once a day (default on).
 	CheckForUpdates *bool `json:"checkForUpdates,omitempty"`
+	// Notifications: desktop notifications for problems, automatic merges and updates (default on).
+	Notifications *bool `json:"notifications,omitempty"`
 }
 
-func (c Config) UpdateChecks() bool { return c.CheckForUpdates == nil || *c.CheckForUpdates }
+func (c Config) UpdateChecks() bool    { return c.CheckForUpdates == nil || *c.CheckForUpdates }
+func (c Config) NotificationsOn() bool { return c.Notifications == nil || *c.Notifications }
 
 func (c Config) Vendor() string {
 	if c.WebdavVendor != "" {

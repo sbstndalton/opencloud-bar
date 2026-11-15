@@ -72,6 +72,8 @@ struct Config: Codable {
     var paused = false
     /// Look for a new release once a day.
     var checkForUpdates = true
+    /// Notifications for problems, automatic merges and updates.
+    var notifications = true
     var commonFilters: [String] = [
         "- *.tmp", "- .*.bundle.tmp", "- *~", "- .DS_Store", "- ._*", "- Thumbs.db",
         "- .sync_*.db", "- .sync_*.db-*", "- .OpenCloudSync.log", "- .owncloudsync.log",
@@ -107,6 +109,7 @@ struct Config: Codable {
         webdavVendor = try c.decodeIfPresent(String.self, forKey: .webdavVendor)
         paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? def.paused
         checkForUpdates = try c.decodeIfPresent(Bool.self, forKey: .checkForUpdates) ?? def.checkForUpdates
+        notifications = try c.decodeIfPresent(Bool.self, forKey: .notifications) ?? def.notifications
     }
 
     /// "oidc" (browser sign-in) or "rclone" (the named rclone remote holds the credentials).

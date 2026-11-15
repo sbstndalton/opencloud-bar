@@ -32,6 +32,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var configError: String?
     /// OIDC only: no usable sign-in; nothing runs until the user signs in.
     @Published private(set) var signedOut = false
+    /// Moving an older version's sign-in out of the Keychain: macOS may be asking for permission.
+    @Published private(set) var waitingForKeychain = false
     @Published private(set) var opensAtLogin = SMAppService.mainApp.status == .enabled
     @Published private(set) var updateState = Updates.load()
 
@@ -42,6 +44,14 @@ final class AppModel: ObservableObject {
     private var authBusy = false
     private var authRetryAt = Date.distantPast
     private var setupWindow: SetupWindowController?
+    private var aboutWindow: AboutWindowController?
+    private lazy var notifier = Notifier(model: self)
+    private var notePlanner = NotePlanner()
+    private var autoMerged: [String] = []
+    /// What the running sync is doing, for the menu's first line.
+    @Published private(set) var activeFolder: String?
+    @Published private(set) var activeFiles = 0
+    private var activeIndex = 0, activeCount = 0
     private var settingsWindow: SettingsWindowController?
     private var tunnelRestartAt = Date.distantPast
     private var mount: Process?
@@ -66,6 +76,7 @@ final class AppModel: ObservableObject {
         applyEnvironment()
         refreshStatusEntries()
         startTicker()
+        if signedOut && Auth.keychainMigrationPending { migrateKeychain() }
         // First launch (nothing set up yet): open the set-up window right away.
         if configError == nil && !c.isConfigured {
             DispatchQueue.main.async { [weak self] in self?.showSetup() }
@@ -91,6 +102,37 @@ final class AppModel: ObservableObject {
                 self?.authRetryAt = Date().addingTimeInterval(30)
             }
             self?.authBusy = false
+        }
+    }
+
+    /// One-time move of the refresh token from the Keychain (older versions) to its file.
+    /// The read can wait on a macOS permission prompt, so it runs off the main thread; after
+    /// 60 s the app stops waiting and offers sign-in instead (a late answer is still used).
+    private func migrateKeychain() {
+        guard !waitingForKeychain else { return }
+        waitingForKeychain = true
+        Log.line("moving the sign-in out of the Keychain (macOS may ask for permission)")
+        Task.detached(priority: .utility) {
+            let moved = Auth.migrateFromKeychain()
+            await MainActor.run { [weak self] in self?.keychainMigrationFinished(moved) }
+        }
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 60_000_000_000)
+            guard let self, self.waitingForKeychain else { return }
+            self.waitingForKeychain = false
+            self.lastMessage = Self.signedOutText
+            Log.line("no answer from the Keychain after 60 s; showing sign-in")
+        }
+    }
+
+    private func keychainMigrationFinished(_ moved: Bool) {
+        waitingForKeychain = false
+        guard moved else {
+            if signedOut { lastMessage = Self.signedOutText }
+            return
+        }
+        if signedOut, config.isOIDC, Auth.haveCredentials(config) {
+            applyLoadedConfig(message: "Signed in")
         }
     }
 
@@ -151,6 +193,7 @@ final class AppModel: ObservableObject {
     // MARK: - Supervisor
 
     private func tick() {
+        checkNotifications()
         if !quitting, configError == nil, config.checkForUpdates, Updates.due(updateState) {
             Task { await self.checkForUpdates(manual: false) }
         }
@@ -405,7 +448,9 @@ final class AppModel: ObservableObject {
             if await self.serverTooBusy() {
                 for f in folders { self.status[f.path]?.state = .skipped("server busy") }
             } else {
-                for f in folders where !Task.isCancelled && !self.quitting {
+                for (i, f) in folders.enumerated() where !Task.isCancelled && !self.quitting {
+                    self.activeIndex = i + 1
+                    self.activeCount = folders.count
                     // skip folders removed while this run was waiting
                     guard self.config.kept.contains(where: { $0.path == f.path }) else { continue }
                     if let reason = self.needsRepairReason(f) {
@@ -415,6 +460,8 @@ final class AppModel: ObservableObject {
                     _ = await self.syncFolder(f, mode: .normal)
                 }
             }
+            self.activeIndex = 0
+            self.activeCount = 0
             self.syncing = false
         }
     }
@@ -461,6 +508,15 @@ final class AppModel: ObservableObject {
     /// listings drifted apart (one automatic merge per folder per 24 hours; then the user decides).
     @discardableResult
     private func syncFolder(_ f: KeptFolder, mode: SyncMode) async -> Bool {
+        activeFolder = f.displayName
+        activeFiles = 0
+        let single = activeCount == 0   // Repair, Stop Keeping…: one folder on its own
+        if single { activeIndex = 1; activeCount = 1 }
+        defer {
+            activeFolder = nil
+            activeFiles = 0
+            if single { activeIndex = 0; activeCount = 0 }
+        }
         let fm = FileManager.default
         status[f.path]?.state = .syncing
         let marker = stateFile(f, ".initialised")
@@ -522,6 +578,7 @@ final class AppModel: ObservableObject {
         guard await merge(run, kind: "automatic merge (out of sync)",
                           driftNote: "the automatic merge didn't settle it; choose Repair") else { return false }
         lastMessage = "“\(f.displayName)” was out of sync and was merged automatically (the newer copy of each file was kept)"
+        autoMerged.append(f.displayName)
         return true
     }
 
@@ -557,7 +614,8 @@ final class AppModel: ObservableObject {
                     "--create-empty-src-dirs", "--compare", "size,modtime",
                     "--resilient", "--recover", "--max-lock", "10m",
                     "--conflict-resolve", "newer", "--conflict-loser", "num",
-                    "--transfers", "4", "--checkers", "6", "--log-level", level] + extra
+                    "--transfers", "4", "--checkers", "6", "--log-level", level,
+                    "--stats", "2s", "--stats-log-level", "NOTICE"] + extra   // progress for the menu (StatsFilter)
         let log = Log.url("sync-\(run.f.stateName).log")
         Log.append("\n=== \(Date()) \(kind) of \(run.f.path)\n", to: log)
         return await runTracked(config.rclone, args, log: log)
@@ -573,7 +631,7 @@ final class AppModel: ObservableObject {
         saveLastSuccess()
     }
 
-    static let missingRemoteText = "Folder is missing or empty in OpenCloud"
+    nonisolated static let missingRemoteText = "Folder is missing or empty in OpenCloud"
 
     /// Shows why a run failed (drift is handled by the caller).
     private func failed(_ run: FolderRun, _ res: BisyncResult, _ out: String) async {
@@ -640,13 +698,19 @@ final class AppModel: ObservableObject {
             p.standardOutput = pipe
             p.standardError = pipe
             let buffer = OutputBuffer()
+            let stats = StatsFilter(into: buffer) { n in
+                Task { @MainActor in
+                    if self.activeFiles != n { self.activeFiles = n }
+                }
+            }
             pipe.fileHandleForReading.readabilityHandler = { h in
                 let d = h.availableData
-                if !d.isEmpty { buffer.append(d) }
+                if !d.isEmpty { stats.feed(d) }
             }
             p.terminationHandler = { proc in
                 pipe.fileHandleForReading.readabilityHandler = nil
-                buffer.append(pipe.fileHandleForReading.readDataToEndOfFile())
+                stats.feed(pipe.fileHandleForReading.readDataToEndOfFile())
+                stats.flush()
                 Log.append(buffer.string, to: log)
                 cont.resume(returning: Shell.Result(status: timedOut.value ? 124 : proc.terminationStatus,
                                                     output: buffer.string))
@@ -835,6 +899,31 @@ final class AppModel: ObservableObject {
         return DriveStats(cacheBytes: n("bytesUsed"), uploading: Int(n("uploadsInProgress")), queued: Int(n("uploadsQueued")))
     }
 
+    // MARK: - Notifications and About
+
+    /// Runs every tick: announces what changed since the last check (see NotePlanner).
+    private func checkNotifications() {
+        let folders = config.kept.map { ($0, status[$0.path]?.state ?? .idle) }
+        var notes = notePlanner.plan(folders: folders, signedOut: signedOut && config.isOIDC, autoMerged: autoMerged)
+        autoMerged = []
+        if updateState.available, let v = updateState.latest,
+           UserDefaults.standard.string(forKey: "notifiedUpdate") != v {
+            UserDefaults.standard.set(v, forKey: "notifiedUpdate")   // once per version, across restarts
+            notes.append(Note(title: "OpenCloud Bar \(v) is available",
+                              body: "You have \(Updates.running). Choose Update Available in the menu to download it.", page: .general))
+        }
+        guard config.notifications, configError == nil else { return }
+        for n in notes {
+            Log.line("notification: \(n.title)")
+            notifier.show(n)
+        }
+    }
+
+    func showAbout() {
+        if aboutWindow == nil { aboutWindow = AboutWindowController(model: self) }
+        aboutWindow?.show()
+    }
+
     // MARK: - Pause and updates
 
     /// Pauses or resumes syncing of kept folders (saved in the settings). The drive keeps
@@ -991,6 +1080,7 @@ final class AppModel: ObservableObject {
         let reconnect = c.connectionKey != config.connectionKey || out
         config = c
         signedOut = out
+        if !out { waitingForKeychain = false }
         applyEnvironment()
         refreshStatusEntries()
         lastMessage = out ? Self.signedOutText : message
@@ -1158,8 +1248,9 @@ final class AppModel: ObservableObject {
     var summary: String {
         if let e = configError { return e }
         if !config.isConfigured { return "Not set up: choose Set Up / Sign In…" }
+        if waitingForKeychain { return "Waiting for Keychain access…" }
         if signedOut { return Self.signedOutText }
-        if syncing { return "Syncing…" }
+        if syncing { return activityText(name: activeFolder, index: activeIndex, count: activeCount, files: activeFiles) }
         let bad = config.kept.filter(hasProblem)
         if let first = bad.first, let why = attentionReason(first) {
             var s = "“\(first.displayName)” \(why)"

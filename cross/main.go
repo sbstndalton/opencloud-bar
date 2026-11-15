@@ -80,6 +80,14 @@ func main() {
 		if err := call("POST", "/quit", q, nil); err != nil {
 			fail(err)
 		}
+		// Wait until it has stopped (a running sync saves its state, the drive is ejected), so
+		// an installer can replace the files right after.
+		for i := 0; i < 200; i++ {
+			if call("GET", "/status", nil, &Status{}) != nil {
+				break
+			}
+			time.Sleep(time.Second)
+		}
 	case "run":
 		fs := flag.NewFlagSet("run", flag.ExitOnError)
 		noTray := fs.Bool("no-tray", false, "run headless (servers)")
@@ -340,6 +348,10 @@ func apiHandler(e *Engine, stop func(), tok string, ui *webUI) http.Handler {
 	mux.HandleFunc("GET /pending", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]int{"pending": e.PendingUploads()})
 	})
+	mux.HandleFunc("POST /open-settings", func(w http.ResponseWriter, r *http.Request) {
+		go openSettings(r.URL.Query().Get("section"))
+		reply(w, nil)
+	})
 	mux.HandleFunc("POST /pause", func(w http.ResponseWriter, r *http.Request) { reply(w, e.SetPaused(true)) })
 	mux.HandleFunc("POST /resume", func(w http.ResponseWriter, r *http.Request) { reply(w, e.SetPaused(false)) })
 	mux.HandleFunc("POST /check-updates", func(w http.ResponseWriter, r *http.Request) {
@@ -372,6 +384,11 @@ func runDaemon(tray bool) {
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	go func() { <-sig; cancel() }()
 	if err := serveAPI(e, stop); err != nil {
+		// Already running (started again from the Start menu, or a notification was clicked):
+		// show that copy's settings instead of an error.
+		if tray && call("POST", "/open-settings", nil, nil) == nil {
+			return
+		}
 		e.logLine("not started: %v", err)
 		if tray {
 			dialogAlert("OpenCloud Bar", err.Error())

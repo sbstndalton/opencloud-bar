@@ -164,7 +164,11 @@ func dialogAlert(title, text string) {
 	}
 	if _, err := exec.LookPath("zenity"); err == nil {
 		_ = exec.Command("zenity", "--info", "--title", title, "--text", text, "--width", "420").Run()
+		return
 	}
+	// No zenity: a notification at least, and the log, so the message isn't lost.
+	appLog("message: %s: %s", title, text)
+	_ = desktopNotify(title, text)
 }
 
 func dialogPickFolder(start, prompt string) (string, bool) {
@@ -210,4 +214,27 @@ func dialogEntry(title, prompt, def string) (string, bool) {
 		return "", false
 	}
 	return strings.TrimSpace(string(out)), true
+}
+
+// hasDialogs reports whether dialogs can be shown (Linux needs zenity).
+func hasDialogs() bool {
+	if runtime.GOOS == "darwin" {
+		return true
+	}
+	_, err := exec.LookPath("zenity")
+	return err == nil
+}
+
+// desktopNotify shows a notification: notify-send on Linux (part of libnotify; skipped if it
+// isn't installed), osascript on macOS (development runs only; the Mac app is the Swift one).
+func desktopNotify(title, body string) error {
+	if runtime.GOOS == "darwin" {
+		return exec.Command("osascript", "-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)",
+			"-e", "end run", title, body).Run()
+	}
+	p, err := exec.LookPath("notify-send")
+	if err != nil {
+		return fmt.Errorf("notify-send isn't installed")
+	}
+	return exec.Command(p, "--app-name=OpenCloud Bar", "--icon=opencloud-bar", "--", title, body).Run()
 }

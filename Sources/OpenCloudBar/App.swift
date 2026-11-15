@@ -79,7 +79,7 @@ struct MenuContent: View {
         Text(model.summary)
         if let msg = model.lastMessage { Text(msg) }
         if model.needsSignIn {
-            Button("Set Up / Sign In…") { model.showSetup() }
+            Button(model.waitingForKeychain ? "Sign In Again…" : "Set Up / Sign In…") { model.showSetup() }
         }
         if model.updateState.available, let v = model.updateState.latest {
             Button("Update Available: v\(v)…") { model.openRelease() }
@@ -110,6 +110,7 @@ struct MenuContent: View {
             .keyboardShortcut(",")
         Button("Check for Updates…") { Task { await model.checkForUpdates(manual: true) } }
             .disabled(model.updateState.checking)
+        Button("About OpenCloud Bar") { model.showAbout() }
         Divider()
         Button("Quit OpenCloud Bar") { NSApp.terminate(nil) }
             .keyboardShortcut("q")

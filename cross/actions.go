@@ -15,10 +15,10 @@ var signingIn atomic.Bool
 
 // setUpAndSignIn asks for the server address, signs in with the browser, then offers to keep a folder.
 func setUpAndSignIn(e *Engine) {
-	if !signingIn.CompareAndSwap(false, true) {
+	if !hasDialogs() {
+		noDialogs(e, "account", "To sign in, open Settings ▸ Account, type your server address and choose Sign In.")
 		return
 	}
-	defer signingIn.Store(false)
 	e.mu.Lock()
 	def := e.cfg.ServerURL
 	e.mu.Unlock()
@@ -26,6 +26,28 @@ func setUpAndSignIn(e *Engine) {
 	if !ok || addr == "" {
 		return
 	}
+	signInWith(e, addr)
+}
+
+// noDialogsText is shown on Linux without zenity, which the dialogs need.
+const noDialogsText = "OpenCloud Bar shows its dialogs with zenity, which isn't installed (for example: sudo apt install zenity). "
+
+// noDialogs explains that dialogs can't be shown and opens the settings page, which does the
+// same job without them.
+func noDialogs(e *Engine, section, how string) {
+	e.setMessage("Install zenity for dialogs, or use the settings page")
+	e.notify()
+	appLog("no dialog tool (zenity); opening the settings page instead")
+	_ = desktopNotify("OpenCloud Bar", noDialogsText+how)
+	openSettings(section)
+}
+
+// signInWith signs in to addr with the browser, then offers to keep a folder.
+func signInWith(e *Engine, addr string) {
+	if !signingIn.CompareAndSwap(false, true) {
+		return
+	}
+	defer signingIn.Store(false)
 	e.setMessage("Waiting for you to sign in in the browser…")
 	e.notify()
 	ctx, cancel := context.WithTimeout(context.Background(), loginTimeout+time.Minute)
@@ -41,6 +63,11 @@ func setUpAndSignIn(e *Engine) {
 		dialogAlert("OpenCloud Bar", "Signed in as "+user+", but the new settings couldn't be applied yet: "+err.Error())
 		return
 	}
+	if !hasDialogs() {
+		e.setMessage("Signed in as " + user + ". Keep a folder in Settings ▸ Folders.")
+		e.notify()
+		return
+	}
 	if !dialogConfirm("Signed in as "+user, "OpenCloud Bar is connecting. Choose a folder from OpenCloud to keep on this computer now?", "Keep a Folder…") {
 		return
 	}
@@ -52,6 +79,10 @@ func setUpAndSignIn(e *Engine) {
 }
 
 func pickAndKeep(e *Engine) {
+	if !hasDialogs() {
+		noDialogs(e, "folders", "To keep a folder, type its path under Folders ▸ “Keep a folder by typing its path”.")
+		return
+	}
 	st := e.Status()
 	target := e.mountTarget()
 	if !st.DriveMounted {

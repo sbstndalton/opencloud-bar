@@ -88,6 +88,14 @@ type Engine struct {
 	rcUser, rcPass string
 
 	updates *updater
+
+	notes      notifyState // what has been announced (notify.go)
+	autoMerged []string    // folders merged automatically since the last notification check
+
+	// What the running sync is doing, for "Syncing “X” (2 of 3) · 12 files…".
+	activeName           string
+	activeIndex, activeN int
+	activeFiles          int
 }
 
 const syncTimeout = 3 * time.Hour
@@ -245,6 +253,7 @@ func (e *Engine) tunnelOurs() bool {
 }
 
 func (e *Engine) tick() {
+	e.checkNotifications()
 	if !e.authReady() {
 		return
 	}
@@ -383,12 +392,29 @@ func (e *Engine) waitForTunnel() bool {
 
 func (e *Engine) mountTarget() string { return expand(e.cfg.MountPoint) }
 
+// isDriveLetter is true for a Windows drive letter mount point like "O:".
+func isDriveLetter(t string) bool { return driveRe.MatchString(t) }
+
+func driveLetterInUse(t string) string {
+	return "Drive letter " + strings.ToUpper(t) + " is already in use — choose another in Settings ▸ Drive"
+}
+
 func (e *Engine) startMountLocked() {
 	target := e.mountTarget()
 	if isMounted(target) {
+		if isDriveLetter(target) {
+			// Our drive isn't running, so something else has this letter (a USB stick, a
+			// network drive). Windows has no way to take it over: say so instead of retrying silently.
+			e.message = driveLetterInUse(target)
+			e.mountRetryAt = time.Now().Add(30 * time.Second)
+			return
+		}
 		go forceUnmount(target)
 		e.mountRetryAt = time.Now().Add(10 * time.Second)
 		return
+	}
+	if strings.HasPrefix(e.message, "Drive letter ") {
+		e.message = ""
 	}
 	if runtime.GOOS != "windows" || len(target) > 2 {
 		_ = os.MkdirAll(target, 0o700)
@@ -666,8 +692,10 @@ func (e *Engine) startSyncAllLocked(manual bool) {
 			}
 			return
 		}
-		for _, f := range folders {
+		defer func() { e.mu.Lock(); e.activeName, e.activeIndex, e.activeN = "", 0, 0; e.mu.Unlock() }()
+		for i, f := range folders {
 			e.mu.Lock()
+			e.activeIndex, e.activeN = i+1, len(folders)
 			q := e.quitting
 			s := e.status[f.Path]
 			state := ""
@@ -753,6 +781,21 @@ type folderRun struct {
 // its first sync, the user chose repair, or the listings drifted apart (one automatic merge
 // per folder per 24 hours; after that the user decides).
 func (e *Engine) syncFolder(f KeptFolder, mode syncMode) bool {
+	e.mu.Lock()
+	e.activeName, e.activeFiles = f.DisplayName(), 0
+	single := e.activeN == 0 // Repair, Stop Keeping…: one folder on its own
+	if single {
+		e.activeIndex, e.activeN = 1, 1
+	}
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		e.activeName, e.activeFiles = "", 0
+		if single {
+			e.activeIndex, e.activeN = 0, 0
+		}
+		e.mu.Unlock()
+	}()
 	e.setState(f, StSyncing, "")
 	marker := e.stateFile(f, ".initialised")
 	initialised := exists(marker)
@@ -833,6 +876,9 @@ func (e *Engine) syncFolder(f KeptFolder, mode syncMode) bool {
 		return false
 	}
 	e.setMessage(fmt.Sprintf("“%s” was out of sync and was merged automatically (the newer copy of each file was kept)", f.DisplayName()))
+	e.mu.Lock()
+	e.autoMerged = append(e.autoMerged, f.DisplayName())
+	e.mu.Unlock()
 	return true
 }
 
@@ -892,14 +938,28 @@ func (e *Engine) bisync(r folderRun, kind string, extra ...string) (string, erro
 		"--create-empty-src-dirs", "--compare", "size,modtime",
 		"--resilient", "--recover", "--max-lock", "10m",
 		"--conflict-resolve", "newer", "--conflict-loser", "num",
-		"--transfers", strconv.Itoa(tr), "--checkers", strconv.Itoa(ck), "--log-level", level}
+		"--transfers", strconv.Itoa(tr), "--checkers", strconv.Itoa(ck), "--log-level", level,
+		"--stats", "2s", "--stats-log-level", "NOTICE"} // progress for the menu (activity.go)
 	args = append(args, extra...)
-	lf := e.logFile("sync-" + r.f.StateName + ".log")
-	if lf != nil {
+	sf := &statsFilter{onFiles: func(n int) {
+		e.mu.Lock()
+		changed := e.activeFiles != n
+		e.activeFiles = n
+		e.mu.Unlock()
+		if changed {
+			e.notify()
+		}
+	}}
+	if lf := e.logFile("sync-" + r.f.StateName + ".log"); lf != nil {
 		fmt.Fprintf(lf, "\n=== %s %s of %s\n", time.Now().Format(time.RFC3339), kind, r.f.Path)
 		defer lf.Close()
+		sf.w = lf
 	}
-	return e.run(syncTimeout, lf, e.cfg.Rclone(), args...)
+	defer sf.Flush()
+	e.mu.Lock()
+	e.activeFiles = 0
+	e.mu.Unlock()
+	return e.run(syncTimeout, sf, e.cfg.Rclone(), args...)
 }
 
 func (e *Engine) syncSucceeded(r folderRun) {
@@ -1308,7 +1368,7 @@ func (e *Engine) Status() Status {
 	case st.SignedOut:
 		st.Summary = signedOutMessage
 	case e.syncing:
-		st.Summary = "Syncing…"
+		st.Summary = activityText(e.activeName, e.activeIndex, e.activeN, e.activeFiles)
 	case len(problems) > 0:
 		st.Summary = attentionSummary(problems)
 	case st.Paused && !oldest.IsZero():

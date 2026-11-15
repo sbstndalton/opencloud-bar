@@ -6,8 +6,8 @@ import Security
 
 // Browser sign-in for OpenCloud (OpenID Connect, authorization code flow with PKCE).
 // Same design and file formats as cross/auth.go:
-//   - the refresh token lives in the Keychain; the short-lived access token is cached in
-//     auth.json (0600) next to config.json, with its expiry;
+//   - the refresh token lives in a private file, refresh-token (0600, folder 0700), next to
+//     config.json; the short-lived access token is cached in auth.json (0600), with its expiry;
 //   - `OpenCloudBar --token` prints a valid access token. rclone runs it as its bearer token command.
 
 enum AuthError: LocalizedError {
@@ -237,6 +237,53 @@ enum Auth {
 
     // MARK: storage
 
+    // Where the refresh token is kept, and why not in the Keychain: every build of this app is
+    // ad-hoc signed, so each update has a new code identity. A Keychain item made by an older
+    // build then makes macOS ask "OpenCloud Bar wants to use your confidential information…",
+    // and a Keychain read waits for that answer: the app hung at launch after updates, and the
+    // `--token` helper (run by rclone, with nobody to answer) could hang too. A file readable
+    // only by you is the same protection rclone.conf and the Windows/Linux app's fallback use.
+    // Older versions stored the token in the Keychain; AppModel moves it to the file once
+    // (off the main thread, giving up after 60 s), then deletes the Keychain item.
+    static var refreshURL: URL { Config.supportURL.appendingPathComponent("refresh-token") }
+
+    static func readRefresh() -> String? {
+        guard let t = try? String(contentsOf: refreshURL, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return nil }
+        return t
+    }
+
+    static func writeRefresh(_ token: String) throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: Config.supportURL, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: Config.supportURL.path)
+        let tmp = refreshURL.appendingPathExtension("tmp")
+        guard fm.createFile(atPath: tmp.path, contents: Data(token.utf8), attributes: [.posixPermissions: 0o600]) else {
+            throw AuthError.message("Couldn't keep the sign-in")
+        }
+        if fm.fileExists(atPath: refreshURL.path) {
+            _ = try fm.replaceItemAt(refreshURL, withItemAt: tmp)
+        } else {
+            try fm.moveItem(at: tmp, to: refreshURL)
+        }
+    }
+
+    /// An older version may have left the refresh token in the Keychain: signed in (auth.json)
+    /// but no token file yet.
+    static var keychainMigrationPending: Bool { readState() != nil && readRefresh() == nil }
+
+    /// The one-time move from the Keychain to the file. Blocks while macOS asks for permission,
+    /// so it must run off the main thread. Returns true if the token was moved.
+    static func migrateFromKeychain() -> Bool {
+        guard let s = readState(), readRefresh() == nil, let t = Keychain.get(s.account) else { return false }
+        // The user may have signed in again while macOS was asking: keep that newer sign-in.
+        guard readRefresh() == nil, readState()?.account == s.account else { Keychain.delete(s.account); return false }
+        do { try writeRefresh(t) } catch { return false }
+        Keychain.delete(s.account)
+        Log.line("sign-in moved from the Keychain to a private file")
+        return true
+    }
+
     static func readState() -> AuthState? {
         guard let data = try? Data(contentsOf: authURL) else { return nil }
         let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
@@ -256,20 +303,25 @@ enum Auth {
     private static func store(_ r: LoginResult) throws {
         let s = AuthState(serverURL: r.serverURL, issuer: r.issuer, username: r.username, tokenEndpoint: r.tokenEndpoint,
                           accessToken: r.access, expiry: r.expiry)
-        if let old = readState(), old.account != s.account { Keychain.delete(old.account) }   // switching accounts
-        guard Keychain.set(s.account, r.refresh) else { throw AuthError.message("Couldn't keep the sign-in in the Keychain") }
+        try writeRefresh(r.refresh)   // replaces any earlier account's token
         try writeState(s)
     }
 
     /// True if a refresh token is stored for this config's server.
     static func haveCredentials(_ c: Config) -> Bool {
         guard let want = try? normalizeServerURL(c.serverURL ?? ""), let s = readState(), s.serverURL == want else { return false }
-        return Keychain.get(s.account) != nil
+        return readRefresh() != nil   // a file read: never a Keychain prompt
     }
 
     /// Forgets the sign-in on this Mac. (The discovery document lists no revocation endpoint.)
     static func logout() {
-        if let s = readState() { Keychain.delete(s.account) }
+        if let s = readState(), readRefresh() == nil {
+            // Not moved to the file yet: the token may still be in the Keychain. Deleting can
+            // also wait for a permission prompt, so it runs in the background.
+            let account = s.account
+            DispatchQueue.global().async { Keychain.delete(account) }
+        }
+        try? FileManager.default.removeItem(at: refreshURL)
         try? FileManager.default.removeItem(at: authURL)
         Log.line("signed out")
     }
@@ -310,19 +362,17 @@ enum Auth {
         // Someone else may have refreshed while we waited.
         guard var st = readState(), st.serverURL == want else { throw AuthError.signedOut }
         if fresh(st), let t = st.accessToken { return t }
-        guard let refresh = Keychain.get(st.account) else { throw AuthError.signedOut }
+        guard let refresh = readRefresh() else { throw AuthError.signedOut }   // never the Keychain: see refreshURL
         do {
             let r = try await postToken(st.tokenEndpoint, ["grant_type": "refresh_token", "refresh_token": refresh, "client_id": clientID])
             // The server may rotate the refresh token; if it sends none, the old one stays valid.
-            if let nr = r.refresh, !nr.isEmpty, nr != refresh, !Keychain.set(st.account, nr) {
-                throw AuthError.message("Couldn't keep the new sign-in in the Keychain")
-            }
+            if let nr = r.refresh, !nr.isEmpty, nr != refresh { try writeRefresh(nr) }
             st.accessToken = r.access; st.expiry = r.expiry
             try writeState(st)
             return r.access
         } catch let e as OAuthError where e.code == "invalid_grant" {
             Log.line("refresh token rejected (invalid_grant); signed out")
-            Keychain.delete(st.account)
+            try? FileManager.default.removeItem(at: refreshURL)
             st.accessToken = nil; st.expiry = nil
             try? writeState(st)
             throw AuthError.signedOut
@@ -358,21 +408,12 @@ enum Auth {
     }
 }
 
-// MARK: Keychain
+// MARK: Keychain (only to move an older version's sign-in to the file, then delete it)
 
 enum Keychain {
     private static func query(_ account: String) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
          kSecAttrService as String: Auth.keychainService, kSecAttrAccount as String: account]
-    }
-
-    @discardableResult
-    static func set(_ account: String, _ token: String) -> Bool {
-        var q = query(account)
-        SecItemDelete(q as CFDictionary)
-        q[kSecValueData as String] = Data(token.utf8)
-        q[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-        return SecItemAdd(q as CFDictionary, nil) == errSecSuccess
     }
 
     static func get(_ account: String) -> String? {

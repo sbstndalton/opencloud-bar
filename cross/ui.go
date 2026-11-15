@@ -33,6 +33,11 @@ import (
 //go:embed ui.html
 var uiHTML string
 
+// A copy of packaging/icon/icon-256.png (go:embed can't reach outside this folder).
+//
+//go:embed assets/icon-256.png
+var iconPNG []byte
+
 const (
 	sessionCookie = "ocb_session"
 	loginCodeTTL  = 60 * time.Second
@@ -165,7 +170,7 @@ func (u *webUI) loginURL(section string) string {
 
 func validSection(s string) bool {
 	switch s {
-	case "folders", "account", "sync", "drive", "general", "logs":
+	case "folders", "account", "sync", "drive", "general", "logs", "about":
 		return true
 	}
 	return false
@@ -205,6 +210,10 @@ func (u *webUI) handler(e *Engine) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ui/{$}", u.servePage)
 	mux.HandleFunc("GET /ui/login", u.serveLogin)
+	mux.HandleFunc("GET /ui/icon.png", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(iconPNG)
+	})
 
 	mux.HandleFunc("GET /ui/api/state", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, e.uiState()) })
 	mux.HandleFunc("GET /ui/api/account", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, e.uiAccount(r.Context())) })
@@ -212,6 +221,7 @@ func (u *webUI) handler(e *Engine) http.Handler {
 	mux.HandleFunc("GET /ui/api/unsynced", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]int{"unsynced": e.UnsyncedCount(r.URL.Query().Get("path"))})
 	})
+	mux.HandleFunc("GET /ui/api/about", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, e.about()) })
 	mux.HandleFunc("GET /ui/api/logs", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, e.logSources()) })
 	mux.HandleFunc("GET /ui/api/log", func(w http.ResponseWriter, r *http.Request) { e.serveLog(w, r) })
 
@@ -221,7 +231,24 @@ func (u *webUI) handler(e *Engine) http.Handler {
 	mux.HandleFunc("POST /ui/api/connect", func(w http.ResponseWriter, r *http.Request) { e.Connect(); jsonOK(w, nil) })
 	mux.HandleFunc("POST /ui/api/eject", func(w http.ResponseWriter, r *http.Request) { jsonOK(w, e.Eject()) })
 	mux.HandleFunc("POST /ui/api/reload", func(w http.ResponseWriter, r *http.Request) { jsonOK(w, e.Reload()) })
-	mux.HandleFunc("POST /ui/api/setup", func(w http.ResponseWriter, r *http.Request) { go setUpAndSignIn(e); jsonOK(w, nil) })
+	mux.HandleFunc("POST /ui/api/setup", func(w http.ResponseWriter, r *http.Request) {
+		var b struct {
+			ServerURL string `json:"serverURL"` // typed on the page: no dialog needed
+		}
+		if !readJSON(w, r, &b) {
+			return
+		}
+		if b.ServerURL != "" {
+			if _, err := normalizeServerURL(b.ServerURL); err != nil {
+				jsonErr(w, http.StatusBadRequest, err)
+				return
+			}
+			go signInWith(e, b.ServerURL)
+		} else {
+			go setUpAndSignIn(e)
+		}
+		jsonOK(w, nil)
+	})
 	mux.HandleFunc("POST /ui/api/signout", func(w http.ResponseWriter, r *http.Request) {
 		var b struct {
 			Force bool `json:"force"`
@@ -418,6 +445,7 @@ func (e *Engine) uiState() map[string]any {
 			"configured":            cfg.Configured(),
 			"paused":                cfg.Paused,
 			"checkForUpdates":       cfg.UpdateChecks(),
+			"notifications":         cfg.NotificationsOn(),
 		},
 		"defaults": map[string]any{
 			"syncIntervalSeconds": def.SyncIntervalSeconds,
@@ -510,6 +538,13 @@ func (e *Engine) serveOpen(w http.ResponseWriter, r *http.Request) {
 		openPath(configFile())
 	case "logs":
 		openPath(logDir())
+	case "project", "license", "rclone-license":
+		links := map[string]string{"project": projectURL, "license": projectURL + "/blob/main/LICENSE",
+			"rclone-license": "https://github.com/rclone/rclone/blob/master/COPYING"}
+		if err := openURL(links[b.Kind]); err != nil {
+			jsonErr(w, http.StatusConflict, err)
+			return
+		}
 	case "release":
 		// Only this project's release page, as GitHub reported it (checked in fetchLatestRelease).
 		u := e.Status().Update.URL

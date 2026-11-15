@@ -28,6 +28,11 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\OpenCloud Bar.exe
+; Updating: the running app is stopped cleanly first (PrepareToInstall); Windows' Restart
+; Manager closes anything still holding the files. It isn't restarted by Restart Manager:
+; the "Start OpenCloud Bar now" option below does that.
+CloseApplications=yes
+RestartApplications=no
 SetupIconFile=..\icon\icon.ico
 LicenseFile={#Src}\LICENSE.txt
 
@@ -43,7 +48,8 @@ Source: "{#Src}\rclone-LICENSE.txt"; DestDir: "{app}"
 Source: "{#Src}\winfsp.msi"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: not WinFspInstalled
 
 [Icons]
-Name: "{group}\OpenCloud Bar"; Filename: "{app}\OpenCloud Bar.exe"
+; The app ID lets the app's notifications show as "OpenCloud Bar" (see desktopNotify).
+Name: "{group}\OpenCloud Bar"; Filename: "{app}\OpenCloud Bar.exe"; AppUserModelID: "OpenCloudBar.OpenCloudBar"
 Name: "{group}\Uninstall OpenCloud Bar"; Filename: "{uninstallexe}"
 
 [Registry]
@@ -55,13 +61,38 @@ Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\winfsp.msi"" /qn /norestart"; S
 Filename: "{app}\OpenCloud Bar.exe"; Description: "Start OpenCloud Bar now"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [UninstallRun]
-Filename: "{app}\opencloud-bar.exe"; Parameters: "quit"; Flags: runhidden; RunOnceId: "QuitApp"
+; Stop the app (even with uploads pending: the user chose to uninstall), then forget the sign-in
+; (the stored refresh token only; settings and kept folders stay).
+Filename: "{app}\opencloud-bar.exe"; Parameters: "quit --force"; Flags: runhidden waituntilterminated; RunOnceId: "QuitApp"
+Filename: "{app}\opencloud-bar.exe"; Parameters: "logout --force"; Flags: runhidden waituntilterminated; RunOnceId: "Logout"
 
 [Code]
-function WinFspInstalled: Boolean;
+// WinFsp's installer records InstallDir under HKLM\SOFTWARE\WinFsp in the 32-bit registry view,
+// which on 64-bit Windows is HKLM\SOFTWARE\WOW6432Node\WinFsp. (rclone's FUSE layer, cgofuse,
+// looks it up the same way: Software\WinFsp with RRF_SUBKEY_WOW6432KEY.) This setup runs in
+// 64-bit mode, where plain HKLM means the 64-bit view, so the 32-bit view must be named:
+// HKLM32. HKLM64 is checked too in case a future WinFsp writes there. The DLL must exist as well:
+// a leftover key after a broken uninstall doesn't count.
+function WinFspAt(Root: Integer): Boolean;
 var Dir: String;
 begin
-  Result := RegQueryStringValue(HKLM32, 'SOFTWARE\WinFsp', 'InstallDir', Dir) and DirExists(Dir);
+  Result := RegQueryStringValue(Root, 'SOFTWARE\WinFsp', 'InstallDir', Dir) and
+            FileExists(AddBackslash(Dir) + 'bin\winfsp-x64.dll');
+end;
+
+function WinFspInstalled: Boolean;
+begin
+  Result := WinFspAt(HKLM32) or WinFspAt(HKLM64);
+end;
+
+// Before files are replaced on an update: stop the running app cleanly (as the signed-in
+// user, whose app it is), so the drive is ejected and a running sync saves its state.
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var Code: Integer;
+begin
+  Result := '';
+  if FileExists(ExpandConstant('{app}\opencloud-bar.exe')) then
+    ExecAsOriginalUser(ExpandConstant('{app}\opencloud-bar.exe'), 'quit --force', '', SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 
 function NeedsAddPath(Param: String): Boolean;

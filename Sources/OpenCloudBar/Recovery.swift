@@ -194,3 +194,65 @@ enum Updates {
         return (tag, url)
     }
 }
+
+// MARK: - Sync activity
+
+/// bisync runs with `--stats 2s --stats-log-level NOTICE`: every 2 seconds rclone prints a
+/// progress block. This reads the transferred-file count from it and keeps the blocks out of
+/// the output (and so out of the sync log). Same as statsFilter in cross/activity.go (tested there).
+final class StatsFilter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var partial = Data()
+    private var inStats = false
+    private let out: OutputBuffer
+    private let onFiles: @Sendable (Int) -> Void
+
+    init(into out: OutputBuffer, onFiles: @escaping @Sendable (Int) -> Void) {
+        self.out = out
+        self.onFiles = onFiles
+    }
+
+    func feed(_ d: Data) {
+        lock.lock(); defer { lock.unlock() }
+        partial.append(d)
+        while let i = partial.firstIndex(of: UInt8(ascii: "\n")) {
+            let line = partial[partial.startIndex...i]
+            partial = Data(partial[partial.index(after: i)...])
+            handle(Data(line))
+        }
+    }
+
+    func flush() {
+        lock.lock(); defer { lock.unlock() }
+        if !partial.isEmpty { handle(partial); partial = Data() }
+    }
+
+    private func handle(_ line: Data) {
+        let text = String(decoding: line, as: UTF8.self).trimmingCharacters(in: CharacterSet(charactersIn: "\r\n"))
+        if inStats {
+            if text.trimmingCharacters(in: .whitespaces).isEmpty {
+                inStats = false
+            } else if text.hasPrefix("Transferred:") {
+                // "Transferred:   260 / 300, 87%" (files); the bytes line has units and doesn't parse.
+                let rest = text.dropFirst("Transferred:".count).trimmingCharacters(in: .whitespaces)
+                let parts = rest.split(separator: " ")
+                if parts.count >= 3, parts[1] == "/", let n = Int(parts[0]) { onFiles(n) }
+            }
+            return
+        }
+        if text.range(of: #"^\d{4}/\d\d/\d\d \d\d:\d\d:\d\d NOTICE:\s*$"#, options: .regularExpression) != nil {
+            inStats = true
+            return
+        }
+        out.append(line)
+    }
+}
+
+/// The menu's first line while syncing: "Syncing “School” (2 of 3) · 12 files…".
+func activityText(name: String?, index: Int, count: Int, files: Int) -> String {
+    guard let name else { return "Syncing…" }
+    var s = "Syncing “\(name)”"
+    if count > 1 { s += " (\(index) of \(count))" }
+    if files == 1 { s += " · 1 file" } else if files > 1 { s += " · \(files) files" }
+    return s + "…"
+}

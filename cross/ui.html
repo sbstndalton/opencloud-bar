@@ -38,7 +38,12 @@ th { font-size:12px; color:var(--muted); font-weight:600; }
 tr.sel { background:color-mix(in srgb, var(--accent) 12%, transparent); }
 tbody tr { cursor:pointer; }
 .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; background:var(--muted); }
-.dot.ok { background:var(--ok); } .dot.warn { background:var(--warn); } .dot.bad { background:var(--bad); } .dot.busy { background:var(--accent); }
+.dot.ok { background:var(--ok); } .dot.warn { background:var(--warn); } .dot.bad { background:var(--bad); }
+.dot.busy { background:none; border:2px solid var(--accent); border-right-color:transparent; width:11px; height:11px; vertical-align:-1px; animation:spin .9s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .dot.busy { animation:none; background:var(--accent); border:0; width:9px; height:9px; } }
+.about { display:flex; gap:18px; align-items:center; }
+.about img { width:72px; height:72px; }
 .path { font-family:ui-monospace, Menlo, Consolas, monospace; font-size:12.5px; word-break:break-all; }
 .bar { height:12px; background:var(--bg); border:1px solid var(--line); border-radius:6px; overflow:hidden; max-width:420px; }
 .bar > div { height:100%; background:var(--ok); }
@@ -67,7 +72,7 @@ td .why { display:block; color:var(--muted); font-size:12.5px; }
 <script nonce="{{NONCE}}">
 "use strict";
 // Plain DOM code, no libraries. Text from the server is only ever set with textContent.
-const SECTIONS = [["folders","Folders"],["account","Account"],["sync","Sync"],["drive","Drive"],["general","General"],["logs","Logs"]];
+const SECTIONS = [["folders","Folders"],["account","Account"],["sync","Sync"],["drive","Drive"],["general","General"],["logs","Logs"],["about","About"]];
 let S = null;            // last /ui/api/state
 let section = "folders";
 let selected = null;     // selected folder path
@@ -173,7 +178,7 @@ function go(id) {
   buildNav();
   const main = document.getElementById("main");
   main.replaceChildren();
-  ({ folders, account, sync: syncPage, drive, general, logs })[id](main, render);
+  ({ folders, account, sync: syncPage, drive, general, logs, about })[id](main, render);
 }
 async function refreshState() {
   try { S = await get("state"); } catch (e) { return; }
@@ -307,7 +312,16 @@ async function account(main, r) {
   const btns = h("div", { class: "row" },
     h("button", { class: "btn", disabled: !a.server || a.mode === "none", onclick: () => act(() => post("open", { kind: "web" })) }, "Open OpenCloud in Browser"),
     h("button", { class: "btn", onclick: () => go("account") }, "Refresh"));
-  if (a.mode === "none" || a.signedOut) btns.append(h("button", { class: "btn primary", onclick: () => act(() => post("setup"), "Continue in the dialog and browser") }, "Sign In…"));
+  if (a.mode === "none" || a.signedOut) {
+    // Typing the address here needs no dialog (Linux without zenity).
+    const addr = h("input", { type: "text", placeholder: "https://cloud.example.com", value: a.server || "" });
+    card.append(h("div", { class: "row" }, h("label", { text: "Server address" }), addr));
+    btns.append(h("button", { class: "btn primary", onclick: () => {
+      const v = addr.value.trim();
+      if (!v) { toast("Type your server address first", true); return; }
+      act(() => post("setup", { serverURL: v }), "Continue signing in in your browser");
+    } }, "Sign In"));
+  }
   else if (a.mode === "oidc") btns.append(h("button", { class: "btn danger", onclick: signOut }, "Sign Out"));
   card.append(btns);
   box.replaceWith(card);
@@ -442,6 +456,7 @@ function general(main, r) {
     main.append(h("div", { class: "card" }, h("h3", { text: "OpenCloud Bar" }),
       h("div", { class: "row" }, h("label", { text: "Version" }), h("span", { text: S.version })),
       checkField("Check for updates automatically", "checkForUpdates", "Once a day, from GitHub. Nothing about you is sent."),
+      checkField("Show notifications", "notifications", "When a folder needs attention, is merged automatically, or an update is available. Once per change, not repeated."),
       upLine,
       h("div", { class: "row" },
         h("button", { class: "btn", onclick: async (ev) => {
@@ -480,6 +495,26 @@ function updateText(u) {
   if (u.available) return when + "Version " + u.latest + " is available.";
   if (u.devBuild) return when + "This is a development build; the latest release is " + (u.latest || "unknown") + ".";
   return when + "You have the latest version.";
+}
+
+// ---- About
+
+async function about(main, r) {
+  header(main, "About");
+  const box = h("div", { class: "card" }, "Loading…");
+  main.append(box);
+  let a;
+  try { a = await get("about"); } catch (e) { box.textContent = e.message; return; }
+  if (r !== render) return;
+  const link = (label, kind) => h("button", { class: "btn", onclick: () => act(() => post("open", { kind })) }, label);
+  box.replaceChildren(
+    h("div", { class: "about" }, h("img", { src: "/ui/icon.png", alt: "" }),
+      h("div", {}, h("h3", { text: "OpenCloud Bar" }),
+        h("div", { text: "Version " + a.version + (a.devBuild ? " (development build)" : "") }),
+        h("div", { class: "hint", text: "rclone " + a.rclone }),
+        h("div", { class: "hint", text: "Open source under the " + a.license + " License." }))),
+    h("div", { class: "row" }, link("GitHub Project", "project"), link("Releases", "release"), link("License (MIT)", "license"), link("rclone License", "rclone-license")),
+    h("p", { class: "hint", text: "Two-way sync of chosen folders and an on-demand drive for OpenCloud, built on rclone." }));
 }
 
 // ---- Logs

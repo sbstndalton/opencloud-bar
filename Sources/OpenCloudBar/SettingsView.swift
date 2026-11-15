@@ -548,6 +548,13 @@ struct GeneralPage: View {
                 }
                 InlineError(text: updateError)
             }
+            Section("Notifications") {
+                Toggle("Show notifications", isOn: Binding(
+                    get: { model.config.notifications },
+                    set: { on in Task { updateError = await model.updateConfig { $0.notifications = on } } }))
+                Text("When a folder needs attention or was merged automatically, when you are signed out, and when an update is available. Once per change, never repeated. Clicking one opens Settings.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if model.config.tunnel {
                 Section("Server") {
                     Toggle("Check server memory before syncing", isOn: Binding(

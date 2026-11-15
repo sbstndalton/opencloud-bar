@@ -45,14 +45,18 @@ func isMounted(target string) bool {
 func unmountOS(string) error { return errNoOSUnmount }
 func forceUnmount(string)    {}
 
-func ps(script string, args ...string) *exec.Cmd {
-	c := exec.Command("powershell.exe", append([]string{"-NoProfile", "-NonInteractive", "-Command", script}, args...)...)
+// ps runs a PowerShell script. All text the script shows comes in through environment
+// variables (OCB_*), never pasted into the script, so quotes or $ in a folder name or a
+// server's error message can't change what the script does.
+func ps(script string, env map[string]string) *exec.Cmd {
+	c := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
+	c.Env = os.Environ()
+	for k, v := range env {
+		c.Env = append(c.Env, "OCB_"+k+"="+v)
+	}
 	hideWindow(c)
 	return c
 }
-
-// psQuote makes a PowerShell single-quoted string literal.
-func psQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 
 // moveToTrash moves a folder that is no longer kept into "Removed by OpenCloud Bar" in the
 // user's profile. The Recycle Bin isn't used: outside a desktop session Windows can delete
@@ -98,14 +102,14 @@ func hasDisplay() bool { return true }
 
 func dialogConfirm(title, text, button string) bool {
 	script := "Add-Type -AssemblyName System.Windows.Forms; " +
-		"$r = [System.Windows.Forms.MessageBox]::Show(" + psQuote(text+"\n\nChoose OK to "+strings.ToLower(button)+".") + ", " + psQuote(title) + ", 'OKCancel', 'Warning'); " +
+		"$r = [System.Windows.Forms.MessageBox]::Show($env:OCB_TEXT, $env:OCB_TITLE, 'OKCancel', 'Warning'); " +
 		"if ($r -eq 'OK') { exit 0 } else { exit 1 }"
-	return ps(script).Run() == nil
+	return ps(script, map[string]string{"TITLE": title, "TEXT": text + "\n\nChoose OK to " + strings.ToLower(button) + "."}).Run() == nil
 }
 
 func dialogAlert(title, text string) {
-	script := "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show(" + psQuote(text) + ", " + psQuote(title) + ") | Out-Null"
-	_ = ps(script).Run()
+	script := "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show($env:OCB_TEXT, $env:OCB_TITLE) | Out-Null"
+	_ = ps(script, map[string]string{"TITLE": title, "TEXT": text}).Run()
 }
 
 func dialogPickFolder(start, prompt string) (string, bool) {
@@ -113,14 +117,37 @@ func dialogPickFolder(start, prompt string) (string, bool) {
 		start += `\`
 	}
 	script := "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; " +
-		"$d.Description = " + psQuote(prompt) + "; $d.SelectedPath = " + psQuote(start) + "; " +
-		"if ($d.ShowDialog() -eq 'OK') { $d.SelectedPath } else { exit 1 }"
-	out, err := ps(script).Output()
+		"$d.Description = $env:OCB_PROMPT; $d.SelectedPath = $env:OCB_START; " +
+		"if ($d.ShowDialog() -eq 'OK') { [Console]::OutputEncoding = [Text.Encoding]::UTF8; $d.SelectedPath } else { exit 1 }"
+	out, err := ps(script, map[string]string{"PROMPT": prompt, "START": start}).Output()
 	if err != nil {
 		return "", false
 	}
 	return strings.TrimSpace(string(out)), true
 }
+
+func hasDialogs() bool { return true }
+
+// desktopNotify shows a toast. Toasts need an app ID that has a Start menu shortcut: the
+// installer gives its shortcut OpenCloud Bar's ID; without it (a copy run from a folder)
+// PowerShell's own ID is used, so the toast still shows.
+func desktopNotify(title, body string) error {
+	appID := windowsAppID
+	if pd := os.Getenv("ProgramData"); pd == "" || !exists(filepath.Join(pd, `Microsoft\Windows\Start Menu\Programs\OpenCloud Bar\OpenCloud Bar.lnk`)) {
+		appID = `{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe`
+	}
+	script := "$ErrorActionPreference = 'Stop'; " +
+		"[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null; " +
+		"$x = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); " +
+		"$t = $x.GetElementsByTagName('text'); " +
+		"$t.Item(0).AppendChild($x.CreateTextNode($env:OCB_TITLE)) > $null; " +
+		"$t.Item(1).AppendChild($x.CreateTextNode($env:OCB_TEXT)) > $null; " +
+		"[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($env:OCB_APPID).Show([Windows.UI.Notifications.ToastNotification]::new($x))"
+	return ps(script, map[string]string{"TITLE": title, "TEXT": body, "APPID": appID}).Run()
+}
+
+// windowsAppID is the AppUserModelID the installer puts on the Start menu shortcut.
+const windowsAppID = "OpenCloudBar.OpenCloudBar"
 
 // openURL opens a web address in the default browser. rundll32 passes the whole URL through
 // untouched (explorer.exe mangles URLs containing & in some cases).
@@ -131,9 +158,9 @@ func openURL(u string) error {
 // dialogEntry asks for one line of text with a Visual Basic input box. The box returns an empty
 // string when cancelled, so empty means cancelled.
 func dialogEntry(title, prompt, def string) (string, bool) {
-	script := "Add-Type -AssemblyName Microsoft.VisualBasic; " +
-		"[Microsoft.VisualBasic.Interaction]::InputBox(" + psQuote(prompt) + ", " + psQuote(title) + ", " + psQuote(def) + ")"
-	out, err := ps(script).Output()
+	script := "Add-Type -AssemblyName Microsoft.VisualBasic; [Console]::OutputEncoding = [Text.Encoding]::UTF8; " +
+		"[Microsoft.VisualBasic.Interaction]::InputBox($env:OCB_PROMPT, $env:OCB_TITLE, $env:OCB_DEF)"
+	out, err := ps(script, map[string]string{"TITLE": title, "PROMPT": prompt, "DEF": def}).Output()
 	if err != nil {
 		return "", false
 	}

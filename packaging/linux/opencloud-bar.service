@@ -9,7 +9,9 @@ Restart=on-failure
 RestartSec=30
 KillSignal=SIGTERM
 TimeoutStopSec=180
-MemoryMax=256M
+# No MemoryMax: rclone's memory grows with the size of the kept folders (bisync holds the
+# listings in memory) and with the drive's transfers. A hard limit made systemd kill the whole
+# service mid-sync or mid-upload; bisync then needs a recovery run and drive uploads restart.
 
 [Install]
 WantedBy=default.target
