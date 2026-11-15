@@ -1,20 +1,42 @@
 # OpenCloud Bar
 
-A small macOS menu-bar app for using a self-hosted [OpenCloud](https://opencloud.eu) server the way people used to use Nextcloud's selective sync:
+A small menu-bar and tray app for macOS, Windows and Linux. It lets you use a self-hosted [OpenCloud](https://opencloud.eu) server the way people used to use Nextcloud's selective sync:
 
-- **Everything on demand.** Your whole OpenCloud space appears as a drive in Finder. Files download only when you open them, are cached (20 GB by default) and are evicted again after a few days unused.
-- **Some folders kept on the Mac.** Pick the folders you want as real local copies, and they sync both ways every 5 minutes. Stop keeping one and its local copy goes to the Trash. The folder stays in OpenCloud.
+- **Everything on demand.** Your whole OpenCloud space appears as a drive: a Finder volume on the Mac, a drive letter such as `O:` on Windows, a folder on Linux. Files download only when you open them. They're cached (20 GB by default) and evicted again after a few days unused.
+- **Some folders kept locally.** Pick the folders you want as real local copies, and they sync both ways every few minutes. Stop keeping one and its local copy is moved out of the way (the Trash on Mac and Linux, a "Removed by OpenCloud Bar" folder on Windows). The folder stays in OpenCloud.
+
+| Platform | App | Status |
+|---|---|---|
+| macOS 14+ | native SwiftUI menu-bar app (`Sources/`) | in daily use |
+| Windows 10/11 | tray app plus a command-line tool (`cross/`, Go) | tested on Windows 11 |
+| Linux | tray app, command line, or a headless service (`cross/`, Go) | headless service in daily use; tray untested |
+
+## Download
+
+Get the latest build from [Releases](https://github.com/sbstndalton/opencloud-bar/releases/latest):
+
+| File | For |
+|---|---|
+| `OpenCloud-Bar-macOS.zip` | macOS on Apple silicon. It's ad-hoc signed, so the first time, right-click the app and choose **Open**. |
+| `opencloud-bar.exe`, `opencloud-bar-cli.exe` | Windows x64 (tray app, command line). Needs [WinFsp](https://winfsp.dev) for the drive. |
+| `opencloud-bar-linux-amd64.tar.gz`, `opencloud-bar-linux-arm64.tar.gz` | Linux. Needs FUSE 3 for the drive. |
+
+Every platform also needs [rclone](https://rclone.org/downloads/) and SSH key access to your server.
+
+## How it works
 
 [rclone](https://rclone.org) does all the work:
 
 | Piece | rclone command |
 |---|---|
-| On-demand drive | `rclone nfsmount` (macOS's built-in NFS client, so no FUSE or kernel extension) |
+| On-demand drive | `rclone nfsmount` on macOS (built-in NFS client, no FUSE or kernel extension), `rclone mount` on Windows and Linux |
 | Kept folders | `rclone bisync` (two-way sync with a state file per folder) |
 
-Traffic goes through an SSH tunnel to the server's local OpenCloud port. The tunnel runs as a per-user launchd agent that the app creates and removes, so macOS Local Network privacy doesn't block it and it survives an app crash. This skips any reverse proxy or CDN in front of OpenCloud. Cloudflare in particular closes HTTP/2 connections after about 10,000 requests, which breaks the official desktop client on large trees, and it limits uploads to 100 MB.
+Traffic goes through an SSH tunnel to the server's local OpenCloud port. This skips any reverse proxy or CDN in front of OpenCloud. Cloudflare in particular closes HTTP/2 connections after about 10,000 requests, which breaks the official desktop client on large trees, and it limits uploads to 100 MB. On the Mac, the tunnel runs as a per-user launchd agent that the app creates and removes. That way macOS Local Network privacy doesn't block it, and it survives an app crash.
 
-## Requirements
+## macOS
+
+### Requirements
 
 - macOS 14 or later
 - `rclone` (`brew install rclone`)
@@ -25,7 +47,7 @@ Traffic goes through an SSH tunnel to the server's local OpenCloud port. The tun
   rclone config create opencloud webdav vendor=owncloud user=YOURUSER pass=YOURTOKEN url=http://127.0.0.1:19201/remote.php/dav/files/YOURUSER --obscure
   ```
 
-## Build and install
+### Build and install
 
 ```bash
 ./scripts/build-app.sh
@@ -56,7 +78,7 @@ On first launch the app writes `~/Library/Application Support/OpenCloudBar/confi
 ## Safety notes
 
 - A folder's first sync is a `--resync --resync-mode newer`. It merges both sides, keeps the newer copy of each file, and never deletes anything.
-- "Stop keeping" runs a final sync first and only moves the local copy to the Trash if that sync succeeds.
+- "Stop keeping" runs a final sync first and only moves the local copy out of the way if that sync succeeds.
 - Ejecting the drive in Finder keeps it ejected until you choose **Connect Drive**. If rclone crashes, the app remounts automatically.
 - Eject and Quit wait for files written to the drive to finish uploading. The upload cache lives in Application Support, not Caches, so macOS won't purge it.
 - If bisync's history goes stale, or the server settings change, the folder is marked **needs repair** rather than resynced automatically. Repair is a merge: the newer copy of each file wins and nothing is deleted.

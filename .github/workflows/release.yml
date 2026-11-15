@@ -1,4 +1,5 @@
-# Builds the Windows binaries. When SignPath is set up, they are signed through SignPath
+# Builds release files for macOS, Windows and Linux, and attaches them to the release for a v* tag.
+# Windows binaries: When SignPath is set up, they are signed through SignPath
 # (free code signing for open source; certificate by SignPath Foundation) so Smart App Control accepts them.
 #
 # SignPath settings (Settings > Secrets and variables > Actions):
@@ -7,7 +8,7 @@
 #   variable SIGNPATH_PROJECT_SLUG     default: opencloud-bar
 #   variable SIGNPATH_POLICY_SLUG      default: release-signing
 # Without the token the workflow still builds, and releases get unsigned binaries.
-name: Windows
+name: Release
 
 on:
   workflow_dispatch:
@@ -19,7 +20,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  windows:
     runs-on: windows-latest
     env:
       HAS_SIGNPATH: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
@@ -92,8 +93,60 @@ jobs:
           name: opencloud-bar-windows-amd64
           path: dist/*.exe
 
-      - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+      - name: Upload for release
+        uses: actions/upload-artifact@v4
         with:
-          files: dist/*.exe
+          name: release-windows
+          path: dist/*.exe
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cross/go.mod
+          cache-dependency-path: cross/go.sum
+      - name: Build
+        run: |
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            d="opencloud-bar-linux-$arch"
+            mkdir -p "stage/$d"
+            (cd cross && CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w" -o "../stage/$d/opencloud-bar" .)
+            cp LICENSE README.md "stage/$d/"
+            cp -r deploy-ms02 "stage/$d/systemd-example"
+            tar -C stage -czf "dist/$d.tar.gz" "$d"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: dist/*
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build app
+        run: |
+          ./scripts/build-app.sh
+          mkdir -p dist
+          ditto -c -k --keepParent "build/OpenCloud Bar.app" dist/OpenCloud-Bar-macOS.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: dist/*
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [windows, linux, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*

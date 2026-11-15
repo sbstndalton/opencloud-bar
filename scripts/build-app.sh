@@ -2,7 +2,12 @@
 # Builds "OpenCloud Bar.app" into ./build (release, ad-hoc signed).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-swift build -c release --build-system native
+# --build-system native avoids a plist parsing bug in newer toolchains; older ones lack the flag.
+if swift build --help 2>&1 | grep -q -- "--build-system"; then
+  swift build -c release --build-system native
+else
+  swift build -c release
+fi
 APP="build/OpenCloud Bar.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
