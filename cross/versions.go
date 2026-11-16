@@ -220,6 +220,8 @@ func restoreVersion(ctx context.Context, metaURL, key, fileDavURL, tok string) e
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		return nil
+	case resp.StatusCode == 401:
+		return errors.New("Your sign-in ended, so nothing was restored. Sign in again, then try again.")
 	case resp.StatusCode == 403:
 		return errors.New("you can't restore versions of this file")
 	case resp.StatusCode == 404:
@@ -264,6 +266,8 @@ func davFileInfo(ctx context.Context, davURL, tok string) (davFile, error) {
 	defer resp.Body.Close()
 	switch resp.StatusCode {
 	case 207:
+	case 401:
+		return davFile{}, errors.New(signInAgainText)
 	case 404:
 		return davFile{}, errors.New("it isn't in OpenCloud yet; wait for the folder to sync, then try again")
 	default:
@@ -306,6 +310,9 @@ func davFileInfo(ctx context.Context, davURL, tok string) (davFile, error) {
 	return out, nil
 }
 
+// signInAgainText: a 401 from the server (same wording as the Mac).
+const signInAgainText = "Your sign-in ended. Sign in again, then try again."
+
 const unsyncedText = "This file has changes that haven't synced yet. Sync first, then restore."
 
 // localMatches: the local copy is the server's current file as far as size and (when the
@@ -328,12 +335,16 @@ func localMatches(local string, srv davFile) bool {
 	return true
 }
 
-// folderSyncing: that folder's sync runs (or is starting), or an exclusive action does.
+// folderSyncing: that folder's sync runs, is starting, queued or waiting, or an exclusive
+// action runs.
 func (e *Engine) folderSyncing(key string) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.active[key] != nil || e.startingKeys[key] > 0 || e.exclOn
+	return e.active[key] != nil || e.startingKeys[key] > 0 || e.exclOn || e.waitingLocked(key)
 }
+
+// afterVersionBackup is a test hook, called after a restore's backup (nil otherwise).
+var afterVersionBackup func()
 
 // historyTarget resolves a file in a kept folder for the history: the folder, the file's path,
 // its local copy, its WebDAV URL, its versions URL and a token.
@@ -437,12 +448,23 @@ func (e *Engine) RestoreVersion(key, rel, vkey string) error {
 	if _, err := backupLocalCopy(t.local, t.cfg.StateDir, t.f.StateName, t.rel, time.Now()); err != nil {
 		return fmt.Errorf("couldn't keep the current file in the backups, so nothing was restored: %w", err)
 	}
+	if afterVersionBackup != nil {
+		afterVersionBackup()
+	}
 	// Checked again: a sync may have started while the backup was made.
 	if e.folderSyncing(t.f.Key()) {
 		return fmt.Errorf("“%s” started syncing; try again when it finishes", t.f.DisplayName())
 	}
 	ctx, cancel = context.WithTimeout(context.Background(), 60*time.Second) // after the backup
 	defer cancel()
+	// And the file again, right before the COPY: changed meanwhile here or by another client?
+	now, err := davFileInfo(ctx, t.davURL, t.tok)
+	if err != nil {
+		return err
+	}
+	if now.ID != t.server.ID || !localMatches(t.local, now) {
+		return errors.New(unsyncedText)
+	}
 	if err := restoreVersion(ctx, t.metaURL, vkey, t.davURL, t.tok); err != nil {
 		return err
 	}

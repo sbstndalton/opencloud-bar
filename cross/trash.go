@@ -440,6 +440,9 @@ func (e *Engine) restoreTrashChecked(ctx context.Context, cfg Config, origin str
 	// Something here that isn't in OpenCloud (not synced yet) would meet the restored item in
 	// the next sync; leave that to the user. The kept folder itself is allowed: the sync merges.
 	if _, err := os.Lstat(local); err == nil && rel != "" {
+		if cfg.Paused {
+			return fmt.Errorf("something is at “%s” on this computer. Resume syncing and wait for the folder to sync, then restore", loc)
+		}
 		return fmt.Errorf("something is at “%s” on this computer. Wait for the folder to sync, then restore", loc)
 	}
 	if err := restoreTrashItem(ctx, origin, sp, it, tok); err != nil {

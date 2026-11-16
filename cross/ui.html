@@ -636,7 +636,7 @@ function drawConflicts() {
 let trashAll = false;
 async function trash(main, r) {
   header(main, "Deleted Files");
-  main.append(h("p", { class: "hint", text: "Files and folders deleted in OpenCloud, from your personal space and the spaces you keep folders from, newest first. Restore puts an item back where it was, if that was in a kept folder; the folder then syncs (while syncing is paused, when you resume). If something is at that place again, nothing is restored or overwritten: rename or move that first. Deleting for good is done in OpenCloud in the browser." }));
+  main.append(h("p", { class: "hint", text: "Files and folders deleted in OpenCloud, from your personal space and the spaces you keep folders from, newest first. Restore puts an item back where it was, if that was in a kept folder; the folder then syncs (while syncing is paused, when you resume). If something is at that place again, nothing is restored or overwritten. Deleting for good is done in OpenCloud in the browser." }));
   const all = h("input", { type: "checkbox", id: "trash-all" }); all.checked = trashAll;
   const body = h("div", { id: "trash-body" }, h("p", { class: "hint", text: "Loading…" }));
   main.append(h("div", { class: "row" }, h("label", { class: "check" }, all, h("span", { text: "Show all (also items that weren't in a kept folder)" })),

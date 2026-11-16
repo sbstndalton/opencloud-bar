@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -92,6 +93,9 @@ type fakeOC struct {
 // reportTime is the server's modification time of Docs/report.txt (size 7, "current").
 var reportTime = time.Date(2026, 11, 10, 9, 30, 0, 0, time.UTC)
 
+// reportSize is its size in OpenCloud (changed by a test, under fakeOC.mu).
+var reportSize = 7
+
 func newFakeOC(t *testing.T) *fakeOC {
 	f := &fakeOC{t: t, exists: map[string]bool{}, trash: map[string]string{}}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
@@ -116,7 +120,7 @@ func (f *fakeOC) serve(w http.ResponseWriter, r *http.Request) {
 		  {"id":"storage-users-1$2222","name":"Marketing","driveType":"project","root":{"webDavUrl":"`+f.srv.URL+`/dav/spaces/storage-users-1$2222"}}]}`)
 	case r.Method == "PROPFIND" && p == "/opencloud/remote.php/dav/files/sam/Docs/report.txt":
 		w.WriteHeader(207)
-		_, _ = io.WriteString(w, `<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:response><d:href>/x</d:href><d:propstat><d:prop><oc:fileid>storage-users-1$1111!aaaa</oc:fileid><d:getcontentlength>7</d:getcontentlength><d:getlastmodified>`+reportTime.Format(http.TimeFormat)+`</d:getlastmodified></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>`)
+		_, _ = io.WriteString(w, `<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:response><d:href>/x</d:href><d:propstat><d:prop><oc:fileid>storage-users-1$1111!aaaa</oc:fileid><d:getcontentlength>`+strconv.Itoa(reportSize)+`</d:getcontentlength><d:getlastmodified>`+reportTime.Format(http.TimeFormat)+`</d:getlastmodified></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>`)
 	case r.Method == "PROPFIND" && p == "/opencloud/remote.php/dav/meta/storage-users-1$1111!aaaa/v":
 		if r.Header.Get("Depth") != "1" {
 			f.t.Errorf("versions depth %q", r.Header.Get("Depth"))
@@ -322,6 +326,67 @@ func TestRestoreVersionRefusesBusyOrUnsynced(t *testing.T) {
 	if err := e.RestoreVersion("Docs", "report.txt", "v1731500000.000001"); err != nil {
 		t.Errorf("synced file refused: %v", err)
 	}
+	if n := oc.copies(); n != 1 {
+		t.Errorf("%d COPY sent, want 1", n)
+	}
+}
+
+// Queued or waiting counts as syncing; so does a sync starting while the backup is made.
+func TestRestoreVersionRefusesQueuedOrBusyAfterBackup(t *testing.T) {
+	e, oc := historyRig(t)
+	writeReport(t, e, "current")
+	e.mu.Lock()
+	e.queueLocked("Docs") // paused: it stays queued
+	e.mu.Unlock()
+	if err := e.RestoreVersion("Docs", "report.txt", "v1731500000.000001"); err == nil || !strings.Contains(err.Error(), "is syncing") {
+		t.Errorf("queued: %v", err)
+	}
+	e.mu.Lock()
+	e.queued = nil
+	e.mu.Unlock()
+
+	for _, mark := range []func(){
+		func() { e.startingKeys["Docs"]++ },
+		func() { e.exclOn = true },
+	} {
+		afterVersionBackup = func() {
+			e.mu.Lock()
+			if e.startingKeys == nil {
+				e.startingKeys = map[string]int{}
+			}
+			mark()
+			e.mu.Unlock()
+		}
+		err := e.RestoreVersion("Docs", "report.txt", "v1731500000.000001")
+		afterVersionBackup = nil
+		if err == nil || !strings.Contains(err.Error(), "started syncing") {
+			t.Errorf("busy after backup: %v", err)
+		}
+		e.mu.Lock()
+		e.startingKeys, e.exclOn = nil, false
+		e.mu.Unlock()
+	}
+	if n := oc.copies(); n != 0 {
+		t.Errorf("%d COPY sent", n)
+	}
+}
+
+// The file changed in OpenCloud (another client) while the version was chosen: no COPY.
+func TestRestoreVersionRechecksBeforeCopy(t *testing.T) {
+	e, oc := historyRig(t)
+	writeReport(t, e, "current")
+	afterVersionBackup = func() {
+		oc.mu.Lock()
+		reportSize = 99
+		oc.mu.Unlock()
+	}
+	defer func() { afterVersionBackup = nil; reportSize = 7 }()
+	if err := e.RestoreVersion("Docs", "report.txt", "v1731500000.000001"); err == nil || err.Error() != unsyncedText {
+		t.Errorf("changed meanwhile: %v", err)
+	}
+	if n := oc.copies(); n != 0 {
+		t.Errorf("%d COPY sent", n)
+	}
 }
 
 const personalTrash = `<?xml version="1.0"?>
@@ -448,9 +513,19 @@ func TestRestoreTrashRefusals(t *testing.T) {
 	local := filepath.Join(e.cfg.Local(e.cfg.Kept[0]), "sub")
 	_ = os.MkdirAll(local, 0o700)
 	_ = os.WriteFile(filepath.Join(local, "report.txt"), []byte("x"), 0o600)
-	if err := e.RestoreTrash("storage-users-1$1111", "k-report"); err == nil || !strings.Contains(err.Error(), "Wait for the folder to sync") {
+	// Paused (the rig): resume first.
+	if err := e.RestoreTrash("storage-users-1$1111", "k-report"); err == nil || !strings.Contains(err.Error(), "Resume syncing and wait for the folder to sync, then restore") {
+		t.Errorf("local conflict, paused: %v", err)
+	}
+	e.mu.Lock()
+	e.cfg.Paused = false
+	e.mu.Unlock()
+	if err := e.RestoreTrash("storage-users-1$1111", "k-report"); err == nil || !strings.Contains(err.Error(), ". Wait for the folder to sync, then restore") {
 		t.Errorf("local conflict: %v", err)
 	}
+	e.mu.Lock()
+	e.cfg.Paused = true
+	e.mu.Unlock()
 	// Not in a kept folder (shown with Show all, restored in the browser only).
 	if err := e.RestoreTrash("storage-users-1$1111", "k-photo"); err == nil || !strings.Contains(err.Error(), "wasn't in a kept folder") {
 		t.Errorf("outside: %v", err)

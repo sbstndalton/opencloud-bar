@@ -216,7 +216,7 @@ enum DavHistory {
         let (data, code) = try await request("PROPFIND", url, token: token, headers: ["Depth": "0"],
             body: #"<?xml version="1.0"?><d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:prop><oc:fileid/><d:getcontentlength/><d:getlastmodified/></d:prop></d:propfind>"#)
         if code == 404 { throw NotInOpenCloud() }
-        if code == 401 { throw AuthError.signedOut }
+        if code == 401 { throw AuthError.message("Your sign-in ended. Sign in again, then try again.") }
         guard code == 207 else { throw AuthError.message("The server answered \(code).") }
         guard let r = MultistatusParser.parse(data)?.first, let id = r.props["fileid"], !id.isEmpty else {
             throw AuthError.message("The server didn't say which file that is.")
@@ -459,6 +459,7 @@ struct DeletedFilesPage: View {
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Toggle("Show all (also items that weren't in a kept folder)", isOn: $showAll)
+                        .disabled(loading)
                         .accessibilityLabel("Show all deleted items")
                     Spacer()
                     Button("Reload") { Task { await load() } }.disabled(loading).accessibilityLabel("Reload")
@@ -607,7 +608,7 @@ extension AppModel {
             guard let v = DavHistory.askVersion(name, versions, paused: config.paused) else { return }
             // Restore it.
             do {
-                guard !folderBusy(f) else { throw AuthError.message("“\(f.displayName)” is syncing. Try again when it finishes.") }
+                guard !folderBusy(f), !exclusiveRunning else { throw AuthError.message("“\(f.displayName)” is syncing. Try again when it finishes.") }
                 guard DavHistory.localMatches(local, info) else { throw AuthError.message(DavHistory.unsyncedText) }
                 // Keep this Mac's copy first, off the main actor; nothing is restored if that fails.
                 let dir = Backups.localDir(config.stateURL, f.stateName, Backups.stamp())
@@ -616,8 +617,11 @@ extension AppModel {
                 } catch {
                     throw AuthError.message("Couldn't keep the current file in the backups, so nothing was restored: \(error.localizedDescription)")
                 }
-                guard !folderBusy(f) else { throw AuthError.message("“\(f.displayName)” started syncing. Try again when it finishes.") }
+                guard !folderBusy(f), !exclusiveRunning else { throw AuthError.message("“\(f.displayName)” started syncing. Try again when it finishes.") }
                 let token = try await Auth.accessToken(serverURL: server)   // again: the picker may have stayed open long
+                // And the file again, right before the COPY: changed meanwhile here or by another client?
+                let now = try await DavHistory.fileInfo(dav, token: token)
+                guard now.id == info.id, DavHistory.localMatches(local, now) else { throw AuthError.message(DavHistory.unsyncedText) }
                 try await DavHistory.restoreVersion(meta, key: v.key, file: dav, token: token)
                 Log.line("restored an earlier version of \(f.displayName)/\(rel)")
                 let paused = config.paused
@@ -674,7 +678,8 @@ extension AppModel {
             }
             // attributesOfItem doesn't follow symbolic links: a broken one counts as there (as Go's Lstat).
             if !rel.isEmpty, (try? FileManager.default.attributesOfItem(atPath: config.localURL(f).appendingPathComponent(rel).path)) != nil {
-                throw AuthError.message("Something is at “\(it.path)” on this Mac. Wait for the folder to sync, then restore.")
+                throw AuthError.message(config.paused ? "Something is at “\(it.path)” on this Mac. Resume syncing and wait for the folder to sync, then restore."
+                                                      : "Something is at “\(it.path)” on this Mac. Wait for the folder to sync, then restore.")
             }
             try await DavHistory.restore(origin: origin, sp, it, token: token)
             Log.line("restored \(it.path) from the trash of \(sp.name)")
