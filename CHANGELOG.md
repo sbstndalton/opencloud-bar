@@ -4,6 +4,15 @@ All notable changes to OpenCloud Bar. The format follows [Keep a Changelog](http
 
 The release workflow copies the section for a tag into that tag's GitHub release, so every version heading must stay in the form `## [X.Y.Z] - date`.
 
+## [2.1.0] - 2026-11-16
+
+### Added
+- **File history.** See the earlier versions OpenCloud keeps of a file in a kept folder (date and size) and restore one. Mac: the menu's **File History…** (an open panel in the local folder; files in kept folders only) and a kept folder's **File History…** in Settings ▸ Kept Folders. Windows and Linux: the settings window, Folders, select a folder, **File History…**, then pick the file from the folder's listing. Before restoring, the copy on this computer is copied to the local backups (`backups/<stateName>/<stamp>/` in the sync state folder); if that fails, nothing is restored. The folder then syncs. Uses OpenCloud's WebDAV versions API: `PROPFIND <dav>/meta/<file id>/v` (`Depth: 1`) and `COPY` of `…/v/<version>`, as OpenCloud's web interface does.
+- **Deleted files.** Settings ▸ **Deleted Files** (Mac; also in the menu) and the settings window's **Deleted Files** section (Windows, Linux) list OpenCloud's trash for the personal space and every space a folder is kept from: name, original path, when it was deleted and size, newest first. By default only items that were inside a kept folder; **Show all** lists everything. **Restore** moves an item back to where it was (`MOVE` from `<dav>/spaces/trash-bin/<space id>/<item>`, `Overwrite: F`) and then syncs its kept folder. Nothing is ever overwritten: if something is at the original place again in OpenCloud (checked first, and refused by the server with `Overwrite: F`) or on this computer, the restore is refused with a message. Items outside kept folders are restored in the browser. The app never deletes from the trash.
+
+### Security
+- The bearer token for these requests only goes to the server: no redirects are followed (Mac: its own session without redirects; Windows, Linux: the existing no-redirect client). Paths are checked to be plain paths inside a kept folder (no `..`, `\`, control characters, the backups folder or conflict copies), and a restore is looked up on the server again rather than taken from the page.
+
 ## [2.0.1] - 2026-11-16
 
 ### Changed
