@@ -192,7 +192,7 @@ func (u *webUI) loginURL(section string) string {
 
 func validSection(s string) bool {
 	switch s {
-	case "folders", "conflicts", "activity", "account", "sync", "drive", "general", "logs", "about":
+	case "folders", "conflicts", "trash", "activity", "account", "sync", "drive", "general", "logs", "about":
 		return true
 	}
 	return false

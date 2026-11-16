@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -76,15 +77,20 @@ func TestDavRootAndMetaURL(t *testing.T) {
 }
 
 // fakeOC is a fake OpenCloud with one personal space (sam, behind /opencloud) and the
-// Marketing project space. It records the requests that change something.
+// Marketing project space. It records every request, and those that change something.
 type fakeOC struct {
-	t      *testing.T
-	srv    *httptest.Server
-	mu     sync.Mutex
-	writes []string // "METHOD path | Destination | Overwrite"
-	exists map[string]bool
-	trash  map[string]string // space path → multistatus answer
+	t        *testing.T
+	srv      *httptest.Server
+	mu       sync.Mutex
+	writes   []string // "METHOD path | Destination | Overwrite"
+	requests []string // every request: "METHOD path"
+	exists   map[string]bool
+	trash    map[string]string // space path → multistatus answer
+	drives   string            // the /me/drives answer ("" for the usual one)
 }
+
+// reportTime is the server's modification time of Docs/report.txt (size 7, "current").
+var reportTime = time.Date(2026, 11, 10, 9, 30, 0, 0, time.UTC)
 
 func newFakeOC(t *testing.T) *fakeOC {
 	f := &fakeOC{t: t, exists: map[string]bool{}, trash: map[string]string{}}
@@ -101,13 +107,16 @@ func (f *fakeOC) serve(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.requests = append(f.requests, r.Method+" "+p)
 	switch {
+	case r.Method == "GET" && p == "/opencloud/graph/v1.0/me/drives" && f.drives != "":
+		_, _ = io.WriteString(w, f.drives)
 	case r.Method == "GET" && p == "/opencloud/graph/v1.0/me/drives":
 		_, _ = io.WriteString(w, `{"value":[{"id":"storage-users-1$1111","name":"Sam","driveType":"personal","root":{"webDavUrl":"`+f.srv.URL+`/opencloud/dav/spaces/storage-users-1$1111"}},
 		  {"id":"storage-users-1$2222","name":"Marketing","driveType":"project","root":{"webDavUrl":"`+f.srv.URL+`/dav/spaces/storage-users-1$2222"}}]}`)
 	case r.Method == "PROPFIND" && p == "/opencloud/remote.php/dav/files/sam/Docs/report.txt":
 		w.WriteHeader(207)
-		_, _ = io.WriteString(w, `<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:response><d:href>/x</d:href><d:propstat><d:prop><oc:fileid>storage-users-1$1111!aaaa</oc:fileid></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>`)
+		_, _ = io.WriteString(w, `<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:response><d:href>/x</d:href><d:propstat><d:prop><oc:fileid>storage-users-1$1111!aaaa</oc:fileid><d:getcontentlength>7</d:getcontentlength><d:getlastmodified>`+reportTime.Format(http.TimeFormat)+`</d:getlastmodified></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>`)
 	case r.Method == "PROPFIND" && p == "/opencloud/remote.php/dav/meta/storage-users-1$1111!aaaa/v":
 		if r.Header.Get("Depth") != "1" {
 			f.t.Errorf("versions depth %q", r.Header.Get("Depth"))
@@ -161,12 +170,34 @@ func historyRig(t *testing.T) (*Engine, *fakeOC) {
 	return e, oc
 }
 
-func TestFileVersionsAndRestore(t *testing.T) {
-	e, oc := historyRig(t)
+// writeReport writes the synced local copy of Docs/report.txt (same size and time as the server's).
+func writeReport(t *testing.T, e *Engine, content string) string {
+	t.Helper()
 	local := filepath.Join(e.cfg.Local(e.cfg.Kept[0]), "report.txt")
-	if err := os.WriteFile(local, []byte("current"), 0o600); err != nil {
+	if err := os.WriteFile(local, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chtimes(local, reportTime, reportTime); err != nil {
+		t.Fatal(err)
+	}
+	return local
+}
+
+func (f *fakeOC) copies() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, w := range f.writes {
+		if strings.HasPrefix(w, "COPY ") {
+			n++
+		}
+	}
+	return n
+}
+
+func TestFileVersionsAndRestore(t *testing.T) {
+	e, oc := historyRig(t)
+	local := writeReport(t, e, "current")
 	vs, err := e.FileVersions("Docs", "report.txt")
 	if err != nil || len(vs) != 2 {
 		t.Fatalf("versions: %+v %v", vs, err)
@@ -207,19 +238,89 @@ func TestFileVersionsAndRestore(t *testing.T) {
 
 func TestFileVersionsRefusesPathsOutsideKeptFolders(t *testing.T) {
 	e, oc := historyRig(t)
-	for _, rel := range []string{"", "../secret.txt", "a/../../b", ".opencloud-bar-backups/x", "x.conflict1.txt", "a\x01b", `..\up.txt`} {
+	writeReport(t, e, "current")
+	for _, rel := range []string{"", "../secret.txt", "a/../../b", ".opencloud-bar-backups/x", "x.conflict1.txt", "a\x01b", `..\up.txt`, "../report.txt", "/../Docs/report.txt/.."} {
 		if _, err := e.FileVersions("Docs", rel); err == nil {
 			t.Errorf("%q accepted", rel)
 		}
-		if err := e.RestoreVersion("Docs", rel, "v1"); err == nil {
+		if err := e.RestoreVersion("Docs", rel, "v1731500000.000001"); err == nil {
 			t.Errorf("restore %q accepted", rel)
 		}
 	}
-	if _, err := e.FileVersions("Elsewhere", "a.txt"); err == nil {
+	if _, err := e.FileVersions("Elsewhere", "report.txt"); err == nil {
 		t.Error("a folder that isn't kept")
 	}
-	if len(oc.writes) != 0 {
-		t.Errorf("wrote: %v", oc.writes)
+	if err := e.RestoreVersion("Elsewhere", "report.txt", "v1731500000.000001"); err == nil {
+		t.Error("restore in a folder that isn't kept")
+	}
+	oc.mu.Lock()
+	defer oc.mu.Unlock()
+	if len(oc.requests) != 0 {
+		t.Errorf("requests sent: %v", oc.requests)
+	}
+}
+
+// A backup that can't be made: no COPY, an error.
+func TestRestoreVersionBackupFails(t *testing.T) {
+	e, oc := historyRig(t)
+	writeReport(t, e, "current")
+	backups := filepath.Join(expand(e.cfg.StateDir), "backups")
+	if err := os.MkdirAll(backups, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(backups, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(backups, 0o700) })
+	err := e.RestoreVersion("Docs", "report.txt", "v1731500000.000001")
+	if err == nil || !strings.Contains(err.Error(), "nothing was restored") {
+		t.Errorf("err %v", err)
+	}
+	if n := oc.copies(); n != 0 {
+		t.Errorf("%d COPY sent", n)
+	}
+}
+
+// Refused while the folder syncs, and when the local copy differs from the server's file.
+func TestRestoreVersionRefusesBusyOrUnsynced(t *testing.T) {
+	e, oc := historyRig(t)
+	local := writeReport(t, e, "current")
+	e.mu.Lock()
+	e.active = map[string]*activeRun{"Docs": {name: "Docs"}}
+	e.mu.Unlock()
+	if err := e.RestoreVersion("Docs", "report.txt", "v1731500000.000001"); err == nil || !strings.Contains(err.Error(), "is syncing") {
+		t.Errorf("busy: %v", err)
+	}
+	e.mu.Lock()
+	e.active = nil
+	e.mu.Unlock()
+
+	// Changed here (another size), not synced yet.
+	writeReport(t, e, "changed here")
+	if err := e.RestoreVersion("Docs", "report.txt", "v1731500000.000001"); err == nil || err.Error() != unsyncedText {
+		t.Errorf("size differs: %v", err)
+	}
+	// Same size, but a newer time.
+	writeReport(t, e, "CURRENT")
+	later := reportTime.Add(time.Minute)
+	_ = os.Chtimes(local, later, later)
+	if err := e.RestoreVersion("Docs", "report.txt", "v1731500000.000001"); err == nil || err.Error() != unsyncedText {
+		t.Errorf("time differs: %v", err)
+	}
+	// Deleted here, not synced yet.
+	_ = os.Remove(local)
+	if err := e.RestoreVersion("Docs", "report.txt", "v1731500000.000001"); err == nil || err.Error() != unsyncedText {
+		t.Errorf("missing here: %v", err)
+	}
+	if n := oc.copies(); n != 0 {
+		t.Errorf("%d COPY sent", n)
+	}
+	// Within 2 seconds of the server's time is the same file.
+	writeReport(t, e, "current")
+	near := reportTime.Add(1500 * time.Millisecond)
+	_ = os.Chtimes(local, near, near)
+	if err := e.RestoreVersion("Docs", "report.txt", "v1731500000.000001"); err != nil {
+		t.Errorf("synced file refused: %v", err)
 	}
 }
 
@@ -347,7 +448,7 @@ func TestRestoreTrashRefusals(t *testing.T) {
 	local := filepath.Join(e.cfg.Local(e.cfg.Kept[0]), "sub")
 	_ = os.MkdirAll(local, 0o700)
 	_ = os.WriteFile(filepath.Join(local, "report.txt"), []byte("x"), 0o600)
-	if err := e.RestoreTrash("storage-users-1$1111", "k-report"); err == nil || !strings.Contains(err.Error(), "on this computer") {
+	if err := e.RestoreTrash("storage-users-1$1111", "k-report"); err == nil || !strings.Contains(err.Error(), "Wait for the folder to sync") {
 		t.Errorf("local conflict: %v", err)
 	}
 	// Not in a kept folder (shown with Show all, restored in the browser only).
@@ -390,21 +491,72 @@ func TestRestoreTrashRefusals(t *testing.T) {
 	}
 }
 
+// The personal space's webDavUrl: only its path is used, against the configured server.
+func TestPersonalTrashURLFromDrives(t *testing.T) {
+	var otherHits atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { otherHits.Add(1) }))
+	defer other.Close()
+	e, oc := historyRig(t)
+	oc.trash["/opencloud/dav/spaces/trash-bin/storage-users-1$1111"] = personalTrash
+	oc.trash["/dav/spaces/trash-bin/storage-users-1$2222"] = marketingTrash
+
+	// Another host in webDavUrl: its path goes to the configured server.
+	oc.drives = `{"value":[{"id":"storage-users-1$1111","driveType":"personal","root":{"webDavUrl":"` + other.URL + `/opencloud/dav/spaces/storage-users-1$1111"}}]}`
+	l, err := e.ListTrash(false)
+	if err != nil || len(l.Problems) != 0 || len(l.Items) != 3 {
+		t.Errorf("other host: %+v %v", l, err)
+	}
+	if err := e.RestoreTrash("storage-users-1$1111", "k-report"); err != nil {
+		t.Errorf("restore: %v", err)
+	}
+	if otherHits.Load() != 0 {
+		t.Error("a request went to the host in webDavUrl")
+	}
+	// A relative or unusable path: a problem line; the other spaces still listed.
+	for _, bad := range []string{"dav/spaces/storage-users-1$1111", "", "https://h/dav/spaces/it's", "%zz"} {
+		oc.drives = `{"value":[{"id":"storage-users-1$1111","driveType":"personal","root":{"webDavUrl":"` + bad + `"}}]}`
+		l, err := e.ListTrash(true)
+		if err != nil || len(l.Problems) != 1 || l.Problems[0] != personalProblem || len(l.Items) != 1 || l.Items[0].SpaceName != "Marketing" {
+			t.Errorf("%q: %+v %v", bad, l, err)
+		}
+	}
+	oc.drives = `{"value":[]}`
+	if l, err := e.ListTrash(true); err != nil || len(l.Problems) != 1 {
+		t.Errorf("no personal space: %+v %v", l, err)
+	}
+	if otherHits.Load() != 0 {
+		t.Error("a request went to the host in webDavUrl")
+	}
+}
+
 func TestRedirectsNotFollowedForHistory(t *testing.T) {
-	hits := 0
-	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits++ }))
+	var hits atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1) }))
 	defer other.Close()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, other.URL+"/steal", http.StatusTemporaryRedirect)
 	}))
 	defer srv.Close()
 	if _, err := listVersions(t.Context(), srv.URL+"/dav/meta/x/v", "tok"); err == nil {
-		t.Error("redirect accepted")
+		t.Error("listVersions: redirect accepted")
 	}
-	if _, err := listTrash(t.Context(), srv.URL, trashSpace{DavPath: "/dav/spaces/s"}, "tok"); err == nil {
-		t.Error("redirect accepted")
+	if err := restoreVersion(t.Context(), srv.URL+"/dav/meta/x/v", "v1", srv.URL+"/dav/files/sam/a.txt", "tok"); err == nil {
+		t.Error("restoreVersion: redirect accepted")
 	}
-	if hits != 0 {
-		t.Error("the token went to another host")
+	if _, err := davFileID(t.Context(), srv.URL+"/dav/files/sam/a.txt", "tok"); err == nil {
+		t.Error("davFileID: redirect accepted")
+	}
+	if _, err := davFileInfo(t.Context(), srv.URL+"/dav/files/sam/a.txt", "tok"); err == nil {
+		t.Error("davFileInfo: redirect accepted")
+	}
+	sp := trashSpace{ID: "s", DavPath: "/dav/spaces/s"}
+	if _, err := listTrash(t.Context(), srv.URL, sp, "tok"); err == nil {
+		t.Error("listTrash: redirect accepted")
+	}
+	if err := restoreTrashItem(t.Context(), srv.URL, sp, TrashItem{Key: "k", Path: "Docs/a.txt"}, "tok"); err == nil {
+		t.Error("restoreTrashItem: redirect accepted")
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("the token went to another host %d times", n)
 	}
 }

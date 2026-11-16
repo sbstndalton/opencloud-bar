@@ -140,7 +140,7 @@ enum DavHistory {
     // MARK: - Multistatus
 
     /// One <response>: its href and the props of its 200 propstats, by local name.
-    struct DavResponse { var href = ""; var props: [String: String] = [:]; var collection = false }
+    struct DavResponse { var href = ""; var props: [String: String] = [:]; var collection = false; var ok = false }
 
     final class MultistatusParser: NSObject, XMLParserDelegate {
         var out: [DavResponse] = []
@@ -178,6 +178,7 @@ enum DavHistory {
             case "status" where !inProp: statusText = t
             case "propstat":
                 if statusText.isEmpty || statusText.contains(" 200") {
+                    cur?.ok = true
                     for (k, v) in stat where !v.isEmpty { cur?.props[k] = v }
                     if statCollection { cur?.collection = true }
                 }
@@ -205,15 +206,46 @@ enum DavHistory {
 
     // MARK: - Versions
 
-    static func fileID(_ url: URL, token: String) async throws -> String {
+    struct FileInfo { var id: String; var size: Int64?; var modified: Date? }
+    struct NotInOpenCloud: LocalizedError {
+        var errorDescription: String? { "It isn't in OpenCloud yet. Wait for the folder to sync, then try again." }
+    }
+
+    /// The file's oc:fileid, size and modification time (one PROPFIND, depth 0).
+    static func fileInfo(_ url: URL, token: String) async throws -> FileInfo {
         let (data, code) = try await request("PROPFIND", url, token: token, headers: ["Depth": "0"],
-            body: #"<?xml version="1.0"?><d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:prop><oc:fileid/></d:prop></d:propfind>"#)
-        if code == 404 { throw AuthError.message("It isn't in OpenCloud yet. Wait for the folder to sync, then try again.") }
+            body: #"<?xml version="1.0"?><d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:prop><oc:fileid/><d:getcontentlength/><d:getlastmodified/></d:prop></d:propfind>"#)
+        if code == 404 { throw NotInOpenCloud() }
+        if code == 401 { throw AuthError.signedOut }
         guard code == 207 else { throw AuthError.message("The server answered \(code).") }
-        guard let id = MultistatusParser.parse(data)?.compactMap({ $0.props["fileid"] }).first, !id.isEmpty else {
+        guard let r = MultistatusParser.parse(data)?.first, let id = r.props["fileid"], !id.isEmpty else {
             throw AuthError.message("The server didn't say which file that is.")
         }
-        return id
+        return FileInfo(id: id, size: r.props["getcontentlength"].flatMap { Int64($0) },
+                        modified: r.props["getlastmodified"].flatMap(httpDate))
+    }
+
+    static let unsyncedText = "This file has changes that haven't synced yet. Sync first, then restore."
+
+    /// The local copy is the server's current file: same size and (when the server says) a
+    /// modification time within 2 seconds. A missing local copy doesn't match. Same as Go.
+    nonisolated static func localMatches(_ local: URL, _ srv: FileInfo) -> Bool {
+        guard let a = try? FileManager.default.attributesOfItem(atPath: local.path),
+              (a[.type] as? FileAttributeType) == .typeRegular else { return false }
+        if let size = srv.size, (a[.size] as? NSNumber)?.int64Value != size { return false }
+        if let m = srv.modified {
+            guard let lm = a[.modificationDate] as? Date, abs(lm.timeIntervalSince(m)) <= 2 else { return false }
+        }
+        return true
+    }
+
+    /// Copies the local file into the backups (never over another backup). Off the main actor.
+    nonisolated static func backup(_ local: URL, to dir: URL, rel: String) throws {
+        let fm = FileManager.default
+        let dest = Conflicts.freeURL(dir.appendingPathComponent(rel))
+        try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true,
+                               attributes: [.posixPermissions: 0o700])
+        try fm.copyItem(at: local, to: dest)
     }
 
     static func parseVersions(_ data: Data) -> [Version]? {
@@ -222,7 +254,7 @@ enum DavHistory {
         for r in rs {
             var p = hrefPath(r.href)
             while p.hasSuffix("/") { p.removeLast() }
-            guard let i = p.range(of: "/v/", options: .backwards) else { continue }
+            guard r.ok, let i = p.range(of: "/v/", options: .backwards) else { continue }
             let key = String(p[i.upperBound...])
             guard let seg = plainSegments(key), seg.count == 1 else { continue }
             out.append(Version(key: key, modified: r.props["getlastmodified"].flatMap(httpDate),
@@ -251,6 +283,7 @@ enum DavHistory {
         let (_, code) = try await request("COPY", u, token: token, headers: ["Destination": file.absoluteString])
         switch code {
         case 200..<300: return
+        case 401: throw AuthError.message("Your sign-in ended, so nothing was restored. Sign in again, then try again.")
         case 403: throw AuthError.message("You can't restore versions of this file.")
         case 404: throw AuthError.message("That version isn't there any more.")
         default: throw AuthError.message("OpenCloud didn't restore it (it answered \(code)).")
@@ -259,8 +292,21 @@ enum DavHistory {
 
     // MARK: - Trash
 
-    /// The personal space (from /me/drives) and the spaces folders are kept from.
-    static func spaces(_ c: Config, token: String) async throws -> [TrashSpace] {
+    static let personalProblem = "Personal: the server didn't say where your personal space is"
+
+    /// The path of the personal space's root.webDavUrl, used against the configured server's
+    /// origin (its host is ignored); same check as SpacesAPI.parse. nil if unusable. Same as Go.
+    static func personalSpacePath(_ webDavURL: String) -> String? {
+        guard let u = URLComponents(string: webDavURL) else { return nil }
+        var p = u.percentEncodedPath
+        while p.hasSuffix("/") { p.removeLast() }
+        guard p.hasPrefix("/"), !p.contains("'"), !p.contains(" ") else { return nil }
+        return p
+    }
+
+    /// The personal space (from /me/drives) and the spaces folders are kept from, and a
+    /// problem line when the personal space can't be used.
+    static func spaces(_ c: Config, token: String) async throws -> ([TrashSpace], [String]) {
         let base = (c.serverURL ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard let url = URL(string: base + "/graph/v1.0/me/drives") else { throw AuthError.message("The server address isn't valid.") }
         var req = URLRequest(url: url)
@@ -271,16 +317,13 @@ enum DavHistory {
               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             throw AuthError.message("Couldn't list the spaces.")
         }
-        let host = URL(string: base)?.host?.lowercased()
-        var out: [TrashSpace] = []
-        for d in (obj["value"] as? [[String: Any]]) ?? [] where (d["driveType"] as? String) == "personal" {
-            guard let id = d["id"] as? String, !id.isEmpty,
-                  let s = (d["root"] as? [String: Any])?["webDavUrl"] as? String, let u = URLComponents(string: s) else { continue }
-            if let h = u.host?.lowercased(), let host, h != host { continue }
-            var p = u.percentEncodedPath
-            while p.hasSuffix("/") { p.removeLast() }
+        var out: [TrashSpace] = [], problems: [String] = []
+        if let d = ((obj["value"] as? [[String: Any]]) ?? []).first(where: { ($0["driveType"] as? String) == "personal" }),
+           let id = d["id"] as? String, !id.isEmpty,
+           let p = personalSpacePath(((d["root"] as? [String: Any])?["webDavUrl"] as? String) ?? "") {
             out.append(TrashSpace(id: id, name: "Personal", davPath: p, kept: c.kept.filter { $0.space == nil }))
-            break
+        } else {
+            problems.append(personalProblem)
         }
         for f in c.kept {
             guard let s = f.space else { continue }
@@ -289,7 +332,7 @@ enum DavHistory {
             while p.hasSuffix("/") { p.removeLast() }
             out.append(TrashSpace(id: s.id, name: s.name, davPath: p, kept: [f]))
         }
-        return out
+        return (out, problems)
     }
 
     static func parseTrash(_ data: Data, _ sp: TrashSpace) -> [TrashItem]? {
@@ -370,10 +413,11 @@ enum DavHistory {
 
     /// Asks which version to restore. nil if cancelled.
     @MainActor
-    static func askVersion(_ name: String, _ versions: [Version]) -> Version? {
+    static func askVersion(_ name: String, _ versions: [Version], paused: Bool) -> Version? {
         let a = NSAlert()
         a.messageText = "Earlier versions of “\(name)”"
-        a.informativeText = "Choose a version to restore. It becomes the current file in OpenCloud; the copy on this Mac is kept in the backups (in the app's state folder, for 30 days) first, and the folder then syncs."
+        a.informativeText = "Choose a version to restore. It becomes the current file in OpenCloud; the copy on this Mac is kept in the backups (in the app's state folder, for 30 days) first. "
+            + afterRestoreText(paused: paused)
         a.addButton(withTitle: "Restore")
         a.addButton(withTitle: "Cancel")
         let pick = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 340, height: 26), pullsDown: false)
@@ -390,6 +434,11 @@ enum DavHistory {
         let i = pick.indexOfSelectedItem
         return versions.indices.contains(i) ? versions[i] : nil
     }
+
+    /// What happens after a restore: a sync now, or when syncing resumes.
+    static func afterRestoreText(paused: Bool) -> String {
+        paused ? "It comes to this computer when you resume syncing." : "The folder then syncs."
+    }
 }
 
 /// Settings ▸ Deleted Files: OpenCloud's trash of the personal space and the kept spaces.
@@ -398,16 +447,15 @@ struct DeletedFilesPage: View {
     @Local private var showAll = false
     @Local private var items: [DavHistory.TrashItem] = []
     @Local private var problems: [String] = []
+    @Local private var hidden = 0
     @Local private var loading = false
     @Local private var error: String?
     @Local private var restoring: String?
 
-    private var shown: [DavHistory.TrashItem] { showAll ? items : items.filter { $0.folderKey != nil } }
-
     var body: some View {
         Form {
             Section {
-                Text("Files and folders deleted in OpenCloud, from your personal space and the spaces you keep folders from, newest first. Restore puts an item back where it was, if that was in a kept folder; the folder then syncs. If something is at that place again, nothing is restored or overwritten. Deleting for good is done in OpenCloud in the browser.")
+                Text("Files and folders deleted in OpenCloud, from your personal space and the spaces you keep folders from, newest first. Restore puts an item back where it was, if that was in a kept folder; the folder then syncs (while syncing is paused, when you resume). If something is at that place again, nothing is restored or overwritten. Deleting for good is done in OpenCloud in the browser.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Toggle("Show all (also items that weren't in a kept folder)", isOn: $showAll)
@@ -415,18 +463,19 @@ struct DeletedFilesPage: View {
                     Spacer()
                     Button("Reload") { Task { await load() } }.disabled(loading).accessibilityLabel("Reload")
                 }
-                ForEach(problems, id: \.self) { Text("Couldn't read the trash of \($0)").font(.caption).foregroundStyle(.orange) }
+                ForEach(Array(problems.enumerated()), id: \.offset) { _, p in
+                    Text("Couldn't read the trash of \(p)").font(.caption).foregroundStyle(.orange)
+                }
             }
             if let error {
                 Section { Text(error).foregroundStyle(.secondary) }
             } else if loading && items.isEmpty {
                 Section { ProgressView().controlSize(.small) }
-            } else if shown.isEmpty {
-                let hidden = items.count - shown.count
+            } else if items.isEmpty {
                 Section { Text(hidden > 0 ? "Nothing deleted from your kept folders. \(hidden) other item(s) are in the trash; turn on Show all to see them." : "The trash is empty.").foregroundStyle(.secondary) }
             } else {
-                Section(shown.count == 1 ? "1 deleted item" : "\(shown.count) deleted items") {
-                    ForEach(shown) { it in
+                Section(items.count == 1 ? "1 deleted item" : "\(items.count) deleted items") {
+                    ForEach(items) { it in
                         HStack(alignment: .top) {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(it.name + (it.dir ? "/" : "")).textSelection(.enabled)
@@ -450,25 +499,30 @@ struct DeletedFilesPage: View {
                         .padding(.vertical, 2)
                     }
                 }
+                if hidden > 0 {
+                    Section { Text("\(hidden) item(s) that weren't in a kept folder are hidden; turn on Show all to see them.").font(.caption).foregroundStyle(.secondary) }
+                }
             }
         }
         .formStyle(.grouped)
         .task { await load() }
+        .onChange(of: showAll) { Task { await load() } }
     }
 
     private func load() async {
         loading = true
         defer { loading = false }
         do {
-            let (list, probs) = try await model.listTrash()
-            items = list; problems = probs; error = nil
+            let r = try await model.listTrash(all: showAll)
+            items = r.items; problems = r.problems; hidden = r.hidden; error = nil
         } catch {
             self.error = error.localizedDescription
         }
     }
 
     private func restore(_ it: DavHistory.TrashItem) async {
-        guard model.confirm("Restore “\(it.path)” to where it was?", "The folder then syncs it to this Mac.", button: "Restore") else { return }
+        let after = model.config.paused ? "It comes to this computer when you resume syncing." : "The folder then syncs it to this Mac."
+        guard model.confirm("Restore “\(it.path)” to where it was?", after, button: "Restore") else { return }
         restoring = it.id
         defer { restoring = nil }
         await model.restoreTrash(it)
@@ -495,6 +549,13 @@ extension AppModel {
         return nil
     }
 
+    /// The other Unicode normalization of a path (precomposed ⇄ decomposed), nil if the same.
+    nonisolated static func otherNormalization(_ s: String) -> String? {
+        let pre = s.precomposedStringWithCanonicalMapping, de = s.decomposedStringWithCanonicalMapping
+        let alt = s.unicodeScalars.elementsEqual(pre.unicodeScalars) ? de : pre
+        return alt.unicodeScalars.elementsEqual(s.unicodeScalars) ? nil : alt
+    }
+
     private func history(startingAt dir: URL) {
         guard config.isOIDC, !needsSignIn else { alert("Sign in first", "File history needs the browser sign-in."); return }
         let panel = NSOpenPanel()
@@ -518,51 +579,76 @@ extension AppModel {
         let local = config.localURL(f).appendingPathComponent(rel)
         let name = (rel as NSString).lastPathComponent
         Task {
+            // Find the file and its versions.
+            let server = config.serverURL ?? ""
+            var dav: URL, info: DavHistory.FileInfo, meta: URL, versions: [DavHistory.Version]
             do {
-                let server = config.serverURL ?? ""
-                guard let dav = SharesAPI.davURL(config, f, rel: rel) else { throw AuthError.message("That path isn't valid.") }
+                guard let u = SharesAPI.davURL(config, f, rel: rel) else { throw AuthError.message("That path isn't valid.") }
+                dav = u
                 let token = try await Auth.accessToken(serverURL: server)
-                let id = try await DavHistory.fileID(dav, token: token)
-                guard let meta = DavHistory.metaURL(config, f, fileID: id) else {
+                do {
+                    info = try await DavHistory.fileInfo(dav, token: token)
+                } catch is DavHistory.NotInOpenCloud {
+                    // The server may keep the name in the other Unicode form than this Mac.
+                    guard let alt = Self.otherNormalization(rel), let u2 = SharesAPI.davURL(config, f, rel: alt) else { throw DavHistory.NotInOpenCloud() }
+                    info = try await DavHistory.fileInfo(u2, token: token)
+                    dav = u2
+                }
+                guard let m = DavHistory.metaURL(config, f, fileID: info.id) else {
                     throw AuthError.message("This server's WebDAV paths aren't the kind this version understands.")
                 }
-                let versions = try await DavHistory.listVersions(meta, token: token)
-                guard !versions.isEmpty else { alert("No earlier versions", "OpenCloud has no earlier versions of “\(name)”."); return }
-                guard let v = DavHistory.askVersion(name, versions) else { return }
-                // Keep this Mac's copy first; nothing is restored if that fails.
-                if FileManager.default.fileExists(atPath: local.path) {
-                    let dest = Conflicts.freeURL(Backups.localDir(config.stateURL, f.stateName, Backups.stamp()).appendingPathComponent(rel))
-                    do {
-                        try FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true,
-                                                                attributes: [.posixPermissions: 0o700])
-                        try FileManager.default.copyItem(at: local, to: dest)
-                    } catch {
-                        throw AuthError.message("Couldn't keep the current file in the backups, so nothing was restored: \(error.localizedDescription)")
-                    }
-                }
-                try await DavHistory.restoreVersion(meta, key: v.key, file: dav, token: token)
-                Log.line("restored an earlier version of \(f.displayName)/\(rel)")
-                syncNow(f)
+                meta = m
+                versions = try await DavHistory.listVersions(meta, token: token)
             } catch {
                 alert("Couldn't show the history of “\(name)”", error.localizedDescription)
+                return
+            }
+            guard !versions.isEmpty else { alert("No earlier versions", "OpenCloud has no earlier versions of “\(name)”."); return }
+            guard let v = DavHistory.askVersion(name, versions, paused: config.paused) else { return }
+            // Restore it.
+            do {
+                guard !folderBusy(f) else { throw AuthError.message("“\(f.displayName)” is syncing. Try again when it finishes.") }
+                guard DavHistory.localMatches(local, info) else { throw AuthError.message(DavHistory.unsyncedText) }
+                // Keep this Mac's copy first, off the main actor; nothing is restored if that fails.
+                let dir = Backups.localDir(config.stateURL, f.stateName, Backups.stamp())
+                do {
+                    try await Task.detached { try DavHistory.backup(local, to: dir, rel: rel) }.value
+                } catch {
+                    throw AuthError.message("Couldn't keep the current file in the backups, so nothing was restored: \(error.localizedDescription)")
+                }
+                guard !folderBusy(f) else { throw AuthError.message("“\(f.displayName)” started syncing. Try again when it finishes.") }
+                let token = try await Auth.accessToken(serverURL: server)   // again: the picker may have stayed open long
+                try await DavHistory.restoreVersion(meta, key: v.key, file: dav, token: token)
+                Log.line("restored an earlier version of \(f.displayName)/\(rel)")
+                let paused = config.paused
+                syncNow(f)
+                alert("Restored “\(name)”", paused ? "The version is the current file in OpenCloud. It comes to this computer when you resume syncing."
+                                                    : "The version is the current file in OpenCloud. The folder syncs now, which brings it to this Mac.")
+            } catch {
+                alert("Couldn't restore “\(name)”", error.localizedDescription)
             }
         }
     }
 
-    /// The trash of the personal space and the kept spaces, newest first; and the spaces
-    /// whose trash couldn't be read.
-    func listTrash() async throws -> ([DavHistory.TrashItem], [String]) {
+    /// Deleted items, newest first: without `all`, only those that were in a kept folder (then
+    /// capped at 2000, as in Go); the spaces whose trash couldn't be read; how many are hidden.
+    func listTrash(all: Bool) async throws -> (items: [DavHistory.TrashItem], problems: [String], hidden: Int) {
         guard config.isOIDC, !needsSignIn else { throw AuthError.message("Deleted files need the browser sign-in.") }
         let server = config.serverURL ?? ""
         let token = try await Auth.accessToken(serverURL: server)
         let origin = Config.origin(server)
-        var items: [DavHistory.TrashItem] = [], problems: [String] = []
-        for sp in try await DavHistory.spaces(config, token: token) {
-            do { items += try await DavHistory.listTrash(origin: origin, sp, token: token) }
-            catch { problems.append("\(sp.name): \(error.localizedDescription)") }
+        var items: [DavHistory.TrashItem] = [], hidden = 0
+        let (spaces, spaceProblems) = try await DavHistory.spaces(config, token: token)
+        var problems = spaceProblems
+        for sp in spaces {
+            do {
+                for it in try await DavHistory.listTrash(origin: origin, sp, token: token) {
+                    if !all && it.folderKey == nil { hidden += 1 } else { items.append(it) }
+                }
+            } catch { problems.append("\(sp.name): \(error.localizedDescription)") }
         }
         items.sort { ($0.deleted ?? .distantPast) > ($1.deleted ?? .distantPast) }
-        return (Array(items.prefix(2000)), problems)
+        return (Array(items.prefix(2000)), problems, hidden)
     }
 
     /// Restores one item (looked up on the server again) if it was in a kept folder and nothing
@@ -572,7 +658,7 @@ extension AppModel {
             let server = config.serverURL ?? ""
             let token = try await Auth.accessToken(serverURL: server)
             let origin = Config.origin(server)
-            guard let sp = try await DavHistory.spaces(config, token: token).first(where: { $0.id == item.spaceID }) else {
+            guard let sp = try await DavHistory.spaces(config, token: token).0.first(where: { $0.id == item.spaceID }) else {
                 throw AuthError.message("That space isn't one folders are kept from.")
             }
             guard let it = try await DavHistory.listTrash(origin: origin, sp, token: token).first(where: { $0.key == item.key }) else {
@@ -586,12 +672,16 @@ extension AppModel {
             if rel.split(separator: "/").contains(where: { String($0) == Backups.folderName }) {
                 throw AuthError.message("That item can't be restored from here.")
             }
-            if !rel.isEmpty, FileManager.default.fileExists(atPath: config.localURL(f).appendingPathComponent(rel).path) {
-                throw AuthError.message("Something is at “\(it.path)” on this Mac. Rename or move it first, then restore.")
+            // attributesOfItem doesn't follow symbolic links: a broken one counts as there (as Go's Lstat).
+            if !rel.isEmpty, (try? FileManager.default.attributesOfItem(atPath: config.localURL(f).appendingPathComponent(rel).path)) != nil {
+                throw AuthError.message("Something is at “\(it.path)” on this Mac. Wait for the folder to sync, then restore.")
             }
             try await DavHistory.restore(origin: origin, sp, it, token: token)
             Log.line("restored \(it.path) from the trash of \(sp.name)")
+            let paused = config.paused
             syncNow(f)
+            alert("Restored “\(it.name)”", paused ? "It's back in OpenCloud. It comes to this computer when you resume syncing."
+                                                 : "It's back in OpenCloud. The folder syncs now, which brings it to this Mac.")
         } catch {
             alert("Couldn't restore “\(item.name)”", error.localizedDescription)
         }

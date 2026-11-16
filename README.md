@@ -147,7 +147,8 @@ OpenCloud keeps earlier versions of a file each time it changes. You can see the
 
 - **Mac:** the menu's **File History…** (choose any file in your kept folders), or a kept folder's **File History…** in Settings ▸ Kept Folders. Choose the version (date and size) and **Restore**.
 - **Windows, Linux:** select the folder in the settings window, Folders, then **File History…**, choose the file, and **Restore** a version from the list (date and size).
-- Restoring makes that version the current file in OpenCloud; the file it replaces becomes one of OpenCloud's versions. Before that, the copy on this computer is copied to the local backups (`backups/<stateName>/<date and time>/` in the sync state folder, removed after 30 days). If that copy can't be made, nothing is restored. The folder then syncs, which brings the restored version here.
+- Restoring makes that version the current file in OpenCloud; the file it replaces becomes one of OpenCloud's versions. Before that, the copy on this computer is copied to the local backups (`backups/<stateName>/<date and time>/` in the sync state folder, removed after 30 days). If that copy can't be made, nothing is restored. The folder then syncs, which brings the restored version here; while syncing is paused, it comes to this computer when you resume syncing.
+- A restore is refused while that folder is syncing, and when the copy on this computer differs from the current file in OpenCloud (size, or modification time by more than 2 seconds), for example after an edit that hasn't synced yet: "This file has changes that haven't synced yet. Sync first, then restore."
 - Only files in kept folders that have synced, with the browser sign-in. The app asks the file's id with a `PROPFIND` (`oc:fileid`), lists `/dav/meta/<file id>/v` (`PROPFIND`, `Depth: 1`) and restores with `COPY` of the version, as OpenCloud's web interface does. The sign-in token is only sent to your server; redirects aren't followed.
 
 ## Deleted files
@@ -156,9 +157,10 @@ Files and folders deleted in OpenCloud (in the browser, on another computer, or 
 
 - **Mac:** Settings ▸ **Deleted Files** (also the menu's **Deleted Files…**). **Windows, Linux:** the settings window's **Deleted Files** section.
 - By default only items that were inside a kept folder are listed; **Show all** lists everything in those trashes. Items outside your kept folders can only be restored in OpenCloud's web interface.
-- **Restore** puts the item back where it was and then syncs that kept folder, so it comes back on this computer too. If something is at that place again, in OpenCloud or on this computer, nothing is restored or overwritten: rename or move that first. If the folder it was in is gone too, restore that folder first.
+- **Restore** puts the item back where it was and then syncs that kept folder, so it comes back on this computer too (while syncing is paused, when you resume syncing). If something is at that place again in OpenCloud, nothing is restored or overwritten: rename or move that first. If something is still at that place on this computer (the deletion hasn't synced here yet), wait for the folder to sync, then restore. If the folder it was in is gone too, restore that folder first.
 - The app never deletes anything from the trash for good; empty it in OpenCloud's web interface. OpenCloud may also clear old items from the trash on its own.
-- With the browser sign-in only. The app reads your spaces from `/graph/v1.0/me/drives`, lists each trash with a `PROPFIND` of `/dav/spaces/trash-bin/<space id>` and restores with a `MOVE` to the original place (`Overwrite: F`). The sign-in token is only sent to your server; redirects aren't followed.
+- If the server doesn't say where your personal space is, the page says so instead of showing an empty trash.
+- With the browser sign-in only. The app reads your spaces from `/graph/v1.0/me/drives` (for the personal space only the path of its WebDAV address is used, on your server), lists each trash with a `PROPFIND` of `/dav/spaces/trash-bin/<space id>` and restores with a `MOVE` to the original place (`Overwrite: F`). The sign-in token is only sent to your server; redirects aren't followed.
 
 ## Live sync
 

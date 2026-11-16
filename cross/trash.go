@@ -39,7 +39,7 @@ import (
 // original place again (checked first with a PROPFIND, and Overwrite: F as well), and it only
 // restores items that were inside a kept folder of that space. The space URLs are the ones
 // the server gave (/graph/v1.0/me/drives root.webDavUrl, like spaces.go); the bearer token
-// only goes to the server and no redirect is followed. The macOS app does the same (Trash.swift).
+// only goes to the server and no redirect is followed. The macOS app does the same (History.swift).
 
 // TrashItem is one item in a space's trash.
 type TrashItem struct {
@@ -251,23 +251,43 @@ func restoreTrashItem(ctx context.Context, origin string, sp trashSpace, it Tras
 	return fmt.Errorf("OpenCloud didn't restore it (it answered %d)", resp.StatusCode)
 }
 
-// trashSpaces: the personal space (from /me/drives) and the spaces folders are kept from.
-func trashSpaces(ctx context.Context, cfg Config, base, tok string) ([]trashSpace, error) {
+// personalSpacePath is the path of the personal space's root.webDavUrl, used against the
+// configured server's origin (its host is ignored). Same check as parseSpaces; "" if unusable.
+func personalSpacePath(webDavURL string) string {
+	u, err := url.Parse(webDavURL)
+	if err != nil {
+		return ""
+	}
+	p := strings.TrimSuffix(u.EscapedPath(), "/")
+	if !strings.HasPrefix(p, "/") || strings.ContainsAny(p, "' ") {
+		return ""
+	}
+	return p
+}
+
+const personalProblem = "Personal: the server didn't say where your personal space is"
+
+// trashSpaces: the personal space (from /me/drives) and the spaces folders are kept from,
+// and a problem line when the personal space can't be used.
+func trashSpaces(ctx context.Context, cfg Config, base, tok string) ([]trashSpace, []string, error) {
 	var d graphDrives
 	if err := ocGet(ctx, base, "/graph/v1.0/me/drives", nil, tok, &d); err != nil {
-		return nil, fmt.Errorf("couldn't list the spaces: %w", err)
+		return nil, nil, fmt.Errorf("couldn't list the spaces: %w", err)
 	}
-	bu, _ := url.Parse(base)
 	var out []trashSpace
+	var problems []string
+	found := false
 	for _, v := range d.Value {
 		if v.DriveType != "personal" {
 			continue
 		}
-		u, err := url.Parse(v.Root.WebDavURL)
-		if err != nil || v.ID == "" || u.Path == "" || (u.Host != "" && bu != nil && !strings.EqualFold(u.Host, bu.Host)) {
-			continue
+		found = true
+		p := personalSpacePath(v.Root.WebDavURL)
+		if v.ID == "" || p == "" {
+			problems = append(problems, personalProblem)
+			break
 		}
-		sp := trashSpace{ID: v.ID, Name: "Personal", DavPath: strings.TrimSuffix(u.EscapedPath(), "/")}
+		sp := trashSpace{ID: v.ID, Name: "Personal", DavPath: p}
 		for _, f := range cfg.Kept {
 			if f.Space == nil {
 				sp.kept = append(sp.kept, f)
@@ -275,6 +295,9 @@ func trashSpaces(ctx context.Context, cfg Config, base, tok string) ([]trashSpac
 		}
 		out = append(out, sp)
 		break
+	}
+	if !found {
+		problems = append(problems, personalProblem)
 	}
 	byID := map[string]int{}
 	for _, f := range cfg.Kept {
@@ -288,7 +311,7 @@ func trashSpaces(ctx context.Context, cfg Config, base, tok string) ([]trashSpac
 		byID[f.Space.ID] = len(out)
 		out = append(out, trashSpace{ID: f.Space.ID, Name: f.Space.Name, DavPath: strings.TrimSuffix(f.Space.DavPath, "/"), kept: []KeptFolder{f}})
 	}
-	return out, nil
+	return out, problems, nil
 }
 
 // TrashList is what the Deleted Files page shows.
@@ -318,11 +341,11 @@ func (e *Engine) ListTrash(all bool) (TrashList, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	spaces, err := trashSpaces(ctx, cfg, base, tok)
+	spaces, problems, err := trashSpaces(ctx, cfg, base, tok)
 	if err != nil {
 		return TrashList{}, err
 	}
-	res := TrashList{Items: []TrashItem{}, Problems: []string{}}
+	res := TrashList{Items: []TrashItem{}, Problems: append([]string{}, problems...)}
 	for _, sp := range spaces {
 		items, err := listTrash(ctx, urlOrigin(base), sp, tok)
 		if err != nil {
@@ -362,7 +385,7 @@ func (e *Engine) RestoreTrash(spaceID, key string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	spaces, err := trashSpaces(ctx, cfg, base, tok)
+	spaces, _, err := trashSpaces(ctx, cfg, base, tok)
 	if err != nil {
 		return err
 	}
@@ -417,7 +440,7 @@ func (e *Engine) restoreTrashChecked(ctx context.Context, cfg Config, origin str
 	// Something here that isn't in OpenCloud (not synced yet) would meet the restored item in
 	// the next sync; leave that to the user. The kept folder itself is allowed: the sync merges.
 	if _, err := os.Lstat(local); err == nil && rel != "" {
-		return fmt.Errorf("something is at “%s” on this computer; rename or move it first, then restore", loc)
+		return fmt.Errorf("something is at “%s” on this computer. Wait for the folder to sync, then restore", loc)
 	}
 	if err := restoreTrashItem(ctx, origin, sp, it, tok); err != nil {
 		if errors.Is(err, errRestoreExists) {

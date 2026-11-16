@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -235,7 +236,8 @@ func cleanItemRel(rel string) (string, error) {
 		return "", errors.New("choose a file in the folder")
 	}
 	for _, p := range strings.Split(rel, "/") {
-		if p == "" || p == "." || p == ".." || hasControl(p) || strings.Contains(p, ":") || isBackupFolder(p) {
+		// ":" only on Windows, where it means a drive or a stream.
+		if p == "" || p == "." || p == ".." || hasControl(p) || (runtime.GOOS == "windows" && strings.Contains(p, ":")) || isBackupFolder(p) {
 			return "", errors.New("not a path in the folder")
 		}
 	}
@@ -243,6 +245,94 @@ func cleanItemRel(rel string) (string, error) {
 		return "", errors.New("that file has no history here")
 	}
 	return rel, nil
+}
+
+// davFile is what a PROPFIND (depth 0) says about the current file in OpenCloud.
+type davFile struct {
+	ID       string
+	Size     int64     // -1: not said
+	Modified time.Time // zero: not said
+}
+
+// davFileInfo reads a file's oc:fileid, size and modification time in one PROPFIND.
+func davFileInfo(ctx context.Context, davURL, tok string) (davFile, error) {
+	body := `<?xml version="1.0"?><d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:prop><oc:fileid/><d:getcontentlength/><d:getlastmodified/></d:prop></d:propfind>`
+	resp, err := davDo(ctx, "PROPFIND", davURL, tok, map[string]string{"Depth": "0"}, body)
+	if err != nil {
+		return davFile{}, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case 207:
+	case 404:
+		return davFile{}, errors.New("it isn't in OpenCloud yet; wait for the folder to sync, then try again")
+	default:
+		return davFile{}, fmt.Errorf("the server answered %d", resp.StatusCode)
+	}
+	var ms struct {
+		Responses []struct {
+			Props []struct {
+				Status   string `xml:"status"`
+				FileID   string `xml:"prop>fileid"`
+				Length   string `xml:"prop>getcontentlength"`
+				Modified string `xml:"prop>getlastmodified"`
+			} `xml:"propstat"`
+		} `xml:"response"`
+	}
+	if err := xml.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&ms); err != nil {
+		return davFile{}, errors.New("the server's answer wasn't what was expected")
+	}
+	out := davFile{Size: -1}
+	for _, r := range ms.Responses {
+		for _, p := range r.Props {
+			if p.Status != "" && !strings.Contains(p.Status, " 200") {
+				continue
+			}
+			if id := strings.TrimSpace(p.FileID); id != "" && out.ID == "" {
+				out.ID = id
+			}
+			if n, err := strconv.ParseInt(strings.TrimSpace(p.Length), 10, 64); err == nil {
+				out.Size = n
+			}
+			if t := parseHTTPTime(p.Modified); !t.IsZero() {
+				out.Modified = t
+			}
+		}
+		break // depth 0: the file itself
+	}
+	if out.ID == "" {
+		return davFile{}, errors.New("the server didn't say which file that is")
+	}
+	return out, nil
+}
+
+const unsyncedText = "This file has changes that haven't synced yet. Sync first, then restore."
+
+// localMatches: the local copy is the server's current file as far as size and (when the
+// server says) modification time go, within 2 seconds (WebDAV dates are whole seconds). A
+// missing local copy doesn't match: a deletion here hasn't synced yet.
+func localMatches(local string, srv davFile) bool {
+	st, err := os.Stat(local)
+	if err != nil || !st.Mode().IsRegular() {
+		return false
+	}
+	if srv.Size >= 0 && st.Size() != srv.Size {
+		return false
+	}
+	if !srv.Modified.IsZero() {
+		d := st.ModTime().Sub(srv.Modified)
+		if d < -2*time.Second || d > 2*time.Second {
+			return false
+		}
+	}
+	return true
+}
+
+// folderSyncing: that folder's sync runs (or is starting), or an exclusive action does.
+func (e *Engine) folderSyncing(key string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.active[key] != nil || e.startingKeys[key] > 0 || e.exclOn
 }
 
 // historyTarget resolves a file in a kept folder for the history: the folder, the file's path,
@@ -254,6 +344,7 @@ type historyTarget struct {
 	local   string
 	davURL  string
 	metaURL string
+	server  davFile
 	tok     string
 }
 
@@ -290,15 +381,15 @@ func (e *Engine) historyFor(ctx context.Context, key, rel string) (historyTarget
 	if err != nil {
 		return t, fmt.Errorf("signed out: %w", err)
 	}
-	id, err := davFileID(ctx, davURL, tok)
+	info, err := davFileInfo(ctx, davURL, tok)
 	if err != nil {
 		return t, err
 	}
-	metaURL, err := metaVersionsURL(cfg, f, id)
+	metaURL, err := metaVersionsURL(cfg, f, info.ID)
 	if err != nil {
 		return t, err
 	}
-	return historyTarget{cfg: cfg, f: f, rel: rel, local: local, davURL: davURL, metaURL: metaURL, tok: tok}, nil
+	return historyTarget{cfg: cfg, f: f, rel: rel, local: local, davURL: davURL, metaURL: metaURL, tok: tok, server: info}, nil
 }
 
 // FileVersions lists the earlier versions of rel in kept folder key, newest first.
@@ -312,17 +403,24 @@ func (e *Engine) FileVersions(key, rel string) ([]FileVersion, error) {
 	return listVersions(ctx, t.metaURL, t.tok)
 }
 
-// RestoreVersion makes version vkey of rel the current file in OpenCloud. The local copy is
+// RestoreVersion makes version vkey of rel the current file in OpenCloud. Refused while that
+// folder syncs, and when the local copy differs from the server's current file (changes not
+// synced yet would otherwise be overwritten, or would undo the restore). The local copy is
 // copied to the local backups first (<stateDir>/backups/<stateName>/<stamp>/<rel>); then the
 // folder syncs, which brings the restored version here.
 func (e *Engine) RestoreVersion(key, rel, vkey string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
+	f, ok := e.find(key)
+	if ok && e.folderSyncing(f.Key()) {
+		return fmt.Errorf("“%s” is syncing; try again when it finishes", f.DisplayName())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t, err := e.historyFor(ctx, key, rel)
 	if err != nil {
+		cancel()
 		return err
 	}
 	vs, err := listVersions(ctx, t.metaURL, t.tok)
+	cancel()
 	if err != nil {
 		return err
 	}
@@ -333,9 +431,18 @@ func (e *Engine) RestoreVersion(key, rel, vkey string) error {
 	if !found {
 		return errors.New("that version isn't there any more; reload the list")
 	}
+	if !localMatches(t.local, t.server) {
+		return errors.New(unsyncedText)
+	}
 	if _, err := backupLocalCopy(t.local, t.cfg.StateDir, t.f.StateName, t.rel, time.Now()); err != nil {
 		return fmt.Errorf("couldn't keep the current file in the backups, so nothing was restored: %w", err)
 	}
+	// Checked again: a sync may have started while the backup was made.
+	if e.folderSyncing(t.f.Key()) {
+		return fmt.Errorf("“%s” started syncing; try again when it finishes", t.f.DisplayName())
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), 60*time.Second) // after the backup
+	defer cancel()
 	if err := restoreVersion(ctx, t.metaURL, vkey, t.davURL, t.tok); err != nil {
 		return err
 	}
