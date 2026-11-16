@@ -18,7 +18,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-// Live sync (preview, setting liveSync, off by default): kept folders' local copies are
+// Live sync (setting liveSync, on by default since 2.0): kept folders' local copies are
 // watched (fsnotify: inotify on Linux, ReadDirectoryChangesW on Windows), and a change syncs
 // that folder soon instead of at the next interval.
 //
