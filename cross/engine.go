@@ -99,9 +99,9 @@ type Engine struct {
 	remountPending bool
 	remountRetryAt time.Time
 
-	currentSync *exec.Cmd
-	nextSyncAt  time.Time
-	changed     chan struct{} // pinged whenever status changes (for the tray)
+	cmds       map[*exec.Cmd]bool // running bisyncs (Shutdown interrupts them)
+	nextSyncAt time.Time
+	changed    chan struct{} // pinged whenever status changes (for the tray)
 
 	// The drive's remote-control port only answers with these (random each start).
 	rcUser, rcPass string
@@ -113,10 +113,21 @@ type Engine struct {
 	// conflict copies found since the last notification check
 	newConflicts []conflictBatch
 
-	// What the running sync is doing, for "Syncing “X” (2 of 3) · 12 files…".
-	activeName           string
-	activeIndex, activeN int
-	activeFiles          int
+	// Parallel sync (sched.go).
+	lanes         int
+	running       map[string]workItem
+	work          []workItem
+	starting      int // batches waiting on the server memory check
+	timerOn       bool
+	timerStarting bool
+	exclQ         []func()
+	exclOn        bool
+	holdRuns      bool           // tests: queued folders wait
+	startingKeys  map[string]int // folders of batches waiting on the memory check
+	runTimes      map[string]runTimes
+	// What the running syncs are doing, for "Syncing “X” (2 of 3) · 12 files…".
+	active            map[string]*activeRun
+	batchN, batchDone int
 }
 
 const syncTimeout = 3 * time.Hour
@@ -125,7 +136,8 @@ func NewEngine() *Engine {
 	cfg, err := loadConfig()
 	e := &Engine{cfg: cfg, cfgErr: err, status: map[string]*FolderStatus{},
 		mountWanted: cfg.Mounting(), mountBackoff: 5 * time.Second, changed: make(chan struct{}, 1),
-		rcUser: "ocb-" + randomToken()[:12], rcPass: randomToken(), updates: newUpdater()}
+		rcUser: "ocb-" + randomToken()[:12], rcPass: randomToken(), updates: newUpdater(),
+		cmds: map[*exec.Cmd]bool{}, running: map[string]workItem{}, runTimes: map[string]runTimes{}, active: map[string]*activeRun{}}
 	e.signedOut = cfg.OIDC() && cfg.Configured() && !haveCredentials(cfg)
 	e.refreshStatusLocked()
 	return e
@@ -318,7 +330,7 @@ func (e *Engine) tick() {
 	if e.cfg.Mounting() && e.mountWanted && up && e.mount == nil && time.Now().After(e.mountRetryAt) {
 		e.startMountLocked()
 	}
-	if !e.syncing && !e.cfg.Paused && up && len(e.cfg.Kept) > 0 && time.Now().After(e.nextSyncAt) {
+	if !e.timerOn && !e.exclOn && len(e.exclQ) == 0 && !e.cfg.Paused && up && len(e.cfg.Kept) > 0 && time.Now().After(e.nextSyncAt) {
 		e.startSyncAllLocked(false)
 	}
 }
@@ -791,68 +803,12 @@ func (e *Engine) parkDrift(f KeptFolder, reason string) {
 func (e *Engine) SyncNow() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if !e.syncing && e.cfgErr == nil && e.cfg.Configured() && !e.signedOut && !e.cfg.Paused {
+	if !e.timerOn && !e.exclOn && len(e.exclQ) == 0 && e.cfgErr == nil && e.cfg.Configured() && !e.signedOut && !e.cfg.Paused {
 		e.startSyncAllLocked(true)
 	}
 }
 
 func (e *Engine) startSyncAllLocked(manual bool) { e.startRunLocked(manual, nil) }
-
-// startRunLocked syncs every kept folder, or only those in only (folders kept while the last
-// sync ran). A full run covers the queued folders too.
-func (e *Engine) startRunLocked(manual bool, only map[string]bool) {
-	var folders []KeptFolder
-	for _, f := range e.cfg.Kept {
-		if only == nil || only[f.Key()] {
-			folders = append(folders, f)
-		}
-	}
-	if only == nil {
-		iv := time.Duration(max(60, e.cfg.SyncIntervalSeconds)) * time.Second
-		e.nextSyncAt = time.Now().Add(iv)
-		e.queued = nil
-	}
-	if len(folders) == 0 {
-		return
-	}
-	e.syncing = true
-	go func() {
-		defer e.syncFinished()
-		if reason := e.serverTooBusy(); reason != "" {
-			for _, f := range folders {
-				e.setState(f, StSkipped, reason)
-			}
-			return
-		}
-		defer func() { e.mu.Lock(); e.activeName, e.activeIndex, e.activeN = "", 0, 0; e.mu.Unlock() }()
-		for i, f := range folders {
-			e.mu.Lock()
-			e.activeIndex, e.activeN = i+1, len(folders)
-			q := e.quitting
-			s := e.status[f.Key()]
-			state := ""
-			if s != nil {
-				state = s.State
-			}
-			e.mu.Unlock()
-			if q || s == nil {
-				continue
-			}
-			if r := e.needsRepairReason(f); r != "" {
-				if exists(e.stateFile(f, ".drift-parked")) {
-					e.syncFolder(f, modeDriftRetry)
-				} else {
-					e.setState(f, StNeedsRepair, r)
-				}
-				continue
-			}
-			if state == StBigDeletion && !manual {
-				continue
-			}
-			e.syncFolder(f, modeNormal)
-		}
-	}()
-}
 
 func (e *Engine) serverTooBusy() string {
 	cfg := e.config()
@@ -926,27 +882,28 @@ func (e *Engine) syncFolder(f KeptFolder, mode syncMode) (ok bool) {
 	began := e.live().now()
 	trigger := e.ownSyncLocked(f.Key(), true, began)
 	e.remoteSyncStartedLocked(f.Key())
+	runStart := time.Now()
 	defer func() {
 		e.mu.Lock()
 		e.ownSyncLocked(f.Key(), false, began)
+		if e.runTimes == nil {
+			e.runTimes = map[string]runTimes{}
+		}
+		e.noteRunLocked(f, runStart, ok)
 		job := e.remoteSyncEndedLocked(f, ok)
 		e.mu.Unlock()
 		if job != nil {
 			go e.remoteBaseline(*job) // the app's own changes are the new baseline
 		}
 	}()
-	e.activeName, e.activeFiles = f.DisplayName(), 0
-	single := e.activeN == 0 // Repair, Stop Keeping…: one folder on its own
-	if single {
-		e.activeIndex, e.activeN = 1, 1
+	if e.active == nil {
+		e.active = map[string]*activeRun{}
 	}
+	e.active[f.Key()] = &activeRun{name: f.DisplayName()}
 	e.mu.Unlock()
 	defer func() {
 		e.mu.Lock()
-		e.activeName, e.activeFiles = "", 0
-		if single {
-			e.activeIndex, e.activeN = 0, 0
-		}
+		delete(e.active, f.Key())
 		e.mu.Unlock()
 	}()
 	parkedReason := ""
@@ -1197,10 +1154,13 @@ func (e *Engine) bisync(r folderRun, kind string, extra ...string) (string, erro
 	args = append(args, bwLimitArgs(r.cfg.BwLimitUp, r.cfg.BwLimitDown)...)
 	args = append(args, extra...)
 	changes := newChangeCollector()
+	key := r.f.Key()
 	sf := &statsFilter{onLine: changes.line, onFiles: func(n int) {
 		e.mu.Lock()
-		changed := e.activeFiles != n
-		e.activeFiles = n
+		changed := false
+		if a := e.active[key]; a != nil && a.files != n {
+			a.files, changed = n, true
+		}
 		e.mu.Unlock()
 		if changed {
 			e.notify()
@@ -1213,7 +1173,9 @@ func (e *Engine) bisync(r folderRun, kind string, extra ...string) (string, erro
 	}
 	defer sf.Flush()
 	e.mu.Lock()
-	e.activeFiles = 0
+	if a := e.active[key]; a != nil {
+		a.files = 0
+	}
 	e.mu.Unlock()
 	out, err := e.run(syncTimeout, sf, r.cfg.Rclone(), args...)
 	sf.Flush()
@@ -1364,9 +1326,12 @@ func (e *Engine) run(timeout time.Duration, logTo io.Writer, name string, args .
 	}
 	if tracked {
 		e.mu.Lock()
-		e.currentSync = cmd
+		if e.cmds == nil {
+			e.cmds = map[*exec.Cmd]bool{}
+		}
+		e.cmds[cmd] = true
 		e.mu.Unlock()
-		defer func() { e.mu.Lock(); e.currentSync = nil; e.mu.Unlock() }()
+		defer func() { e.mu.Lock(); delete(e.cmds, cmd); e.mu.Unlock() }()
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -1382,58 +1347,6 @@ func (e *Engine) run(timeout time.Duration, logTo io.Writer, name string, args .
 			<-done
 		}
 		return buf.String(), context.DeadlineExceeded
-	}
-}
-
-// exclusive runs body as the only sync activity.
-func (e *Engine) exclusive(body func()) error {
-	e.mu.Lock()
-	if e.syncing {
-		e.mu.Unlock()
-		return fmt.Errorf("a sync is running; try again when it finishes")
-	}
-	e.syncing = true
-	e.mu.Unlock()
-	go func() {
-		defer e.syncFinished()
-		body()
-	}()
-	return nil
-}
-
-// syncFinished ends a sync activity. Settings saved while it ran are applied first, so the
-// next run uses them; then the folders kept (or whose excludes changed) meanwhile sync.
-func (e *Engine) syncFinished() {
-	e.mu.Lock()
-	e.syncing = false
-	e.mu.Unlock()
-	if reloadRetrying.Load() {
-		if err := e.Reload(); err == nil {
-			e.logLine("settings applied after the sync finished")
-		}
-	}
-	e.mu.Lock()
-	e.startQueuedLocked()
-	e.mu.Unlock()
-	e.notify()
-}
-
-// startQueuedLocked syncs the queued folders now, unless something else runs or syncing is off.
-func (e *Engine) startQueuedLocked() {
-	if len(e.queued) > 0 && !e.syncing && !e.quitting && e.cfgErr == nil && e.cfg.Configured() && !e.signedOut && !e.cfg.Paused {
-		only := e.queued
-		e.queued = nil
-		e.startRunLocked(false, only)
-	}
-}
-
-// queueLocked adds folders to the next queued run.
-func (e *Engine) queueLocked(keys ...string) {
-	if e.queued == nil {
-		e.queued = map[string]bool{}
-	}
-	for _, k := range keys {
-		e.queued[k] = true
 	}
 }
 
@@ -1575,11 +1488,15 @@ func (e *Engine) keepIn(space *SpaceRef, path, localPath string) error {
 	e.cfg = cfg
 	e.refreshStatusLocked()
 	if e.syncing {
-		// Keeping doesn't wait for a running sync: the new folder syncs right after it.
+		// Keeping doesn't wait for a running sync: the new folder starts in a free lane, or
+		// right after a running sync.
 		e.queueLocked(f.Key())
-		if s := e.status[f.Key()]; s != nil {
-			s.Detail = "starts when the running sync finishes"
+		if e.lanes >= e.cfg.Parallel() || e.exclOn || len(e.exclQ) > 0 {
+			if s := e.status[f.Key()]; s != nil {
+				s.Detail = "starts when the running sync finishes"
+			}
 		}
+		e.startQueuedLocked()
 	} else {
 		e.nextSyncAt = time.Time{}
 	}
@@ -1742,14 +1659,20 @@ func (e *Engine) Shutdown() {
 	}
 	e.quitting = true
 	e.stopWatchesLocked()
-	cs := e.currentSync
+	var cs []*exec.Cmd
+	for c := range e.cmds {
+		cs = append(cs, c)
+	}
+	e.work, e.queued, e.exclQ = nil, nil, nil
 	m, t, td := e.mount, e.tunnel, e.tunnelDone
 	e.mu.Unlock()
-	if cs != nil {
-		interrupt(cs)
+	if len(cs) > 0 {
+		for _, c := range cs {
+			interrupt(c)
+		}
 		for i := 0; i < 1200; i++ { // up to 2 minutes
 			e.mu.Lock()
-			running := e.currentSync != nil
+			running := len(e.cmds) > 0
 			e.mu.Unlock()
 			if !running {
 				break
@@ -1808,7 +1731,7 @@ func (e *Engine) Status() Status {
 	case st.SignedOut:
 		st.Summary = signedOutMessage
 	case e.syncing:
-		st.Summary = activityText(e.activeName, e.activeIndex, e.activeN, e.activeFiles)
+		st.Summary = e.activitySummaryLocked()
 	case len(problems) > 0:
 		st.Summary = attentionSummary(problems)
 	case st.Paused && !oldest.IsZero():

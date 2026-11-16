@@ -150,6 +150,8 @@ type Config struct {
 	Notifications *bool `json:"notifications,omitempty"`
 	// LiveSync (preview): watch kept folders and sync a folder soon after a change here or in OpenCloud.
 	LiveSync bool `json:"liveSync,omitempty"`
+	// SyncParallel: folders synced at once, 1–4 (0: the default, 2).
+	SyncParallel int `json:"syncParallel,omitempty"`
 	// BwLimitUp / BwLimitDown: upload / download limits for syncs and the drive, in rclone's
 	// units ("512K" = 512 KiB/s, "2M" = 2 MiB/s, a bare number is KiB/s). Empty: no limit.
 	BwLimitUp   string `json:"bwLimitUp,omitempty"`

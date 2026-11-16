@@ -106,6 +106,7 @@ struct ChooseSubfoldersSheet: View {
 
     private func toggle(_ rel: String, on: Bool, enabled: Bool, name: String) -> some View {
         Toggle(isOn: Binding(get: { on }, set: { changes[rel] = $0 })) { Text(name + "/") }
+            .accessibilityLabel(name + "/")
             .toggleStyle(.checkbox)
             .disabled(!enabled)
             .accessibilityLabel(rel.replacingOccurrences(of: "/", with: " ▸ "))

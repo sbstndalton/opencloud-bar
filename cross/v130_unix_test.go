@@ -10,10 +10,12 @@ import (
 )
 
 // A folder kept while a sync runs is saved at once and syncs right after that run, once, on
-// its own (the folders already synced aren't synced again).
+// its own (the folders already synced aren't synced again). One folder at a time here; with
+// a free lane it starts at once (TestParallelKeepStartsInFreeLane).
 func TestKeepWhileSyncingQueues(t *testing.T) {
 	e, fr, _ := syncRig(t, false)
 	e.cfg.Paused = false
+	e.cfg.SyncParallel = 1
 	hold := filepath.Join(fr.dir, "hold")
 	_ = os.WriteFile(hold, nil, 0o600)
 	e.mu.Lock()
@@ -27,7 +29,7 @@ func TestKeepWhileSyncingQueues(t *testing.T) {
 		t.Fatalf("not saved: %+v", c.Kept)
 	}
 	e.mu.Lock()
-	queued, detail := e.queued["New"], e.status["New"].Detail
+	queued, detail := e.waitingLocked("New"), e.status["New"].Detail
 	e.mu.Unlock()
 	if !queued || detail == "" {
 		t.Errorf("not queued: %v %q", queued, detail)
@@ -36,7 +38,7 @@ func TestKeepWhileSyncingQueues(t *testing.T) {
 	waitFor(t, func() bool {
 		e.mu.Lock()
 		defer e.mu.Unlock()
-		return !e.syncing && len(e.queued) == 0 && strings.Contains(fr.calls(), "New")
+		return !e.syncing && !e.waitingLocked("New") && strings.Contains(fr.calls(), "New")
 	})
 	var docs, runsNew int
 	for _, l := range strings.Split(fr.calls(), "\n") {
@@ -101,6 +103,7 @@ func TestExcludesChangeMergesAutomatically(t *testing.T) {
 func TestQueuedRunUsesSettingsSavedDuringSync(t *testing.T) {
 	e, fr, _ := syncRig(t, false)
 	e.cfg.Paused = false
+	e.cfg.SyncParallel = 1
 	hold := filepath.Join(fr.dir, "hold")
 	_ = os.WriteFile(hold, nil, 0o600)
 	e.mu.Lock()
@@ -121,7 +124,7 @@ func TestQueuedRunUsesSettingsSavedDuringSync(t *testing.T) {
 	waitFor(t, func() bool {
 		e.mu.Lock()
 		defer e.mu.Unlock()
-		return !e.syncing && len(e.queued) == 0 && strings.Contains(fr.calls(), "/New")
+		return !e.syncing && !e.waitingLocked("New") && strings.Contains(fr.calls(), "/New")
 	})
 	var nf KeptFolder
 	for _, k := range e.config().Kept {

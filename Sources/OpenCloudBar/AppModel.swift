@@ -62,10 +62,10 @@ final class AppModel: ObservableObject {
     /// A failed update check is retried after a growing wait (it isn't the daily check).
     private var updateRetryAt = Date.distantPast
     private var updateFailures = 0
-    /// What the running sync is doing, for the menu's first line.
-    @Published private(set) var activeFolder: String?
-    /// The key of the folder being synced right now.
-    @Published private(set) var activeKey: String?
+    /// The folders syncing right now (key → display name), for the menu's first line.
+    @Published private(set) var activeNames: [String: String] = [:]
+    /// Files the running sync of each folder has transferred so far (key → count).
+    @Published private(set) var activeFiles: [String: Int] = [:]
     /// Live sync (preview): watches the kept folders (LiveSync.swift).
     private(set) lazy var live = LiveSync(model: self)
     /// What started each folder's running sync ("timer", "local change", "server change"), for Recent Changes.
@@ -75,16 +75,31 @@ final class AppModel: ObservableObject {
     /// Recent Changes (oldest first), from activity.json in the sync state folder.
     @Published private(set) var recentChanges: [Change] = []
     private var changesURL: URL { config.stateURL.appendingPathComponent("activity.json") }
-    /// Folders kept while a sync ran: their first sync runs right after it (keys).
+    /// Folders kept while a sync ran, and live sync's: they start as soon as a lane is free (keys).
     private var queuedKeys = Set<String>()
-    /// The folders the running sync still has to do (from its start, server check included).
-    @Published private(set) var runRemaining = Set<String>()
 
-    /// Whether a folder's excludes must wait: it is being synced, or the running sync has yet
-    /// to do it.
-    func folderBusy(_ f: KeptFolder) -> Bool { activeKey == f.key || runRemaining.contains(f.key) }
-    @Published private(set) var activeFiles = 0
-    private var activeIndex = 0, activeCount = 0
+    // Parallel sync (v1.7; same as cross/sched.go, which has the tests): up to
+    // config.parallel folders at once, never the same folder twice; live/new folders first;
+    // exclusive actions wait for every run and hold new starts meanwhile.
+    private struct WorkItem { let key: String; var manual: Bool; var prio: Bool; var timer: Bool }
+    private var work: [WorkItem] = []
+    private var running: [String: WorkItem] = [:]
+    private var lanes = 0
+    private var starting = 0
+    private var startingKeys: [String: Int] = [:]
+    private var timerOn = false, timerStarting = false
+    private var exclQ: [@MainActor () async -> Void] = []
+    private var exclOn = false
+    private var batchN = 0, batchDone = 0
+    /// Each folder's last run (pacing: a large folder syncs less often on the timer).
+    private var runTimes: [String: (start: Date, dur: TimeInterval)] = [:]
+    /// Running bisyncs (Quit interrupts them).
+    private var procs: [ObjectIdentifier: Process] = [:]
+
+    /// Whether a folder's excludes must wait: it syncs now, or waits to.
+    func folderBusy(_ f: KeptFolder) -> Bool {
+        running[f.key] != nil || work.contains { $0.key == f.key } || startingKeys[f.key] != nil
+    }
     private var settingsWindow: SettingsWindowController?
     private var tunnelRestartAt = Date.distantPast
     private var mount: Process?
@@ -92,8 +107,6 @@ final class AppModel: ObservableObject {
     private var mountRestartAt = Date.distantPast
     private var mountBackoff: TimeInterval = 5
     private var unmountRequested = false
-    private var syncTask: Task<Void, Never>?
-    private var currentSync: Process?
     private var nextSyncAt = Date()
     private var ticker: Timer?
     private(set) var quitting = false
@@ -233,15 +246,17 @@ final class AppModel: ObservableObject {
     }
 
     /// Live sync: a sync of this folder starts, so a queued one for it is done by it.
-    func dequeue(_ key: String) { queuedKeys.remove(key) }
+    func dequeue(_ key: String) {
+        queuedKeys.remove(key)
+        let before = work.count
+        work.removeAll { $0.key == key }
+        batchDone += before - work.count
+    }
 
-    /// Live sync: these folders changed and settled; sync them (after the running sync, if any).
+    /// Live sync: these folders changed and settled; sync them, ahead of the timer's folders.
     func queueLiveSync(_ keys: [String]) {
         queuedKeys.formUnion(keys)
-        guard !syncing, !config.paused else { return }
-        let q = queuedKeys
-        queuedKeys = []
-        startSyncAll(manual: false, only: q)
+        startQueued()
     }
 
     // MARK: - Supervisor
@@ -274,7 +289,7 @@ final class AppModel: ObservableObject {
             tunnelUp = true   // no tunnel: the server is reached directly
         }
         if driveWanted, tunnelUp, mount == nil, Date() >= mountRestartAt { startMount() }
-        if !syncing, !config.paused, tunnelUp, Date() >= nextSyncAt, !config.kept.isEmpty { startSyncAll(manual: false) }
+        if !timerOn, !exclOn, exclQ.isEmpty, !config.paused, tunnelUp, Date() >= nextSyncAt, !config.kept.isEmpty { startSyncAll(manual: false) }
     }
 
     // The tunnel runs as a launchd agent rather than a child of this app: macOS Local Network
@@ -495,54 +510,166 @@ final class AppModel: ObservableObject {
         startSyncAll(manual: true)
     }
 
-    /// Syncs all kept folders. Each folder's repair state is read from disk, so a folder that
-    /// was repaired isn't skipped because of what the app remembered. A manual sync also tries
-    /// a blocked large deletion again (it is blocked again if nothing changed).
-    /// `only`: just these folders (kept while the last sync ran); a full run covers them too.
+    /// Syncs all kept folders (only nil: the timer, Sync Now), or the folders in `only` first
+    /// (kept meanwhile, live sync). Each folder's repair state is read from disk, so a folder
+    /// that was repaired isn't skipped because of what the app remembered. A manual sync also
+    /// tries a blocked large deletion again (it is blocked again if nothing changed). The
+    /// server memory check gates each batch.
     private func startSyncAll(manual: Bool, only: Set<String>? = nil) {
-        guard !syncing, config.isConfigured, configError == nil, !signedOut else { return }
-        let folders = config.kept.filter { only?.contains($0.key) ?? true }
-        if only == nil {
-            nextSyncAt = Date().addingTimeInterval(TimeInterval(max(60, config.syncIntervalSeconds)))
-            queuedKeys = []
+        guard config.isConfigured, configError == nil, !signedOut else { return }
+        let now = Date()
+        let timer = only == nil
+        let iv = TimeInterval(max(60, config.syncIntervalSeconds))
+        let folders = config.kept.filter { f in
+            if let only { return only.contains(f.key) }
+            return manual || !pacedOut(f, now: now, interval: iv)
         }
+        if timer { nextSyncAt = now.addingTimeInterval(iv) }
         guard !folders.isEmpty else { return }
-        syncing = true
-        runRemaining = Set(folders.map(\.key))
-        syncTask = Task { [weak self] in
+        if timer { timerOn = true; timerStarting = true }
+        starting += 1
+        for f in folders { startingKeys[f.key, default: 0] += 1 }
+        updateBusy()
+        Task { [weak self] in
             guard let self else { return }
-            if await self.serverTooBusy() {
-                for f in folders { self.status[f.key]?.state = .skipped("server busy") }
-            } else {
-                for (i, f) in folders.enumerated() where !Task.isCancelled && !self.quitting {
-                    defer { self.runRemaining.remove(f.key) }
-                    self.activeIndex = i + 1
-                    self.activeCount = folders.count
-                    // skip folders removed while this run was waiting
-                    guard self.config.kept.contains(where: { $0.key == f.key }) else { continue }
-                    if let reason = self.needsRepairReason(f) {
-                        if FileManager.default.fileExists(atPath: self.stateFile(f, ".drift-parked").path) {
-                            _ = await self.syncFolder(f, mode: .driftRetry)
-                        } else {
-                            self.status[f.key]?.state = .needsRepair(reason)
-                        }
-                        continue
-                    }
-                    if case .bigDeletion = self.status[f.key]?.state, !manual { continue }
-                    _ = await self.syncFolder(f, mode: .normal)
-                }
+            let busy = await self.serverTooBusy()
+            self.starting -= 1
+            for f in folders {
+                self.startingKeys[f.key, default: 1] -= 1
+                if self.startingKeys[f.key] ?? 0 <= 0 { self.startingKeys[f.key] = nil }
             }
-            self.activeIndex = 0
-            self.activeCount = 0
-            self.syncEnded()
+            if timer { self.timerStarting = false }
+            if busy {
+                for f in folders { self.status[f.key]?.state = .skipped("server busy") }
+            } else if !self.quitting {
+                for f in folders { self.enqueue(WorkItem(key: f.key, manual: manual, prio: !timer, timer: timer)) }
+            }
+            self.timerCheck()
+            self.dispatch()
+            self.updateBusy()
+            if self.isIdle { self.runsIdle() }
         }
     }
 
-    /// Ends a sync activity, then starts the first sync of folders kept meanwhile.
-    private func syncEnded() {
-        syncing = false
-        runRemaining = []
-        guard !queuedKeys.isEmpty, !config.paused, !quitting else { return }
+    /// A folder whose last run took more than half the interval syncs on the timer at most
+    /// every min(2 × that run, 30 minutes, 3 × the interval).
+    nonisolated static func pacedInterval(_ dur: TimeInterval, _ interval: TimeInterval) -> TimeInterval {
+        dur <= interval / 2 ? interval : max(interval, min(2 * dur, 30 * 60, 3 * interval))
+    }
+
+    private func pacedOut(_ f: KeptFolder, now: Date, interval: TimeInterval) -> Bool {
+        guard let rt = runTimes[f.key] else { return false }
+        let p = Self.pacedInterval(rt.dur, interval)
+        return p > interval && now < rt.start.addingTimeInterval(p)
+    }
+
+    /// The folder syncs less often on the timer (shown in Kept Folders).
+    func paced(_ f: KeptFolder) -> Bool {
+        guard let rt = runTimes[f.key] else { return false }
+        let iv = TimeInterval(max(60, config.syncIntervalSeconds))
+        return Self.pacedInterval(rt.dur, iv) > iv
+    }
+
+    private var isIdle: Bool { lanes == 0 && starting == 0 && !exclOn }
+    private func updateBusy() {
+        let b = lanes > 0 || exclOn || starting > 0
+        if syncing != b { syncing = b }
+    }
+    private var canStart: Bool {
+        !quitting && !exclOn && exclQ.isEmpty && !config.paused && configError == nil && !signedOut
+    }
+
+    private func timerCheck() {
+        if timerStarting { return }
+        if work.contains(where: \.timer) || running.values.contains(where: \.timer) { return }
+        timerOn = false
+    }
+
+    private func enqueue(_ it: WorkItem) {
+        if running[it.key] != nil, !it.prio { return }   // the timer: the run going on now covers it
+        if let i = work.firstIndex(where: { $0.key == it.key }) {
+            work[i].prio = work[i].prio || it.prio
+            work[i].manual = work[i].manual || it.manual
+            work[i].timer = work[i].timer || it.timer
+            return
+        }
+        work.append(it)
+        batchN += 1
+    }
+
+    private func pick() -> WorkItem? {
+        guard canStart else {
+            if config.paused || quitting || signedOut { work = [] }
+            return nil
+        }
+        for wantPrio in [true, false] {
+            if let i = work.firstIndex(where: { $0.prio == wantPrio && running[$0.key] == nil }) {
+                return work.remove(at: i)
+            }
+        }
+        return nil
+    }
+
+    private func dispatch() {
+        guard canStart else { return }
+        var avail = Set(work.filter { running[$0.key] == nil }.map(\.key)).count
+        while lanes < config.parallel, avail > 0 {
+            lanes += 1
+            avail -= 1
+            Task { [weak self] in await self?.lane() }
+        }
+        updateBusy()
+    }
+
+    private func lane() async {
+        while let it = pick() {
+            running[it.key] = it
+            if let f = config.kept.first(where: { $0.key == it.key }) {
+                if let reason = needsRepairReason(f) {
+                    if FileManager.default.fileExists(atPath: stateFile(f, ".drift-parked").path) {
+                        _ = await syncFolder(f, mode: .driftRetry)
+                    } else {
+                        status[f.key]?.state = .needsRepair(reason)
+                    }
+                } else if case .bigDeletion = status[f.key]?.state, !it.manual {
+                } else {
+                    _ = await syncFolder(f, mode: .normal)
+                }
+            }
+            running[it.key] = nil
+            batchDone += 1
+            timerCheck()
+        }
+        lanes -= 1
+        timerCheck()
+        updateBusy()
+        if isIdle { runsIdle() }
+    }
+
+    /// The last run ended: a waiting exclusive action runs, else the queued folders start.
+    private func runsIdle() {
+        guard isIdle else { return }
+        batchN = 0; batchDone = 0
+        if !exclQ.isEmpty, !quitting {
+            let body = exclQ.removeFirst()
+            exclOn = true
+            updateBusy()
+            Task { [weak self] in
+                await body()
+                guard let self else { return }
+                self.exclOn = false
+                self.updateBusy()
+                self.runsIdle()
+            }
+            return
+        }
+        startQueued()
+        dispatch()
+    }
+
+    /// Starts the queued folders (kept meanwhile, live sync, changed excludes), ahead of the timer's.
+    private func startQueued() {
+        guard !queuedKeys.isEmpty, canStart else { return }
         let q = queuedKeys
         queuedKeys = []
         startSyncAll(manual: false, only: q)
@@ -600,17 +727,15 @@ final class AppModel: ObservableObject {
     private func syncFolderRun(_ f: KeptFolder, mode: SyncMode) async -> Bool {
         let began = Date()
         runTrigger[f.key] = live.ownStart(f.key)
-        defer { live.ownEnd(f.key, began: began); runTrigger[f.key] = nil }
-        activeFolder = f.displayName
-        activeKey = f.key
-        activeFiles = 0
-        let single = activeCount == 0   // Repair, Stop Keeping…: one folder on its own
-        if single { activeIndex = 1; activeCount = 1 }
         defer {
-            activeFolder = nil
-            activeKey = nil
-            activeFiles = 0
-            if single { activeIndex = 0; activeCount = 0 }
+            live.ownEnd(f.key, began: began); runTrigger[f.key] = nil
+            runTimes[f.key] = (began, Date().timeIntervalSince(began))   // pacing
+        }
+        activeNames[f.key] = f.displayName
+        activeFiles[f.key] = 0
+        defer {
+            activeNames[f.key] = nil
+            activeFiles[f.key] = nil
         }
         let fm = FileManager.default
         let parkedReason = mode == .driftRetry ? needsRepairReason(f) : nil
@@ -791,7 +916,7 @@ final class AppModel: ObservableObject {
         let log = Log.url("sync-\(run.f.stateName).log")
         Log.append("\n=== \(Date()) \(kind) of \(run.f.path)\n", to: log)
         let changes = ChangeCollector()   // fed off the main thread, line by line
-        let r = await runTracked(config.rclone, args, log: log, onLine: { changes.line($0) })
+        let r = await runTracked(config.rclone, args, log: log, key: run.f.key, onLine: { changes.line($0) })
         let (wrote, over) = changes.localWrites()
         live.ownWrites(run.f.key, wrote, unknown: over || kind != "sync")   // live sync: the run's own writes
         if r.status == 0 {
@@ -1064,7 +1189,9 @@ final class AppModel: ObservableObject {
     /// Runs rclone, remembering the process so Quit can stop it cleanly. After syncTimeout it is
     /// interrupted (bisync finishes the current file and saves its state); if it is still
     /// running a minute later it is terminated.
-    private func runTracked(_ exe: String, _ args: [String], log: URL, onLine: (@Sendable (String) -> Void)? = nil) async -> Shell.Result {
+    private func runTracked(_ exe: String, _ args: [String], log: URL, key: String, onLine: (@Sendable (String) -> Void)? = nil) async -> Shell.Result {
+        var tracked: Process?
+        defer { if let p = tracked { procs[ObjectIdentifier(p)] = nil } }
         let timedOut = Flag()
         let timeout = syncTimeout
         let result: Shell.Result = await withCheckedContinuation { cont in
@@ -1079,7 +1206,7 @@ final class AppModel: ObservableObject {
             let logStream = LogStream(log)
             let stats = StatsFilter(into: buffer, log: logStream, onLine: onLine) { n in
                 Task { @MainActor in
-                    if self.activeFiles != n { self.activeFiles = n }
+                    if self.activeFiles[key] != nil, self.activeFiles[key] != n { self.activeFiles[key] = n }
                 }
             }
             pipe.fileHandleForReading.readabilityHandler = { h in
@@ -1096,7 +1223,8 @@ final class AppModel: ObservableObject {
             }
             do {
                 try p.run()
-                currentSync = p
+                tracked = p
+                procs[ObjectIdentifier(p)] = p
                 DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
                     guard p.isRunning else { return }
                     timedOut.set()
@@ -1114,20 +1242,30 @@ final class AppModel: ObservableObject {
                 cont.resume(returning: Shell.Result(status: -1, output: "\(error)"))
             }
         }
-        currentSync = nil
         return result
     }
 
-    /// Runs `body` as the only sync activity. Returns false if a sync is already running.
+    /// Runs `body` as the only sync activity: now, or when the running syncs end (no new
+    /// folder starts meanwhile). Returns false if another action already waits.
+    @discardableResult
     private func exclusive(_ body: @escaping @MainActor () async -> Void) -> Bool {
-        guard !syncing else {
-            alert("A sync is running", "Try again when it finishes.")
+        guard !exclOn, exclQ.isEmpty else {
+            alert("Another action is waiting", "Try again when it finishes.")
             return false
         }
-        syncing = true
-        syncTask = Task {
+        if !isIdle {
+            exclQ.append(body)
+            lastMessage = "Starts when the running sync finishes"
+            return true
+        }
+        exclOn = true
+        updateBusy()
+        Task { [weak self] in
             await body()
-            syncEnded()
+            guard let self else { return }
+            self.exclOn = false
+            self.updateBusy()
+            self.runsIdle()
         }
         return true
     }
@@ -1228,9 +1366,11 @@ final class AppModel: ObservableObject {
             lastMessage = "“\(folder.displayName)” downloads when you resume syncing"
         } else {
             if syncing {
-                // Keeping doesn't wait for a running sync: the new folder syncs right after it.
+                // Keeping doesn't wait for a running sync: a free lane takes it at once.
                 queuedKeys.insert(folder.key)
-                lastMessage = "“\(folder.displayName)” downloads when the running sync finishes"
+                lastMessage = lanes >= config.parallel || exclOn || !exclQ.isEmpty
+                    ? "“\(folder.displayName)” downloads when the running sync finishes" : "Downloading “\(folder.displayName)”…"
+                startQueued()
             } else {
                 lastMessage = "Downloading “\(folder.displayName)”…"
                 syncNow()
@@ -1305,7 +1445,7 @@ final class AppModel: ObservableObject {
     /// Final sync, then moves the local copy to the Trash and stops syncing it.
     func stopKeeping(_ f: KeptFolder) {
         if let m = settingsBrokenMessage { alert("Can't change the settings", m); return }
-        guard !syncing else { alert("A sync is running", "Try again when it finishes."); return }
+        guard !exclOn, exclQ.isEmpty else { alert("Another action is waiting", "Try again when it finishes."); return }
         Task {
             let local = config.localURL(f)
             // This Mac's copy is gone or empty (an unplugged disk, say): nothing to upload or to
@@ -1378,9 +1518,8 @@ final class AppModel: ObservableObject {
     /// Syncs just this folder now (the Settings window's per-folder Sync Now).
     func syncNow(_ f: KeptFolder) {
         guard !needsSignIn, configError == nil, !config.paused else { return }
-        _ = exclusive { [weak self] in
-            await self?.syncFolder(f, mode: .normal)
-        }
+        enqueue(WorkItem(key: f.key, manual: true, prio: true, timer: false))   // next free lane, ahead of the timer's
+        dispatch()
     }
 
     struct DriveStats {
@@ -1558,11 +1697,7 @@ final class AppModel: ObservableObject {
                 FileManager.default.createFile(atPath: stateFile(f, ".filters-upgraded").path, contents: nil)
             }
             queuedKeys.formUnion(refiltered.map(\.key))
-            if !syncing, !config.paused {
-                let q = queuedKeys
-                queuedKeys = []
-                startSyncAll(manual: false, only: q)
-            }
+            startQueued()
         }
         if c.syncIntervalSeconds != old.syncIntervalSeconds {
             nextSyncAt = min(nextSyncAt, Date().addingTimeInterval(TimeInterval(max(60, c.syncIntervalSeconds))))
@@ -1704,12 +1839,13 @@ final class AppModel: ObservableObject {
             ticker?.invalidate()
             live.stopAll()
             lastMessage = "Finishing sync…"
-            syncTask?.cancel()
-            currentSync?.interrupt()
-            for _ in 0..<1200 where currentSync?.isRunning == true {   // up to 2 minutes
+            work = []; queuedKeys = []; exclQ = []
+            let ps = Array(procs.values)
+            for p in ps { p.interrupt() }
+            for _ in 0..<1200 where ps.contains(where: \.isRunning) {   // up to 2 minutes
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
-            if let p = currentSync, p.isRunning {
+            for p in ps where p.isRunning {
                 p.terminate()
                 for _ in 0..<50 where p.isRunning { try? await Task.sleep(nanoseconds: 100_000_000) }
                 if p.isRunning { kill(p.processIdentifier, SIGKILL) }
@@ -1805,7 +1941,16 @@ final class AppModel: ObservableObject {
         if !config.isConfigured { return "Not set up: choose Set Up / Sign In…" }
         if waitingForKeychain { return "Waiting for Keychain access…" }
         if signedOut { return Self.signedOutText }
-        if syncing { return activityText(name: activeFolder, index: activeIndex, count: activeCount, files: activeFiles) }
+        if syncing {
+            if activeNames.count > 1 {
+                let files = activeFiles.values.reduce(0, +)
+                return "Syncing \(activeNames.count) folders" + (files == 1 ? " · 1 file" : files > 1 ? " · \(files) files" : "") + "…"
+            }
+            let key = activeNames.keys.first
+            var idx = batchDone + 1, n = batchN
+            if n <= 1 || idx > n { idx = 1; n = 1 }
+            return activityText(name: key.flatMap { activeNames[$0] }, index: idx, count: n, files: key.flatMap { activeFiles[$0] } ?? 0)
+        }
         let bad = config.kept.filter(hasProblem)
         if let first = bad.first, let why = attentionReason(first) {
             var s = "“\(first.displayName)” \(why)"

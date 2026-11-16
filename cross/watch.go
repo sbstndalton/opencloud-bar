@@ -119,18 +119,19 @@ type liveFolder struct {
 }
 
 type liveState struct {
-	folders    map[string]*liveFolder
-	triggered  map[string]string        // queued by live sync: the next run's trigger ("local change", "server change")
-	remote     map[string]*remoteFolder // server change checks (remote.go)
-	remoteGone map[string]bool          // stopped being kept: no checks, no .server-etag writes
-	fileMu     sync.Mutex               // .server-etag writes and removals
-	remoteRun  int                      // checks running now
-	running    bool
-	stop       chan struct{}
-	kick       chan struct{} // reconcile soon
-	noticed    bool          // the one-time notice was given
-	watchDirs  atomic.Int64  // directories watched, all folders
-	maxDirs    atomic.Int64
+	folders        map[string]*liveFolder
+	triggered      map[string]string        // queued by live sync: the next run's trigger ("local change", "server change")
+	remote         map[string]*remoteFolder // server change checks (remote.go)
+	remoteGone     map[string]bool          // stopped being kept: no checks, no .server-etag writes
+	remoteResumeAt time.Time                // after a sleep: no checks before this (wall clock)
+	fileMu         sync.Mutex               // .server-etag writes and removals
+	remoteRun      int                      // checks running now
+	running        bool
+	stop           chan struct{}
+	kick           chan struct{} // reconcile soon
+	noticed        bool          // the one-time notice was given
+	watchDirs      atomic.Int64  // directories watched, all folders
+	maxDirs        atomic.Int64
 	// callTimeout: the longest a watcher Add/Remove may take (nanoseconds); past it the
 	// watch is dead (fsnotify on Windows can wait forever on a watcher closed meanwhile).
 	callTimeout atomic.Int64
@@ -847,7 +848,7 @@ func (e *Engine) liveTick() {
 		}
 		settled := now.Sub(lf.last) >= liveQuiet || now.Sub(lf.first) >= liveMaxWait
 		gap := max(liveMinGap, lf.lastDur)
-		if !settled || (!lf.lastLive.IsZero() && now.Sub(lf.lastLive) < gap) || e.queued[key] {
+		if !settled || (!lf.lastLive.IsZero() && now.Sub(lf.lastLive) < gap) || e.waitingLocked(key) {
 			continue
 		}
 		lf.pending = false
@@ -870,6 +871,7 @@ func (e *Engine) liveLoop(stop chan struct{}) {
 	t := time.NewTicker(liveTickTime)
 	defer t.Stop()
 	n := 0
+	var lastWall time.Time
 	reconcile := func() bool {
 		e.reconcileWatches()
 		e.mu.Lock()
@@ -895,6 +897,15 @@ func (e *Engine) liveLoop(stop chan struct{}) {
 				return
 			}
 		case <-t.C:
+			// The wall clock jumped (the computer slept): give the network a moment before
+			// asking the server again (the monotonic clock may not count the sleep).
+			wall := time.Now().Round(0)
+			if !lastWall.IsZero() && wall.Sub(lastWall) > remoteWakeGap {
+				e.mu.Lock()
+				l.remoteResumeAt = wall.Add(remoteWakeWait)
+				e.mu.Unlock()
+			}
+			lastWall = wall
 			e.liveTick()
 			e.remoteTick()
 			if n++; n%60 == 0 && !reconcile() { // now and then: folders that appeared, roots that changed
@@ -914,6 +925,14 @@ func (e *Engine) ownSyncLocked(key string, start bool, began time.Time) string {
 		if t, ok := l.triggered[key]; ok {
 			trigger = t
 			delete(l.triggered, key)
+		} else if lf != nil && lf.pending && (lf.local || lf.server) {
+			// A change waiting for its own sync: this run (the timer's, say) takes it.
+			trigger = "server change"
+			if lf.local {
+				trigger = "local change"
+			}
+		}
+		if trigger != "timer" {
 			if lf != nil {
 				lf.lastLive = l.now()
 			}
@@ -930,7 +949,7 @@ func (e *Engine) ownSyncLocked(key string, start bool, began time.Time) string {
 		if s := e.status[key]; s != nil {
 			s.Pending = false
 		}
-		delete(e.queued, key) // this run takes what was queued for it
+		e.unqueueLocked(key) // this run takes what was queued for it
 		return trigger
 	}
 	if lf != nil {

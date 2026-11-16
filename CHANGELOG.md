@@ -4,6 +4,22 @@ All notable changes to OpenCloud Bar. The format follows [Keep a Changelog](http
 
 The release workflow copies the section for a tag into that tag's GitHub release, so every version heading must stay in the form `## [X.Y.Z] - date`.
 
+## [1.7.0] - 2026-11-15
+
+### Added
+- **Folders sync side by side.** Up to **Folders synced at once** folders (1–4, default 2; config key `syncParallel`) sync in parallel, never the same folder twice. Folders with a change (live sync), a newly kept folder and a folder's own Sync Now go before the interval's folders, so a small folder with a change doesn't wait behind a long sync of a big one. Repair, allowing a large deletion, Stop Keeping and conflict actions wait for every running sync (nothing new starts meanwhile) instead of refusing. The server memory check gates each batch. The menu says "Syncing 2 folders…".
+- **Large folders sync less often on the interval.** A folder whose last sync took more than half the interval is synced by the interval at most every min(2 × that sync, 30 minutes, 3 × the interval); its status says "syncs less often: large folder". Changes and Sync Now still sync it.
+- The Activity list shows what started each sync: a change on this computer, a change in OpenCloud, or the interval.
+- Windows and Linux: server change checks wait 15 seconds after the computer wakes from sleep (noticed by the clock jumping).
+
+### Fixed
+- A change waiting for its sync that an interval sync took was recorded as "timer"; it is now recorded as the change ("local change" or "server change", a local one first).
+- Mac: the toggles in Settings (Pause syncing, Sync changes right away, Open at Login, updates, notifications, server memory, SSH tunnel) and the subfolder checkboxes have accessibility labels.
+- Windows and Linux: the settings window showed "Sync changes right away" as off even when it was on.
+
+### Changed
+- A setting saved while syncs run is applied when the last one ends; until then no new folder starts.
+
 ## [1.6.0] - 2026-11-15
 
 ### Added

@@ -203,6 +203,9 @@ final class LiveSync {
         if let t = triggered.removeValue(forKey: key) {
             trigger = t
             folders[key]?.lastLive = Date()
+        } else if let lf = folders[key], lf.pending, lf.local || lf.server {
+            trigger = lf.local ? "local change" : "server change"   // a waiting change: this run takes it
+            folders[key]?.lastLive = Date()
         }
         model.dequeue(key)   // this run takes what was queued for it
         if var lf = folders[key] {

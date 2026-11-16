@@ -149,7 +149,7 @@ Changes on this computer: the local copy of each kept folder is watched.
 - The app's own writes don't count. Changes seen while the app syncs a folder are kept aside; when the sync is over, the files it downloaded or deleted here are taken out, and if anything else is left (a change you made meanwhile), the folder syncs once more after the 30 seconds.
 - Noise doesn't count: rclone's temporary files (`.partial`, `.~tmp~`), the backups folder, conflict copies, `.DS_Store`, `Thumbs.db`, `desktop.ini`, `._*`, `*~`, `*.tmp`, `.sync_*.db`, Office lock files (`~$*`), LibreOffice lock files (`.~lock.*#`) and the simple file names in your excludes (like `- *.bak`). Folders excluded by name (like `- **/node_modules/**` or `- /Old/**`) aren't watched; other excludes still apply to the sync itself.
 - While paused, changes only mark the folder; it syncs when you resume.
-- Recent Changes shows "(after a local change)" or "(after a change in OpenCloud)" for changes made by such a sync.
+- Recent Changes shows "(after a local change)" or "(after a change in OpenCloud)" for changes made by such a sync, and the Activity list says what started each sync (a change on this computer, a change in OpenCloud, or the interval). When an interval sync takes a change that was waiting, it is listed as that change.
 - Mac: FSEvents watches each folder (about 1 second latency). Watches start again after the Mac wakes from sleep, when a folder's excludes change, and when its folder is moved or replaced. Windows and Linux: each folder in the tree is watched. If the system's watch limit is reached (Linux `fs.inotify.max_user_watches`), or the kept folders have more than 2,000 folders in all on Windows (each watch takes memory there) or 20,000 on Linux, that kept folder goes back to the interval and a notice says so once.
 - If watching fails or loses events, or the kept folder itself is moved, removed or replaced, the folder syncs and watching starts over. A local folder that is a symbolic link is watched where it leads.
 - A kept folder whose local copy is missing isn't watched; it is watched once it is there again.
@@ -158,11 +158,22 @@ Changes in OpenCloud (with the browser sign-in):
 
 - About every 30 seconds, each kept folder (from your personal space or a project space) is asked for its ETag, one small WebDAV request (`PROPFIND`, `Depth: 0`, only `getetag`; no listing). OpenCloud updates a folder's ETag whenever anything below it changes, so a changed ETag means the folder changed; it syncs as soon as the 30-second gap and the queue allow.
 - The last ETag is kept per folder (`<folder>.server-etag` in the sync state folder; removed by Stop Keeping). If it changed while the app was closed, the first check syncs the folder (once, together with the sync at start). After each sync the ETag is read again, so the app's own uploads don't start another sync. A change made in OpenCloud while that folder is syncing arrives with the next interval sync (or the next change).
-- If the server can't be reached or answers with an error, that folder is checked less often (up to every 5 minutes), without notifications. No checks while paused, signed out, or (Mac) asleep; at most 4 at a time. The sign-in token is only sent to your server: redirects aren't followed.
+- If the server can't be reached or answers with an error, that folder is checked less often (up to every 5 minutes), without notifications. No checks while paused, signed out, or asleep (and for 15 seconds after waking, on Windows and Linux); at most 4 at a time. The sign-in token is only sent to your server: redirects aren't followed.
+
+## Folders synced at once
+
+Kept folders sync side by side, two at a time by default (**Folders synced at once**, 1 to 4: Mac Settings ▸ Sync; Windows, Linux: the settings window, Sync). Keep it low if your server is small.
+
+- A folder never syncs twice at once, and kept folders never overlap on disk.
+- Folders with a change (live sync), a newly kept folder and a folder's own **Sync Now** go first, so a small folder doesn't wait behind a long sync of a big one.
+- A folder whose sync takes more than half the interval syncs less often on the interval: at most every twice its last sync time, up to 30 minutes and never more than three intervals apart. Its status says "syncs less often: large folder". Changes (live sync) and **Sync Now** still sync it right away.
+- Repair, allowing a large deletion, Stop Keeping and conflict actions wait until every running sync has finished, and nothing new starts meanwhile.
+- The server memory check (when it is on) runs before each batch of folders starts.
+- The menu shows "Syncing 2 folders…" while more than one syncs.
 
 ## Keeping a folder while a sync runs
 
-**Keep a Folder…** and **Keep from a Space…** work while a sync is running. The folder is added at once and its first sync starts as soon as the running sync finishes. Only the new folder syncs then; the others follow at the next interval. On the Mac, a folder's own excludes or subfolders can be changed while a sync runs, unless that sync still has to do this folder. On Windows and Linux they are saved at once and applied when the running sync finishes; the folder then syncs right after.
+**Keep a Folder…** and **Keep from a Space…** work while a sync is running. The folder is added at once and its first sync starts in a free slot (see [Folders synced at once](#folders-synced-at-once)), or as soon as a running sync finishes. Only the new folder syncs then; the others follow at the next interval. On the Mac, a folder's own excludes or subfolders can be changed while a sync runs, unless that sync still has to do this folder. On Windows and Linux they are saved at once and applied when the running sync finishes; the folder then syncs right after.
 
 ## Conflicts
 

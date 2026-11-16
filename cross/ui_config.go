@@ -38,6 +38,7 @@ type configPatch struct {
 	CheckForUpdates       *bool               `json:"checkForUpdates"`
 	Notifications         *bool               `json:"notifications"`
 	LiveSync              *bool               `json:"liveSync"`
+	SyncParallel          *int                `json:"syncParallel"`
 	KeptFilters           map[string][]string `json:"keptFilters"` // kept folder key -> its own excludes
 	// kept folder key -> Choose Subfolders' changes (subfolder -> included), applied to the
 	// folder's excludes as they are in the file (see setSubfolders)
@@ -97,6 +98,7 @@ func (p configPatch) validate(next Config, current Config) error {
 	for _, err := range []error{
 		in("Sync interval", p.SyncIntervalSeconds, 60, 7*24*3600),
 		in("Transfers", p.Transfers, 1, 32),
+		in("Folders synced at once", p.SyncParallel, 1, maxParallel),
 		in("Checkers", p.Checkers, 1, 64),
 		in("Memory limit", p.MinServerAvailableMiB, 0, 1<<22),
 		in("Server port", p.ServerPort, 1, 65535),
@@ -253,6 +255,13 @@ func applyConfigPatch(p configPatch) (restartPort bool, err error) {
 	if p.Notifications != nil {
 		set("notifications", *p.Notifications)
 	}
+	if p.SyncParallel != nil {
+		if *p.SyncParallel == defaultParallel {
+			delete(raw, "syncParallel") // the default: no key
+		} else {
+			set("syncParallel", *p.SyncParallel)
+		}
+	}
 	if p.LiveSync != nil {
 		if *p.LiveSync {
 			set("liveSync", true)
@@ -400,6 +409,9 @@ func (e *Engine) reloadWhenIdle() {
 		defer reloadRetrying.Store(false)
 		for i := 0; i < 2000; i++ { // about 3 hours, the longest a sync may run
 			time.Sleep(5 * time.Second)
+			if !reloadRetrying.Load() {
+				return // applied when the last run ended (runsIdle)
+			}
 			e.mu.Lock()
 			q := e.quitting
 			e.mu.Unlock()

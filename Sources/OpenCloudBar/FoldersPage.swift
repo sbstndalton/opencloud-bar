@@ -156,8 +156,8 @@ struct FoldersPage: View {
                     if case .syncing = state(f) {
                         HStack(spacing: 6) {
                             ProgressView().controlSize(.small).accessibilityHidden(true)
-                            Text(model.activeFiles > 0 && model.activeFolder == f.displayName
-                                 ? "Syncing… · \(model.activeFiles) file\(model.activeFiles == 1 ? "" : "s")" : "Syncing…")
+                            let n = model.activeFiles[f.key] ?? 0
+                            Text(n > 0 ? "Syncing… · \(n) file\(n == 1 ? "" : "s")" : "Syncing…")
                                 .lineLimit(1)
                         }
                         .accessibilityElement(children: .combine)
@@ -166,10 +166,11 @@ struct FoldersPage: View {
                             .lineLimit(1)
                             .accessibilityLabel("Change detected, syncing soon")
                     } else {
-                        Label(state(f).text, systemImage: state(f).symbol)
+                        let text = state(f).text + (state(f) == .ok && model.paced(f) ? " (syncs less often: large folder)" : "")
+                        Label(text, systemImage: state(f).symbol)
                             .lineLimit(1)
                             .foregroundStyle(model.hasProblem(f) ? Color.orange : Color.primary)
-                            .accessibilityLabel(state(f).text)
+                            .accessibilityLabel(text)
                     }
                 }
                 TableColumn("Last Synced") { f in

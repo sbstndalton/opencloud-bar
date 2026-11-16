@@ -242,9 +242,10 @@ func (e *Engine) ConflictAction(folder, file, action string) error {
 		list = s.Conflicts
 	}
 	cfg := e.cfg
-	e.syncing = true
+	e.exclOn = true
+	e.busyLocked()
 	e.mu.Unlock()
-	defer func() { e.mu.Lock(); e.syncing = false; e.mu.Unlock(); e.notify() }()
+	defer e.exclEnd()
 
 	local := cfg.Local(f)
 	var err error

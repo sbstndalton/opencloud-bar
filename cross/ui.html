@@ -200,6 +200,10 @@ function deletionPrompt(side) {
   const other = side === "on this computer" ? "OpenCloud" : side === "in OpenCloud" ? "this computer" : "the other side";
   return "More than half of this folder's files were deleted " + where + ". If that was on purpose, the deletion will be applied to " + other + " too.";
 }
+// triggerText: what started the sync that made a change.
+function triggerText(t) {
+  return t === "local change" ? "Change on this computer" : t === "server change" ? "Change in OpenCloud" : t === "timer" ? "Interval" : "";
+}
 // stateLook: dot colour, short status, and (for problems) why, in plain words.
 function stateLook(f) {
   // A change waiting only shows when nothing needs attention first (problems, paused).
@@ -207,7 +211,7 @@ function stateLook(f) {
   if (f.pending && quiet && !(S.status && S.status.paused)) return ["busy", "Change detected, syncing soon", ""];
   switch (f.state) {
     case "syncing": return ["busy", "Syncing…", ""];
-    case "ok": return ["ok", "Up to date", ""];
+    case "ok": return ["ok", "Up to date", f.detail || ""];
     case "skipped": return ["warn", "Skipped", f.detail || ""];
     case "failed": return ["bad", "Sync failed", f.detail || ""];
     case "needs-repair": return ["bad", "Needs repair", f.detail || ""];
@@ -510,10 +514,11 @@ async function activity(main, r) {
     const rows = list.filter(c => !t || c.label.toLowerCase().includes(t));
     if (!rows.length) { body.replaceChildren(h("div", { class: "card" }, list.length ? "Nothing matches." : "No changes yet. They show up here after the next sync.")); return; }
     keepFocus(body, () => body.replaceChildren(h("table", { "aria-label": "Recent changes" },
-      h("thead", {}, h("tr", {}, h("th", { text: "When" }), h("th", { text: "Change" }), h("th", { text: "" }))),
+      h("thead", {}, h("tr", {}, h("th", { text: "When" }), h("th", { text: "Change" }), h("th", { text: "Why" }), h("th", { text: "" }))),
       h("tbody", {}, rows.slice(0, 500).map(c => h("tr", {},
         h("td", { text: new Date(c.time).toLocaleString() }),
         h("td", { class: c.path ? "path" : "", text: c.label }),
+        h("td", { text: triggerText(c.trigger) }),
         h("td", {},
           c.exists ? h("button", { class: "btn", "aria-label": "Show " + c.path + " in its folder", onclick: () => act(() => post("open", { kind: "item", folder: c.folder, path: c.path })) }, "Show in Folder") : null,
           c.exists && S.config.serverURL ? h("button", { class: "btn", "aria-label": "Open OpenCloud in the browser", onclick: () => act(() => post("open", { kind: "web" })) }, "Open OpenCloud") : null)))))));
@@ -656,6 +661,7 @@ async function syncPage(main, r) {
       h("span", { class: "hint", text: "Kept folders stop syncing until you resume. The drive keeps working." })),
     checkField("Sync changes right away (preview)", "liveSync", "Instead of waiting for the next interval: a kept folder syncs about 5 seconds after changes in it on this computer stop (up to a minute while changes continue), and within about 30 seconds of a change in it in OpenCloud (checked with the browser sign-in)."),
     selectField("Sync every", "syncIntervalSeconds", [[60,"1 minute"],[300,"5 minutes"],[900,"15 minutes"],[1800,"30 minutes"],[3600,"1 hour"]]),
+    selectField("Folders synced at once", "syncParallel", [[1,"1"],[2,"2"],[3,"3"],[4,"4"]], "Folders with a change sync first. A folder whose sync takes more than half the interval syncs less often on the interval (changes still sync it)."),
     textField("Local folder", "localRoot", kept ? "Can't change while folders are kept here. Stop keeping them first." : "New kept folders are placed inside this folder.", { disabled: kept }),
     numField("Parallel transfers", "transfers", "How many files copy at once (1 to 32).", 1, 32),
     numField("Parallel checks", "checkers", "How many files are compared at once (1 to 64).", 1, 64),

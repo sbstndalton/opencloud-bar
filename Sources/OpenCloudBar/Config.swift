@@ -143,6 +143,9 @@ struct Config: Codable {
     var bwLimitDown: String?
     /// Live sync (preview): watch kept folders, sync a folder soon after a change here or in OpenCloud. nil: off.
     var liveSync: Bool?
+    /// Folders synced at once, 1–4; nil: 2.
+    var syncParallel: Int?
+    var parallel: Int { min(max(syncParallel ?? 2, 1), 4) }
     var commonFilters: [String] = [
         "- *.tmp", "- .*.bundle.tmp", "- *~", "- .DS_Store", "- ._*", "- Thumbs.db",
         "- .sync_*.db", "- .sync_*.db-*", "- .OpenCloudSync.log", "- .owncloudsync.log",
@@ -183,6 +186,7 @@ struct Config: Codable {
         bwLimitUp = try c.decodeIfPresent(String.self, forKey: .bwLimitUp)?.trimmingCharacters(in: .whitespaces).uppercased()
         bwLimitDown = try c.decodeIfPresent(String.self, forKey: .bwLimitDown)?.trimmingCharacters(in: .whitespaces).uppercased()
         liveSync = (try? c.decodeIfPresent(Bool.self, forKey: .liveSync)) == true ? true : nil
+        syncParallel = (try? c.decodeIfPresent(Int.self, forKey: .syncParallel)).flatMap { $0 }.map { min(max($0, 1), 4) }
     }
 
     /// Why a bandwidth limit isn't valid (nil if fine; empty is no limit).
@@ -440,7 +444,7 @@ struct Config: Codable {
             var merged = old
             // Optional settings this app owns are left out of the encoding when nil; drop them
             // from the old file too, so clearing one actually removes it.
-            for k in ["serverURL", "auth", "useTunnel", "webdavVendor", "bwLimitUp", "bwLimitDown", "liveSync"] { merged.removeValue(forKey: k) }
+            for k in ["serverURL", "auth", "useTunnel", "webdavVendor", "bwLimitUp", "bwLimitDown", "liveSync", "syncParallel"] { merged.removeValue(forKey: k) }
             let oldKept = (old["kept"] as? [[String: Any]]) ?? []
             if let newKept = new["kept"] as? [[String: Any]] {
                 new["kept"] = newKept.map { entry -> [String: Any] in

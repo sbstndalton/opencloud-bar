@@ -34,6 +34,16 @@ enum Changes {
     static let max = 500
     static let bulk = 200
 
+    /// What started the sync, for the Activity list (" · Interval" and so on).
+    static func triggerText(_ t: String?) -> String {
+        switch t {
+        case "local change": return " · Change on this Mac"
+        case "server change": return " · Change in OpenCloud"
+        case "timer": return " · Interval"
+        default: return ""
+        }
+    }
+
     static func words(_ action: String) -> String {
         switch action {
         case "deleted here": return "deleted on this Mac (also removed from OpenCloud)"
@@ -173,7 +183,8 @@ struct ActivityPage: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(c.label).lineLimit(2)
-                        Text(c.time.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.secondary)
+                        Text(c.time.formatted(date: .abbreviated, time: .shortened) + Changes.triggerText(c.trigger))
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                     .accessibilityElement(children: .combine)
                     Spacer()

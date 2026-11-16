@@ -39,6 +39,8 @@ var (
 	remoteMaxBackoff = 5 * time.Minute
 	remoteParallel   = 4
 	remoteTimeout    = 20 * time.Second
+	remoteWakeGap    = 15 * time.Second // a tick this late: the computer slept
+	remoteWakeWait   = 15 * time.Second
 )
 
 type remoteFolder struct {
@@ -126,7 +128,7 @@ type remoteJob struct {
 func (e *Engine) remoteTick() {
 	e.mu.Lock()
 	l := e.live()
-	if !e.remoteOnLocked() {
+	if !e.remoteOnLocked() || time.Now().Round(0).Before(l.remoteResumeAt) {
 		e.mu.Unlock()
 		return
 	}
@@ -144,7 +146,7 @@ func (e *Engine) remoteTick() {
 		if l.remoteRun >= remoteParallel || rf.busy || rf.pending || rf.syncing || l.remoteGone[key] || now.Before(rf.nextAt) {
 			continue
 		}
-		if lf := l.folders[key]; (lf != nil && lf.own) || e.queued[key] {
+		if lf := l.folders[key]; (lf != nil && lf.own) || e.waitingLocked(key) || e.isRunningLocked(key) {
 			continue // a sync of it is running or waiting: it reads the baseline after
 		}
 		u, err := itemDavURL(e.cfg, f, "")

@@ -306,17 +306,20 @@ struct SyncPage: View {
         (60, "Every minute"), (300, "Every 5 minutes"), (900, "Every 15 minutes"),
         (1800, "Every 30 minutes"), (3600, "Every hour"),
     ]
+    private static let parallel: [(value: Int, label: String)] = [(1, "1"), (2, "2"), (3, "3"), (4, "4")]
 
     var body: some View {
         Form {
             Section("Kept Folders") {
                 Toggle("Pause syncing", isOn: Binding(get: { model.config.paused }, set: { model.setPaused($0) }))
+                    .accessibilityLabel("Pause syncing")
                     .disabled(model.configError != nil || !model.config.isConfigured)
                 Text("While paused, kept folders don't sync. The OpenCloud drive keeps working.")
                     .font(.caption).foregroundStyle(.secondary)
                 Toggle("Sync changes right away (preview)", isOn: Binding(
                     get: { model.config.liveSync == true },
                     set: { on in Task { error = await model.updateConfig { $0.liveSync = on ? true : nil } } }))
+                    .accessibilityLabel("Sync changes right away (preview)")
                     .disabled(model.configError != nil || !model.config.isConfigured)
                 Text("Instead of waiting for the next interval: a kept folder syncs about 5 seconds after changes in it on this Mac stop (up to a minute while changes continue), and within about 30 seconds of a change in it in OpenCloud (checked with the browser sign-in).")
                     .font(.caption).foregroundStyle(.secondary)
@@ -324,6 +327,12 @@ struct SyncPage: View {
                              customLabel: { "Every \($0) seconds" }) { v in
                     Task { error = await model.updateConfig { $0.syncIntervalSeconds = v } }
                 }
+                ChoicePicker(title: "Folders synced at once", choices: Self.parallel, current: model.config.parallel,
+                             customLabel: { "\($0)" }) { v in
+                    Task { error = await model.updateConfig { $0.syncParallel = v == 2 ? nil : v } }
+                }
+                Text("Folders with a change sync first. A folder whose sync takes more than half the interval syncs less often on the interval (changes still sync it).")
+                    .font(.caption).foregroundStyle(.secondary)
                 InlineError(text: error)
             }
             Section("Excludes for all folders") {
@@ -568,12 +577,14 @@ struct GeneralPage: View {
         Form {
             Section {
                 Toggle("Open at Login", isOn: Binding(get: { model.opensAtLogin }, set: { _ in model.toggleOpenAtLogin() }))
+                    .accessibilityLabel("Open at Login")
                 LabeledContent("Version") { Text(version).textSelection(.enabled) }
             }
             Section("Updates") {
                 Toggle("Check for updates automatically", isOn: Binding(
                     get: { model.config.checkForUpdates },
                     set: { on in Task { updateError = await model.updateConfig { $0.checkForUpdates = on } } }))
+                    .accessibilityLabel("Check for updates automatically")
                 Text("Once a day OpenCloud Bar asks GitHub for the latest release. Nothing about you is sent.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
@@ -592,6 +603,7 @@ struct GeneralPage: View {
                 Toggle("Show notifications", isOn: Binding(
                     get: { model.config.notifications },
                     set: { on in Task { updateError = await model.updateConfig { $0.notifications = on } } }))
+                    .accessibilityLabel("Show notifications")
                 Text("When a folder needs attention or was merged automatically, when you are signed out, and when an update is available. Once per change, never repeated. Clicking one opens Settings.")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -600,6 +612,7 @@ struct GeneralPage: View {
                     Toggle("Check server memory before syncing", isOn: Binding(
                         get: { model.config.minServerAvailableMiB > 0 },
                         set: { on in Task { memoryError = await model.updateConfig { $0.minServerAvailableMiB = on ? 8192 : 0 } } }))
+                        .accessibilityLabel("Check server memory before syncing")
                     if model.config.minServerAvailableMiB > 0 {
                         ChoicePicker(title: "Skip a sync when less than this is free", choices: Self.memory,
                                      current: model.config.minServerAvailableMiB,
@@ -614,6 +627,7 @@ struct GeneralPage: View {
                 DisclosureGroup("Advanced", isExpanded: $advancedOpen) {
                     VStack(alignment: .leading, spacing: 10) {
                         Toggle("Connect through an SSH tunnel", isOn: $useTunnel)
+                            .accessibilityLabel("Connect through an SSH tunnel")
                         TextField("SSH host", text: $sshHost)
                         TextField("Server port", text: $serverPort)
                         TextField("Local tunnel port", text: $localPort)

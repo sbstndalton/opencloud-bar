@@ -25,7 +25,7 @@ func liveRig(t *testing.T) (*Engine, *fakeClock, KeptFolder) {
 	clk := &fakeClock{t: time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)}
 	e.mu.Lock()
 	e.cfg.Paused = false
-	e.syncing = true // nothing actually runs: queued folders wait in e.queued
+	e.holdRuns = true // nothing actually runs: queued folders wait in e.queued
 	l := e.live()
 	l.now = clk.now
 	l.folder("Docs")
@@ -555,14 +555,19 @@ func fakeRig(t *testing.T) (*Engine, *fakeWatcher, string) {
 	e.mu.Lock()
 	e.live().newWatcher = func() (fsWatcher, error) { w := newFakeWatcher(nil, nil); made.Store(w, true); return w, nil }
 	e.mu.Unlock()
-	resetLive(e)
-	e.reconcileWatches()
-	fw := watchOf(e, "Docs")
-	if fw == nil {
-		t.Fatal("not watched")
+	var fake *fakeWatcher
+	for try := 0; try < 20 && fake == nil; try++ { // the engine's own first reconcile may still attach a real one
+		resetLive(e)
+		e.reconcileWatches()
+		if fw := watchOf(e, "Docs"); fw != nil {
+			if w, ok := fw.w.(*fakeWatcher); ok {
+				if _, mine := made.Load(w); mine {
+					fake = w
+				}
+			}
+		}
 	}
-	fake, _ := fw.w.(*fakeWatcher)
-	if _, ok := made.Load(fake); fake == nil || !ok {
+	if fake == nil {
 		t.Fatal("not watched through the fake")
 	}
 	real, _ := resolveRoot(local)
