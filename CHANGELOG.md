@@ -4,6 +4,11 @@ All notable changes to OpenCloud Bar. The format follows [Keep a Changelog](http
 
 The release workflow copies the section for a tag into that tag's GitHub release, so every version heading must stay in the form `## [X.Y.Z] - date`.
 
+## [1.7.1] - 2026-11-16
+
+### Fixed
+- macOS: a folder's **Sync Now** (in the menu and in Settings ▸ Kept Folders ▸ Actions) was greyed out whenever any folder was syncing, so a small folder still couldn't sync while a large one ran. It's now only unavailable while that folder itself syncs or waits to. **Repair**, **Allow Large Deletion** and **Stop Keeping** are no longer greyed out during a sync either: as in 1.7.0, they wait for the running syncs and then run.
+
 ## [1.7.0] - 2026-11-15
 
 ### Added

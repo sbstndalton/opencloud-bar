@@ -114,7 +114,7 @@ struct MenuContent: View {
         Divider()
 
         Button("Sync Now") { model.syncNow() }
-            .disabled(model.syncing || model.needsSignIn || model.config.paused)
+            .disabled(model.needsSignIn || model.config.paused)
             .keyboardShortcut("s")
         Button(model.config.paused ? "Resume Syncing" : "Pause Syncing") { model.setPaused(!model.config.paused) }
             .disabled(!model.config.isConfigured || model.configError != nil)
@@ -167,11 +167,11 @@ struct MenuContent: View {
                         Divider()
                         switch model.status[f.key]?.state {
                         case .needsRepair:
-                            Button("Repair (Merge Both Sides)…") { model.repair(f) }.disabled(model.syncing)
+                            Button("Repair (Merge Both Sides)…") { model.repair(f) }
                         case .bigDeletion:
-                            Button("Allow Large Deletion…") { model.allowBigDeletion(f) }.disabled(model.syncing)
+                            Button("Allow Large Deletion…") { model.allowBigDeletion(f) }
                         default:
-                            Button("Sync Now") { model.syncNow(f) }.disabled(model.syncing || model.needsSignIn || model.config.paused)
+                            Button("Sync Now") { model.syncNow(f) }.disabled(model.folderBusy(f) || model.needsSignIn || model.config.paused)
                         }
                         Button("Open in Finder") { model.openLocal(f) }
                         Button("Show in Settings…") { model.openSettings(.folders) }

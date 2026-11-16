@@ -253,12 +253,12 @@ struct FoldersPage: View {
         Button("Open in Browser") { if let u = browserURL { NSWorkspace.shared.open(u) } }.accessibilityLabel("Open in Browser")
             .disabled(browserURL == nil)
         Button("Sync Now") { model.syncNow(f) }.accessibilityLabel("Sync Now")
-            .disabled(model.syncing || model.needsSignIn || model.config.paused)
+            .disabled(model.folderBusy(f) || model.needsSignIn || model.config.paused)
         switch state(f) {
         case .needsRepair:
-            Button("Repair (Merge Both Sides)…") { model.repair(f) }.disabled(model.syncing).accessibilityLabel("Repair (Merge Both Sides)…")
+            Button("Repair (Merge Both Sides)…") { model.repair(f) }.accessibilityLabel("Repair (Merge Both Sides)…")
         case .bigDeletion:
-            Button("Allow Large Deletion…") { model.allowBigDeletion(f) }.disabled(model.syncing).accessibilityLabel("Allow Large Deletion…")
+            Button("Allow Large Deletion…") { model.allowBigDeletion(f) }.accessibilityLabel("Allow Large Deletion…")
         default:
             EmptyView()
         }
@@ -267,7 +267,7 @@ struct FoldersPage: View {
         Button("Copy Public Link…") { model.shareFrom(f) }.accessibilityLabel("Copy Public Link…")
             .disabled(model.needsSignIn || !model.config.isOIDC)
         Divider()
-        Button("Stop Keeping on This Mac…") { model.stopKeeping(f) }.disabled(model.syncing).accessibilityLabel("Stop Keeping on This Mac…")
+        Button("Stop Keeping on This Mac…") { model.stopKeeping(f) }.accessibilityLabel("Stop Keeping on This Mac…")
     }
 
     private func detail(_ f: KeptFolder) -> some View {
