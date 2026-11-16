@@ -493,7 +493,8 @@ func TestLiveWatcherSeesChanges(t *testing.T) {
 		t.Errorf("watched dirs %d after removing a folder", n)
 	}
 	e.mu.Lock()
-	e.cfg.LiveSync = false
+	off := false
+	e.cfg.LiveSync = &off
 	e.mu.Unlock()
 	e.reconcileWatches()
 	e.mu.Lock()

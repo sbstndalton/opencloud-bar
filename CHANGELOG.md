@@ -4,6 +4,23 @@ All notable changes to OpenCloud Bar. The format follows [Keep a Changelog](http
 
 The release workflow copies the section for a tag into that tag's GitHub release, so every version heading must stay in the form `## [X.Y.Z] - date`.
 
+## [2.0.0] - 2026-11-16
+
+### What's new in 2.0
+Kept folders now sync as things happen, on both sides, and the interval is a safety net. Since 1.4:
+- **Live sync, on by default** (1.5, 1.6, 2.0): a change on this computer syncs the folder about 5 seconds after changes stop (FSEvents on the Mac, fsnotify on Windows and Linux); a change in OpenCloud is noticed within about 30 seconds with one small `PROPFIND` per folder (browser sign-in). The app's own writes and uploads don't start syncs; noise (temporary and lock files, `.DS_Store`, excluded folders) doesn't count.
+- **Folders sync side by side** (1.7): two at a time by default (1–4), never the same folder twice, folders with a change first. Repair, Stop Keeping and similar actions wait for running syncs instead of refusing.
+- **Kinder to small servers** (1.7, 2.0): folders whose syncs take long sync less often on the interval, large folders sync after changes at most every 10 minutes, and a single network blip isn't notified.
+- **Recent Changes and Activity** (1.4, 1.7) say what each sync changed and what started it.
+
+### Upgrade note
+- **Behaviour change:** live sync is on unless you turned it off. If you never chose the setting, a notification (and an Activity line) says so once: "Changes now sync as they happen. You can turn this off in Settings ▸ Sync." To keep the old behaviour, uncheck **Sync changes right away** in Settings ▸ Sync, or set `"liveSync": false` in `config.json`. An explicit choice made in 1.5–1.7 is kept.
+
+### Changed
+- Live sync is on when `liveSync` is absent (new installs and existing settings); only `"liveSync": false` turns it off, and turning it on again removes the key. The setting is named **Sync changes right away** (no longer a preview).
+- With live sync covering a folder (watched here and checked in OpenCloud), the interval syncs it at least every 15 minutes (or at the interval if longer): "Checked every 15 min; changes sync right away". Folders it can't cover (watch limit, the rclone sign-in, a missing local copy) keep the interval.
+- A folder whose last sync took more than 2 minutes syncs after changes at most every max(10 minutes, 2 × that sync); changes wait and sync then. Its status says "large folder: syncs at most every N min".
+
 ## [1.7.1] - 2026-11-16
 
 ### Fixed

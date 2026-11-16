@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Desktop notifications: one per change of state, never repeated while the state lasts, and
@@ -200,6 +201,26 @@ func updateNote(u UpdateState, file string) *note {
 	return &note{"OpenCloud Bar " + u.Latest + " is available", "You have " + u.Running + ". Choose Update Available in the menu to download it.", "general"}
 }
 
+const liveNoticeText = "Changes now sync as they happen. You can turn this off in Settings ▸ Sync."
+
+// liveSyncNotice: once, on the first run of 2.0 for someone who never chose the live sync
+// setting (it is on by default now): a notification and an Activity line. The marker file
+// says it was given (or wasn't needed).
+func liveSyncNotice(cfg Config, marker string, now time.Time) *note {
+	if exists(marker) {
+		return nil
+	}
+	_ = os.MkdirAll(filepath.Dir(marker), 0o700)
+	if err := os.WriteFile(marker, []byte(now.UTC().Format(time.RFC3339)+"\n"), 0o600); err != nil {
+		return nil // can't remember it: don't risk repeating it
+	}
+	if cfg.LiveSync != nil || !cfg.Configured() || len(cfg.Kept) == 0 {
+		return nil // chosen already, or nothing kept yet (the setting is in plain sight then)
+	}
+	addChanges(cfg, []Change{{Time: now, Name: "OpenCloud Bar", Action: actSummary, Text: liveNoticeText}})
+	return &note{"Changes now sync right away", liveNoticeText, "sync"}
+}
+
 // showNotification is desktopNotify; tests replace it.
 var showNotification = desktopNotify
 
@@ -213,7 +234,13 @@ func (e *Engine) checkNotifications() {
 	e.newConflicts = nil
 	notes := planNotifications(&e.notes, st, merged)
 	on := e.cfg.NotificationsOn() && e.cfgErr == nil
+	cfg, cfgOK := e.cfg, e.cfgErr == nil
 	e.mu.Unlock()
+	if cfgOK {
+		if n := liveSyncNotice(cfg, filepath.Join(appDir(), "notified-live-sync"), time.Now()); n != nil && on {
+			notes = append(notes, *n)
+		}
+	}
 	if !on {
 		return // the update notice waits: it is shown once notifications are on again
 	}

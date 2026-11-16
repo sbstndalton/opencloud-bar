@@ -264,9 +264,9 @@ func applyConfigPatch(p configPatch) (restartPort bool, err error) {
 	}
 	if p.LiveSync != nil {
 		if *p.LiveSync {
-			set("liveSync", true)
+			delete(raw, "liveSync") // on is the default (2.0): no key
 		} else {
-			delete(raw, "liveSync") // off is the default: no key
+			set("liveSync", false)
 		}
 	}
 	for key, v := range map[string]*string{"bwLimitUp": p.BwLimitUp, "bwLimitDown": p.BwLimitDown} {

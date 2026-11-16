@@ -53,7 +53,7 @@ func remoteRig(t *testing.T) (*Engine, *fakeClock, *fakeDav) {
 	e, clk, _ := liveRig(t)
 	d := newFakeDav(t)
 	e.mu.Lock()
-	e.cfg.LiveSync = true // no liveLoop runs: the test drives remoteTick
+	e.cfg.LiveSync = nil // on (no liveLoop runs: the test drives remoteTick)
 	e.cfg.Auth = "oidc"
 	e.cfg.ServerURL = d.srv.URL
 	e.signedOut = false
@@ -308,7 +308,7 @@ func TestRemoteNoChecksWhenOff(t *testing.T) {
 	for _, set := range []func(on bool){
 		func(on bool) { e.cfg.Paused = on },
 		func(on bool) { e.signedOut = on },
-		func(on bool) { e.cfg.LiveSync = !on },
+		func(on bool) { off := !on; e.cfg.LiveSync = &off },
 		func(on bool) {
 			if on {
 				e.cfg.Auth = "rclone"

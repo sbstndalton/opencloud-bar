@@ -5,7 +5,7 @@ A small menu-bar and tray app for [OpenCloud](https://opencloud.eu) on macOS, Wi
 ## Features
 
 - **On-demand drive.** Your whole OpenCloud space appears as a Finder volume on the Mac, a drive letter such as `O:` on Windows, or a folder on Linux. Files download only when you open them. They are cached (20 GB by default) and removed again after a few days unused.
-- **Kept folders.** Pick folders to keep as real local copies, synced both ways every few minutes. Stopping keeping one syncs it a last time, then moves the local copy out of the way. The folder stays in OpenCloud.
+- **Kept folders.** Pick folders to keep as real local copies, synced both ways as soon as something changes on either side (see [Live sync](#live-sync)), with a regular check as a safety net. Stopping keeping one syncs it a last time, then moves the local copy out of the way. The folder stays in OpenCloud.
   - If the two sides drift out of sync, the folder is merged automatically: the newer copy of each file wins, and the older copy is kept in a backup folder (see [Safety](#safety)).
   - Anything that needs you says why in the menu.
 - **Browser sign-in.** You sign in on your server's own page, the same way OpenCloud's desktop client does it (OpenID Connect with PKCE). There is no app token, SSH key or rclone set-up.
@@ -138,9 +138,13 @@ Every sync remembers what it changed: files uploaded, downloaded, deleted on thi
 - Only for kept folders that have synced, and only for files that are in OpenCloud already; with the browser sign-in only. If the server requires a password for links, it says so.
 - The link is made with OpenCloud's libre-graph API (`createLink`, type `view`); only an https link is accepted. Manage or delete links in OpenCloud's web interface.
 
-## Live sync (preview)
+## Live sync
 
-Off by default. Turn on **Sync changes right away (preview)** (Mac: Settings ▸ Sync; Windows, Linux: the settings window, Sync) and OpenCloud Bar syncs a kept folder soon after something changes in it, on this computer or in OpenCloud, without waiting for the interval. The folder shows "Change detected, syncing soon".
+On by default since 2.0. OpenCloud Bar syncs a kept folder soon after something changes in it, on this computer or in OpenCloud, without waiting for the interval. The folder shows "Change detected, syncing soon". To turn it off, uncheck **Sync changes right away** (Mac: Settings ▸ Sync; Windows, Linux: the settings window, Sync; in `config.json`: `"liveSync": false`). Kept folders then sync at the interval only, as before 2.0.
+
+The interval becomes a safety net: a folder that live sync covers (watched on this computer and checked in OpenCloud) is synced by the interval at least every 15 minutes, or at your interval if that is longer; its status says "Checked every 15 min; changes sync right away". Folders that live sync can't cover keep your interval: a folder over the watch limit, any folder with the older rclone sign-in (no server checks), and a folder whose local copy is missing.
+
+Large folders are kept from loading the server: a folder whose last sync took more than 2 minutes syncs after changes at most every 10 minutes, or twice its last sync time if that is longer. Changes meanwhile wait (the folder shows "Change detected, syncing soon") and sync at the next allowed time; its status says "large folder: syncs at most every N min".
 
 Changes on this computer: the local copy of each kept folder is watched.
 

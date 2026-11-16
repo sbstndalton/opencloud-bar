@@ -534,7 +534,7 @@ func (e *Engine) uiState() map[string]any {
 			"notifications":         cfg.NotificationsOn(),
 			"bwLimitUp":             cfg.BwLimitUp,
 			"bwLimitDown":           cfg.BwLimitDown,
-			"liveSync":              cfg.LiveSync,
+			"liveSync":              cfg.LiveOn(),
 			"syncParallel":          cfg.Parallel(),
 		},
 		"defaults": map[string]any{

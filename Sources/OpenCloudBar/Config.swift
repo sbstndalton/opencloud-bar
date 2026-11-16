@@ -141,8 +141,10 @@ struct Config: Codable {
     /// "2M" = 2 MiB/s, a bare number is KiB/s). nil: no limit. Same keys as the Go app.
     var bwLimitUp: String?
     var bwLimitDown: String?
-    /// Live sync (preview): watch kept folders, sync a folder soon after a change here or in OpenCloud. nil: off.
+    /// Live sync: watch kept folders, sync a folder soon after a change here or in OpenCloud. nil: on (2.0); false: off.
     var liveSync: Bool?
+    /// Live sync is on: the default since 2.0; only an explicit false turns it off.
+    var liveOn: Bool { liveSync != false }
     /// Folders synced at once, 1–4; nil: 2.
     var syncParallel: Int?
     var parallel: Int { min(max(syncParallel ?? 2, 1), 4) }
@@ -185,7 +187,7 @@ struct Config: Codable {
         // Either case, as rclone takes it ("512k" is "512K").
         bwLimitUp = try c.decodeIfPresent(String.self, forKey: .bwLimitUp)?.trimmingCharacters(in: .whitespaces).uppercased()
         bwLimitDown = try c.decodeIfPresent(String.self, forKey: .bwLimitDown)?.trimmingCharacters(in: .whitespaces).uppercased()
-        liveSync = (try? c.decodeIfPresent(Bool.self, forKey: .liveSync)) == true ? true : nil
+        liveSync = (try? c.decodeIfPresent(Bool.self, forKey: .liveSync)) ?? nil   // nil: on (2.0)
         syncParallel = (try? c.decodeIfPresent(Int.self, forKey: .syncParallel)).flatMap { $0 }.map { min(max($0, 1), 4) }
     }
 

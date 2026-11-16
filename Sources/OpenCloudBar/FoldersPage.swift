@@ -166,7 +166,7 @@ struct FoldersPage: View {
                             .lineLimit(1)
                             .accessibilityLabel("Change detected, syncing soon")
                     } else {
-                        let text = state(f).text + (state(f) == .ok && model.paced(f) ? " (syncs less often: large folder)" : "")
+                        let text = state(f).text + (state(f) == .ok ? model.scheduleNote(f).map { " (\($0))" } ?? "" : "")
                         Label(text, systemImage: state(f).symbol)
                             .lineLimit(1)
                             .foregroundStyle(model.hasProblem(f) ? Color.orange : Color.primary)

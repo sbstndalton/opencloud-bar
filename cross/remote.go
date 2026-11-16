@@ -112,7 +112,7 @@ func remoteBackoff(fails int) time.Duration {
 
 // remoteOnLocked: server checks may run now. The caller holds e.mu.
 func (e *Engine) remoteOnLocked() bool {
-	return e.cfg.LiveSync && e.cfgErr == nil && !e.quitting && !e.signedOut && !e.cfg.Paused &&
+	return e.cfg.LiveOn() && e.cfgErr == nil && !e.quitting && !e.signedOut && !e.cfg.Paused &&
 		e.cfg.OIDC() && e.cfg.Configured()
 }
 

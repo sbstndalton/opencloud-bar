@@ -496,7 +496,7 @@ func (fw *folderWatch) forget(name string) {
 // liveLoop (reconcileWatches) without it.
 func (e *Engine) updateWatchesLocked() {
 	l := e.live()
-	if e.cfg.LiveSync && e.cfgErr == nil && !e.quitting && !l.running {
+	if e.cfg.LiveOn() && e.cfgErr == nil && !e.quitting && !l.running {
 		l.running = true
 		l.stop = make(chan struct{})
 		go e.liveLoop(l.stop)
@@ -516,7 +516,7 @@ func (e *Engine) reconcileWatches() {
 
 	e.mu.Lock()
 	wants := map[string]watchWant{}
-	if e.cfg.LiveSync && e.cfgErr == nil && !e.quitting {
+	if e.cfg.LiveOn() && e.cfgErr == nil && !e.quitting {
 		for _, f := range e.cfg.Kept {
 			filters := append(append([]string{}, f.ExtraFilters...), e.cfg.CommonFilters...)
 			root := e.cfg.Local(f)
@@ -588,7 +588,7 @@ func (e *Engine) reconcileWatches() {
 		lf = l.folder(key)
 		logText := ""
 		switch {
-		case !e.cfg.LiveSync || e.quitting || lf.watch != nil:
+		case !e.cfg.LiveOn() || e.quitting || lf.watch != nil:
 		case err != nil:
 			logText = e.watchFallbackLocked(key, w, err)
 		default:
@@ -847,7 +847,7 @@ func (e *Engine) liveTick() {
 			continue
 		}
 		settled := now.Sub(lf.last) >= liveQuiet || now.Sub(lf.first) >= liveMaxWait
-		gap := max(liveMinGap, lf.lastDur)
+		gap := liveGap(lf.lastDur)
 		if !settled || (!lf.lastLive.IsZero() && now.Sub(lf.lastLive) < gap) || e.waitingLocked(key) {
 			continue
 		}
@@ -879,7 +879,7 @@ func (e *Engine) liveLoop(stop chan struct{}) {
 		if l.stop != stop {
 			return false
 		}
-		if !e.cfg.LiveSync || e.cfgErr != nil || e.quitting {
+		if !e.cfg.LiveOn() || e.cfgErr != nil || e.quitting {
 			l.running = false
 			return false
 		}

@@ -66,7 +66,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var activeNames: [String: String] = [:]
     /// Files the running sync of each folder has transferred so far (key → count).
     @Published private(set) var activeFiles: [String: Int] = [:]
-    /// Live sync (preview): watches the kept folders (LiveSync.swift).
+    /// Live sync (on by default): watches the kept folders (LiveSync.swift).
     private(set) lazy var live = LiveSync(model: self)
     /// What started each folder's running sync ("timer", "local change", "server change"), for Recent Changes.
     private var runTrigger: [String: String] = [:]
@@ -557,18 +557,30 @@ final class AppModel: ObservableObject {
         dur <= interval / 2 ? interval : max(interval, min(2 * dur, 30 * 60, 3 * interval))
     }
 
-    private func pacedOut(_ f: KeptFolder, now: Date, interval: TimeInterval) -> Bool {
-        guard let rt = runTimes[f.key] else { return false }
-        let p = Self.pacedInterval(rt.dur, interval)
-        return p > interval && now < rt.start.addingTimeInterval(p)
+    /// How often the timer syncs a folder: with live sync covering it, at least every 15
+    /// minutes (the safety net); a large folder less often (pacing).
+    nonisolated static func timerInterval(_ interval: TimeInterval, _ dur: TimeInterval, live: Bool) -> TimeInterval {
+        max(live ? max(interval, 15 * 60) : interval, pacedInterval(dur, interval))
     }
 
-    /// The folder syncs less often on the timer (shown in Kept Folders).
-    func paced(_ f: KeptFolder) -> Bool {
+    private func pacedOut(_ f: KeptFolder, now: Date, interval: TimeInterval) -> Bool {
         guard let rt = runTimes[f.key] else { return false }
-        let iv = TimeInterval(max(60, config.syncIntervalSeconds))
-        return Self.pacedInterval(rt.dur, iv) > iv
+        let p = Self.timerInterval(interval, rt.dur, live: live.covers(f.key))
+        let slack = min(60, interval / 10)   // the timer ticks every interval: a run started just after a tick
+        return p > interval && now.addingTimeInterval(slack) < rt.start.addingTimeInterval(p)
     }
+
+    /// A synced folder's note about how often it syncs (nil for none).
+    func scheduleNote(_ f: KeptFolder) -> String? {
+        guard let rt = runTimes[f.key] else { return nil }
+        let iv = TimeInterval(max(60, config.syncIntervalSeconds))
+        func mins(_ t: TimeInterval) -> Int { Int((t / 60).rounded(.up)) }
+        if config.liveOn, rt.dur > 120 { return "large folder: syncs at most every \(mins(LiveSync.liveGap(rt.dur))) min" }
+        if Self.pacedInterval(rt.dur, iv) > iv { return "syncs less often: large folder" }
+        if live.covers(f.key) { return "Checked every \(mins(Self.timerInterval(iv, rt.dur, live: true))) min; changes sync right away" }
+        return nil
+    }
+
 
     private var isIdle: Bool { lanes == 0 && starting == 0 && !exclOn }
     private func updateBusy() {
@@ -1550,6 +1562,7 @@ final class AppModel: ObservableObject {
         autoMerged = []
         let found = newConflicts
         newConflicts = []
+        if configError == nil, let n = liveSyncNotice() { notes.append(n) }
         guard config.notifications, configError == nil else { return }
         if !found.isEmpty {
             let n = found.reduce(0) { $0 + $1.1 }
@@ -1568,6 +1581,19 @@ final class AppModel: ObservableObject {
             Log.line("notification: \(n.title)")
             notifier.show(n)
         }
+    }
+
+    nonisolated static let liveNoticeText = "Changes now sync as they happen. You can turn this off in Settings ▸ Sync."
+
+    /// Once, on the first run of 2.0 for someone who never chose the live sync setting (it is
+    /// on by default now): a notification (if they are on) and an Activity line.
+    private func liveSyncNotice() -> Note? {
+        let key = "notifiedLiveSync"
+        guard !UserDefaults.standard.bool(forKey: key) else { return nil }
+        UserDefaults.standard.set(true, forKey: key)
+        guard config.liveSync == nil, config.isConfigured, !config.kept.isEmpty else { return nil }
+        addChanges([Change(time: Date(), folder: "", name: "OpenCloud Bar", path: "", action: "summary", text: Self.liveNoticeText)])
+        return Note(title: "Changes now sync right away", body: Self.liveNoticeText, page: .sync)
     }
 
     func showAbout() {

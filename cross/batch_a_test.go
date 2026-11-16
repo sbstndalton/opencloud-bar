@@ -116,7 +116,7 @@ func pausedRig(t *testing.T, extra string) *Engine {
 	testEnv(t)
 	_ = os.MkdirAll(appDir(), 0o700)
 	cfg := `{"davPath":"/remote.php/dav/files/sam","serverURL":"https://cloud.example.com","auth":"rclone",
-	  "useTunnel":false,"mountEnabled":false,"checkForUpdates":false,"futureKey":7` + extra + `}`
+	  "useTunnel":false,"mountEnabled":false,"checkForUpdates":false,"futureKey":7,"liveSync":false` + extra + `}`
 	if err := os.WriteFile(configFile(), []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}

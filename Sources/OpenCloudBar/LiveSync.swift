@@ -3,7 +3,7 @@ import CoreServices
 import Darwin
 import Foundation
 
-/// Live sync (preview, setting liveSync, off by default): each kept folder's copy on this Mac is
+/// Live sync (setting liveSync, on by default since 2.0): each kept folder's copy on this Mac is
 /// watched with FSEvents (file-level events, about 1 s latency), and a change syncs that folder
 /// soon instead of at the next interval. Same rules as the Go app (cross/watch.go), which has
 /// the tests:
@@ -31,7 +31,19 @@ import Foundation
 /// The token goes only to the server (no redirects). Same as cross/remote.go, which has the tests.
 @MainActor
 final class LiveSync {
-    static let quiet: TimeInterval = 5, maxWait: TimeInterval = 60, minGap: TimeInterval = 30, tail: TimeInterval = 2
+    nonisolated static let quiet: TimeInterval = 5, maxWait: TimeInterval = 60, minGap: TimeInterval = 30, tail: TimeInterval = 2
+
+    /// The least time between live-triggered runs: a large folder (last run over 2 minutes)
+    /// gets max(10 minutes, 2 × that run), so constant changes don't keep the server busy.
+    nonisolated static func liveGap(_ lastDur: TimeInterval) -> TimeInterval {
+        lastDur > 120 ? max(600, 2 * lastDur) : max(minGap, lastDur)
+    }
+
+    /// Live sync covers the folder: on, watched here, and checked in OpenCloud (browser
+    /// sign-in). Then the timer is only a safety net (AppModel's timer interval).
+    func covers(_ key: String) -> Bool {
+        model.config.liveOn && model.config.isOIDC && model.configError == nil && folders[key]?.stream != nil
+    }
     nonisolated static let ownCap = 1000, wroteCap = 10_000
     nonisolated static let ignoredNames = [".DS_Store", "Thumbs.db", "desktop.ini", "._*", "*~", "*.tmp",
                                ".sync_*.db", ".sync_*.db-*", "~$*", ".~lock.*#"]
@@ -83,7 +95,7 @@ final class LiveSync {
     func update() {
         let c = model.config
         var want: [String: (URL, [String], String)] = [:]
-        if c.liveSync == true, model.configError == nil {
+        if c.liveOn, model.configError == nil {
             for f in c.kept {
                 let root = c.localURL(f).standardizedFileURL
                 let filters = f.extraFilters + c.commonFilters
@@ -184,7 +196,7 @@ final class LiveSync {
         var due: [String] = []
         for (key, var lf) in folders where lf.pending && !lf.own {
             let settled = now.timeIntervalSince(lf.last) >= Self.quiet || now.timeIntervalSince(lf.first) >= Self.maxWait
-            let gapOK = now.timeIntervalSince(lf.lastLive) >= max(Self.minGap, lf.lastDur)
+            let gapOK = now.timeIntervalSince(lf.lastLive) >= Self.liveGap(lf.lastDur)
             guard settled, gapOK else { continue }
             lf.pending = false
             triggered[key] = lf.server && !lf.local ? "server change" : "local change"
@@ -268,7 +280,7 @@ final class LiveSync {
 
     private var remoteOn: Bool {
         let c = model.config
-        return c.liveSync == true && model.configError == nil && !model.needsSignIn && !c.paused && c.isOIDC
+        return c.liveOn && model.configError == nil && !model.needsSignIn && !c.paused && c.isOIDC
             && !asleep && !model.quitting
     }
 

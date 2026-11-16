@@ -148,8 +148,9 @@ type Config struct {
 	CheckForUpdates *bool `json:"checkForUpdates,omitempty"`
 	// Notifications: desktop notifications for problems, automatic merges and updates (default on).
 	Notifications *bool `json:"notifications,omitempty"`
-	// LiveSync (preview): watch kept folders and sync a folder soon after a change here or in OpenCloud.
-	LiveSync bool `json:"liveSync,omitempty"`
+	// LiveSync: watch kept folders and sync a folder soon after a change here or in
+	// OpenCloud. Absent (nil): on, since 2.0; false: off.
+	LiveSync *bool `json:"liveSync,omitempty"`
 	// SyncParallel: folders synced at once, 1–4 (0: the default, 2).
 	SyncParallel int `json:"syncParallel,omitempty"`
 	// BwLimitUp / BwLimitDown: upload / download limits for syncs and the drive, in rclone's
@@ -219,6 +220,9 @@ func (c Config) AuthMode() string {
 	return authRclone
 }
 func (c Config) OIDC() bool { return c.AuthMode() == authOIDC }
+
+// LiveOn: live sync is on (the default since 2.0; only an explicit false turns it off).
+func (c Config) LiveOn() bool { return c.LiveSync == nil || *c.LiveSync }
 
 // Tunnel reports whether traffic goes through the SSH tunnel to 127.0.0.1:localPort.
 func (c Config) Tunnel() bool {

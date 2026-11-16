@@ -68,16 +68,72 @@ func pacedInterval(lastDur, interval time.Duration) time.Duration {
 
 const pacedText = "syncs less often: large folder"
 
-// pacedOutLocked: the timer skips f this time (pacing). The caller holds e.mu.
+// Live sync makes the timer a safety net (2.0): a folder that live sync covers (watched here,
+// checked in OpenCloud) is synced by the timer at most every safetyInterval.
+const (
+	safetyInterval = 15 * time.Minute
+	largeRun       = 2 * time.Minute  // a run longer than this: a large folder for live sync
+	largeLiveGap   = 10 * time.Minute // its live-triggered runs at least this far apart
+)
+
+// timerInterval: how often the timer syncs a folder. live: live sync covers it.
+func timerInterval(interval, lastDur time.Duration, live bool) time.Duration {
+	base := interval
+	if live {
+		base = max(interval, safetyInterval)
+	}
+	return max(base, pacedInterval(lastDur, interval))
+}
+
+// liveGap: the least time between live-triggered runs of a folder whose last run took lastDur.
+// A large folder (over largeRun) gets max(largeLiveGap, 2 × that run), so constant changes
+// don't keep the server busy.
+func liveGap(lastDur time.Duration) time.Duration {
+	if lastDur > largeRun {
+		return max(largeLiveGap, 2*lastDur)
+	}
+	return max(liveMinGap, lastDur)
+}
+
+// liveCoversLocked: live sync covers f: it is on, the folder is watched here, and OpenCloud
+// is checked for changes (the browser sign-in). Folders that fell back keep the interval.
+func (e *Engine) liveCoversLocked(f KeptFolder) bool {
+	if !e.cfg.LiveOn() || !e.cfg.OIDC() || e.liveS == nil {
+		return false
+	}
+	lf := e.liveS.folders[f.Key()]
+	return lf != nil && lf.watch != nil && lf.fallback == ""
+}
+
+// pacedOutLocked: the timer skips f this time (pacing, live sync's safety net). The caller
+// holds e.mu.
 func (e *Engine) pacedOutLocked(f KeptFolder, now time.Time) bool {
 	rt, ok := e.runTimes[f.Key()]
 	if !ok || rt.start.IsZero() {
 		return false
 	}
 	iv := e.cfg.interval()
-	p := pacedInterval(rt.dur, iv)
-	return p > iv && now.Before(rt.start.Add(p))
+	p := timerInterval(iv, rt.dur, e.liveCoversLocked(f))
+	slack := min(time.Minute, iv/10) // the timer ticks every interval: a run started just after a tick
+	return p > iv && now.Add(slack).Before(rt.start.Add(p))
 }
+
+// scheduleNoteLocked is a synced folder's detail about how often it syncs ("" for none).
+func (e *Engine) scheduleNoteLocked(f KeptFolder, dur time.Duration) string {
+	iv := e.cfg.interval()
+	live := e.liveCoversLocked(f)
+	switch {
+	case e.cfg.LiveOn() && dur > largeRun:
+		return fmt.Sprintf("large folder: syncs at most every %d min", minutes(liveGap(dur)))
+	case pacedInterval(dur, iv) > iv:
+		return pacedText
+	case live:
+		return fmt.Sprintf("Checked every %d min; changes sync right away", minutes(timerInterval(iv, dur, true)))
+	}
+	return ""
+}
+
+func minutes(d time.Duration) int { return int((d + time.Minute - 1) / time.Minute) }
 
 func (e *Engine) busyLocked() { e.syncing = e.lanes > 0 || e.exclOn || e.starting > 0 }
 
@@ -439,10 +495,6 @@ func (e *Engine) noteRunLocked(f KeptFolder, start time.Time, ok bool) {
 	dur := time.Since(start)
 	e.runTimes[f.Key()] = runTimes{start: start, dur: dur}
 	if s := e.status[f.Key()]; s != nil && ok && s.State == StOK {
-		if pacedInterval(dur, e.cfg.interval()) > e.cfg.interval() {
-			s.Detail = pacedText
-		} else if s.Detail == pacedText {
-			s.Detail = ""
-		}
+		s.Detail = e.scheduleNoteLocked(f, dur)
 	}
 }
