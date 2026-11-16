@@ -4,6 +4,11 @@ All notable changes to OpenCloud Bar. The format follows [Keep a Changelog](http
 
 The release workflow copies the section for a tag into that tag's GitHub release, so every version heading must stay in the form `## [X.Y.Z] - date`.
 
+## [2.0.1] - 2026-11-16
+
+### Changed
+- **Mac:** the drive shows in Finder as `opencloud.localhost` instead of `localhost`. The app now runs `rclone serve nfs` on a free port on 127.0.0.1 and mounts it with macOS's `mount_nfs` (the options `rclone nfsmount` used: `port`, `mountport`, `tcp`), since `rclone nfsmount` always mounts `localhost:/`. Eject, Quit (waiting for uploads), ejecting in Finder (stays ejected, uploads finish first), crash recovery and restarts for new drive or bandwidth settings work as before. A dead mount left by an older version is cleared at the mount point as before. The README explains why the drive is a network-style (NFS) drive.
+
 ## [2.0.0] - 2026-11-16
 
 ### What's new in 2.0

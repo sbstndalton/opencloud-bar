@@ -208,6 +208,7 @@ When a file changed on both sides between two syncs, the newer copy keeps its na
 - **Stop Keeping** runs a final sync first, and only moves the local copy if that sync succeeds. It goes to the Trash (Mac and Linux), or to "Removed by OpenCloud Bar" in your user folder (Windows).
 - Eject, Quit and Sign Out wait for files written to the drive to finish uploading. If the app can't tell, they ask first. The Windows installer and uninstaller don't force it either: while files may still be uploading they stop and ask you to try again (or to quit from the tray). Only `opencloud-bar quit --force` / `logout --force` skip the check.
 - Ejecting the drive in Finder keeps it ejected until you choose **Connect Drive**. If rclone crashes, the drive is mounted again automatically.
+- **Why the Mac drive is a network drive:** Finder lists it under Locations as a server named `opencloud.localhost`, and Get Info says "Connected as: NFS". rclone serves your space over NFS on this Mac only (127.0.0.1, a free port each time) and macOS's own NFS client mounts it, so no FUSE or kernel extension is needed. A drive that looks like iCloud Drive needs Apple's File Provider, which only works in apps signed with a paid Apple developer account. Finder names the volume after the mount folder (`OpenCloud-Drive` by default).
 - Kept folder paths are limited to about 90 characters (a limit of rclone bisync's state file names).
 
 ## Where your sign-in is stored
@@ -251,7 +252,7 @@ Only the refresh token is kept. The short-lived access token is cached next to t
 
 | Piece | rclone command |
 |---|---|
-| On-demand drive | `rclone nfsmount` on macOS (built-in NFS client, no FUSE or kernel extension), `rclone mount` on Windows (WinFsp) and Linux (FUSE 3) |
+| On-demand drive | `rclone serve nfs` on 127.0.0.1 mounted with `mount_nfs` as `opencloud.localhost` on macOS (built-in NFS client, no FUSE or kernel extension), `rclone mount` on Windows (WinFsp) and Linux (FUSE 3) |
 | Kept folders | `rclone bisync`, a two-way sync with a state file per folder |
 
 rclone connects to your server (`serverURL`) over HTTPS. To authenticate, it runs the app's own token command (`opencloud-bar token`, or `OpenCloudBar --token` on the Mac). That command prints a cached access token, refreshing it from the stored refresh token when it is nearly out of date.

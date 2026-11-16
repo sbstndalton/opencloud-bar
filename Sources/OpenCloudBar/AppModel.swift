@@ -22,7 +22,7 @@ struct FolderStatus {
     var quiet = false
 }
 
-/// Owns the three moving parts: the SSH tunnel, the on-demand drive (rclone nfsmount)
+/// Owns the three moving parts: the SSH tunnel, the on-demand drive (rclone serve nfs + mount_nfs)
 /// and the two-way sync of kept folders (rclone bisync). All state lives on the main actor,
 /// and only one bisync runs at a time.
 @MainActor
@@ -107,6 +107,9 @@ final class AppModel: ObservableObject {
     private var mountRestartAt = Date.distantPast
     private var mountBackoff: TimeInterval = 5
     private var unmountRequested = false
+    /// The drive's NFS port (rclone serve nfs on 127.0.0.1) and whether we mounted it.
+    private var drivePort = 0
+    private var driveMountedByUs = false
     private var nextSyncAt = Date()
     private var ticker: Timer?
     private(set) var quitting = false
@@ -272,6 +275,7 @@ final class AppModel: ObservableObject {
             checkAuth()
         }
         driveMounted = Shell.isMounted(config.mountURL)
+        checkFinderEject()
         if config.tunnel {
             let portOpen = Shell.portOpen(config.localPort)
             let ours = FileManager.default.fileExists(atPath: controlPath)
@@ -358,10 +362,19 @@ final class AppModel: ObservableObject {
 
     // MARK: - On-demand drive
 
+    // The drive is `rclone serve nfs` on a free 127.0.0.1 port, mounted with mount_nfs under the
+    // host name opencloud.localhost (it resolves to 127.0.0.1 by itself): Finder shows the
+    // name it was mounted with, and `rclone nfsmount` always says "localhost". The mount
+    // options are the ones rclone nfsmount uses (port, mountport, tcp). Unlike nfsmount, the
+    // server doesn't stop when the volume is ejected in Finder: tick() notices and stops it
+    // (after any uploads).
+    static let driveHost = "opencloud.localhost"
+
     private func startMount() {
         let fm = FileManager.default
         let mnt = config.mountURL
-        // A previous rclone crashed and left a dead mount behind: clear it first.
+        // A previous rclone crashed and left a dead mount behind (opencloud.localhost:/, or
+        // localhost:/ from rclone nfsmount before 2.0.1): clear it first.
         if Shell.isMounted(mnt) {
             forceUnmount()
             mountRestartAt = Date().addingTimeInterval(10)
@@ -369,8 +382,13 @@ final class AppModel: ObservableObject {
         }
         try? fm.createDirectory(at: mnt, withIntermediateDirectories: true)
         try? fm.createDirectory(at: config.cacheURL, withIntermediateDirectories: true)
-        let args = ["nfsmount", config.remoteSpec, mnt.path,
-                    "--volname", config.volumeName,
+        guard let port = Shell.freePort() else {
+            lastMessage = "Could not find a free local port for the drive"
+            mountRestartAt = Date().addingTimeInterval(mountBackoff)
+            return
+        }
+        drivePort = port
+        let args = ["serve", "nfs", config.remoteSpec, "--addr", "127.0.0.1:\(port)",
                     "--vfs-cache-mode", "full", "--cache-dir", config.cacheURL.path,
                     "--vfs-cache-max-size", config.cacheMaxSize, "--vfs-cache-max-age", config.cacheMaxAge,
                     "--dir-cache-time", "30s", "--vfs-read-chunk-size", "16M", "--buffer-size", "16M",
@@ -379,39 +397,87 @@ final class AppModel: ObservableObject {
                     "--rc", "--rc-addr", "127.0.0.1:\(config.rcPort)",
                     "--log-level", "NOTICE"] + config.bwLimitArgs
         unmountRequested = false
+        driveMountedByUs = false
         mountStartedAt = Date()
         do {
             // The rc login goes in the environment, not the command line.
-            mount = try Shell.launch(config.rclone, args, log: Log.url("drive.log"),
+            let p = try Shell.launch(config.rclone, args, log: Log.url("drive.log"),
                                      extraEnv: ["RCLONE_RC_USER": rcUser, "RCLONE_RC_PASS": rcPass]) { [weak self] code in
                 self?.mountExited(code)
             }
-            Log.line("drive mount started")
+            mount = p
+            Log.line("drive server started on 127.0.0.1:\(port)")
+            Task { await self.mountServed(p, port: port, at: mnt) }
         } catch {
             lastMessage = "Could not start rclone: \(error.localizedDescription)"
             driveWanted = false
         }
     }
 
+    /// Mounts the served drive once its port answers (up to 20 s); else stops the server, and
+    /// tick() tries again after the backoff.
+    private func mountServed(_ p: Process, port: Int, at mnt: URL) async {
+        for _ in 0..<80 where p.isRunning && !Shell.portOpen(port) {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        guard p.isRunning, mount === p, !quitting else { return }
+        let r = await Shell.run("/sbin/mount_nfs", ["-o", "port=\(port),mountport=\(port),tcp",
+                                                    "\(Self.driveHost):/", mnt.path], timeout: 30)
+        guard mount === p else { return }
+        if r.status == 0, Shell.isMounted(mnt) {
+            driveMountedByUs = true
+            driveMounted = true
+            Log.line("drive mounted at \(mnt.path)")
+        } else {
+            Log.line("drive mount failed (\(r.status)): \(r.output.trimmingCharacters(in: .whitespacesAndNewlines))")
+            p.terminate()   // mountExited retries with the backoff
+        }
+    }
+
+    /// The volume was ejected in Finder (the server keeps running then): stop the server once
+    /// nothing is left to upload, and keep the drive off until Connect.
+    private func checkFinderEject() {
+        guard let p = mount, p.isRunning, driveMountedByUs, !unmountRequested, !quitting,
+              !Shell.isMounted(config.mountURL) else { return }
+        driveMountedByUs = false
+        unmountRequested = true
+        driveWanted = false
+        mountBackoff = 5
+        Log.line("drive ejected in Finder; stays off until Connect")
+        Task {
+            for _ in 0..<300 {   // up to 10 minutes for uploads started before the eject
+                guard let n = await pendingUploads(), n > 0 else { break }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+            if p.isRunning { p.terminate() }
+        }
+    }
+
+    /// Unmounts the drive and stops its server. False if the volume is in use.
+    private func unmountDrive() async -> Bool {
+        unmountRequested = true
+        let r = await Shell.run("/usr/sbin/diskutil", ["unmount", config.mountURL.path], timeout: 30)
+        guard r.status == 0 else { unmountRequested = false; return false }
+        driveMountedByUs = false
+        driveMounted = false
+        if let m = mount, m.isRunning { m.terminate() }
+        return true
+    }
+
     private func mountExited(_ code: Int32) {
         mount = nil
+        driveMountedByUs = false
         let stillMounted = Shell.isMounted(config.mountURL)
         driveMounted = stillMounted
         if quitting { return }
         if unmountRequested {
-            Log.line("drive ejected from the menu")
-            return
-        }
-        if !stillMounted && code == 0 {
-            // rclone exits cleanly when the volume is ejected in Finder.
-            driveWanted = false
-            mountBackoff = 5
-            Log.line("drive ejected in Finder; stays off until Connect")
+            if stillMounted { forceUnmount() }
+            Log.line("drive stopped")
             return
         }
         // crashed or failed to start: clear any dead mount and retry with backoff
         if Date().timeIntervalSince(mountStartedAt) > 300 { mountBackoff = 5 }
-        Log.line("drive mount exited (\(code)); retrying in \(Int(mountBackoff)) s")
+        Log.line("drive server exited (\(code)); retrying in \(Int(mountBackoff)) s")
         mountRestartAt = Date().addingTimeInterval(mountBackoff)
         mountBackoff = min(mountBackoff * 2, 300)
         if stillMounted { forceUnmount() }
@@ -458,13 +524,10 @@ final class AppModel: ObservableObject {
                 alert("Still uploading", "\(n) file(s) written to the drive haven't finished uploading. Try again in a moment.")
                 return
             }
-            let path = config.mountURL.path
-            unmountRequested = true
-            let r = await Shell.run("/usr/sbin/diskutil", ["unmount", path], timeout: 30)
-            if r.status == 0 {
+            if await unmountDrive() {
                 driveWanted = false
+                Log.line("drive ejected from the menu")
             } else {
-                unmountRequested = false
                 alert("The drive is in use", "Close any files or Finder windows using the OpenCloud drive, then try again.")
             }
         }
@@ -1753,13 +1816,10 @@ final class AppModel: ObservableObject {
                 lastMessage = "Drive settings apply the next time the drive reconnects (\(n) file(s) still uploading)"
                 return
             }
-            unmountRequested = true
-            let r = await Shell.run("/usr/sbin/diskutil", ["unmount", config.mountURL.path], timeout: 30)
-            if r.status == 0 {
+            if await unmountDrive() {
                 mountRestartAt = .distantPast
                 lastMessage = nil
             } else {
-                unmountRequested = false
                 lastMessage = "Drive settings apply the next time the drive reconnects (it is in use)"
             }
         }
@@ -1848,7 +1908,7 @@ final class AppModel: ObservableObject {
         unmountRequested = true
         Task {
             if let m, m.isRunning {
-                _ = await Shell.run("/usr/sbin/diskutil", ["unmount", m.arguments?[2] ?? ""], timeout: 30)
+                _ = await Shell.run("/usr/sbin/diskutil", ["unmount", config.mountURL.path], timeout: 30)
                 m.terminate()
             }
             await stopTunnel()
@@ -1884,7 +1944,9 @@ final class AppModel: ObservableObject {
                 if p.isRunning { kill(p.processIdentifier, SIGKILL) }
             }
             if let m = mount {
+                unmountRequested = true
                 _ = await Shell.run("/usr/sbin/diskutil", ["unmount", config.mountURL.path], timeout: 20)
+                if m.isRunning { m.terminate() }   // rclone serve nfs doesn't stop by itself on unmount
                 for _ in 0..<50 where m.isRunning { try? await Task.sleep(nanoseconds: 100_000_000) }
                 if m.isRunning {
                     m.terminate()
