@@ -125,6 +125,7 @@ type Engine struct {
 	holdRuns      bool           // tests: queued folders wait
 	startingKeys  map[string]int // folders of batches waiting on the memory check
 	runTimes      map[string]runTimes
+	noteSet       map[string]string // the schedule note last put in each folder's Detail
 	// What the running syncs are doing, for "Syncing “X” (2 of 3) · 12 files…".
 	active            map[string]*activeRun
 	batchN, batchDone int

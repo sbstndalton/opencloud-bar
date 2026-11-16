@@ -119,21 +119,27 @@ func (e *Engine) pacedOutLocked(f KeptFolder, now time.Time) bool {
 }
 
 // scheduleNoteLocked is a synced folder's detail about how often it syncs ("" for none).
+//   - covered by live sync: "Checked every N min; changes sync right away", or for a large
+//     folder "Checked every N min; changes sync at most every M min (large folder)";
+//   - live sync on but not covering it (fell back): "Synced every N min";
+//   - live sync off: pacedText for a paced folder.
 func (e *Engine) scheduleNoteLocked(f KeptFolder, dur time.Duration) string {
 	iv := e.cfg.interval()
-	live := e.liveCoversLocked(f)
 	switch {
-	case e.cfg.LiveOn() && dur > largeRun:
-		return fmt.Sprintf("large folder: syncs at most every %d min", minutes(liveGap(dur)))
+	case e.liveCoversLocked(f) && dur > largeRun:
+		return fmt.Sprintf("Checked every %d min; changes sync at most every %d min (large folder)",
+			minutes(timerInterval(iv, dur, true)), minutes(liveGap(dur)))
+	case e.liveCoversLocked(f):
+		return fmt.Sprintf("Checked every %d min; changes sync right away", minutes(timerInterval(iv, dur, true)))
+	case e.cfg.LiveOn():
+		return fmt.Sprintf("Synced every %d min", minutes(timerInterval(iv, dur, false)))
 	case pacedInterval(dur, iv) > iv:
 		return pacedText
-	case live:
-		return fmt.Sprintf("Checked every %d min; changes sync right away", minutes(timerInterval(iv, dur, true)))
 	}
 	return ""
 }
 
-func minutes(d time.Duration) int { return int((d + time.Minute - 1) / time.Minute) }
+func minutes(d time.Duration) int { return max(1, int((d+30*time.Second)/time.Minute)) }
 
 func (e *Engine) busyLocked() { e.syncing = e.lanes > 0 || e.exclOn || e.starting > 0 }
 
@@ -495,6 +501,13 @@ func (e *Engine) noteRunLocked(f KeptFolder, start time.Time, ok bool) {
 	dur := time.Since(start)
 	e.runTimes[f.Key()] = runTimes{start: start, dur: dur}
 	if s := e.status[f.Key()]; s != nil && ok && s.State == StOK {
-		s.Detail = e.scheduleNoteLocked(f, dur)
+		// Only our own note is replaced: another detail set on success stays.
+		if e.noteSet == nil {
+			e.noteSet = map[string]string{}
+		}
+		if s.Detail == "" || s.Detail == e.noteSet[f.Key()] {
+			s.Detail = e.scheduleNoteLocked(f, dur)
+			e.noteSet[f.Key()] = s.Detail
+		}
 	}
 }

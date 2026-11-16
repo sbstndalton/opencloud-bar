@@ -574,10 +574,14 @@ final class AppModel: ObservableObject {
     func scheduleNote(_ f: KeptFolder) -> String? {
         guard let rt = runTimes[f.key] else { return nil }
         let iv = TimeInterval(max(60, config.syncIntervalSeconds))
-        func mins(_ t: TimeInterval) -> Int { Int((t / 60).rounded(.up)) }
-        if config.liveOn, rt.dur > 120 { return "large folder: syncs at most every \(mins(LiveSync.liveGap(rt.dur))) min" }
+        func mins(_ t: TimeInterval) -> Int { max(1, Int((t / 60).rounded())) }
+        if live.covers(f.key) {   // live sync covers it: the timer is a safety net
+            let checked = "Checked every \(mins(Self.timerInterval(iv, rt.dur, live: true))) min; "
+            return checked + (rt.dur > 120 ? "changes sync at most every \(mins(LiveSync.liveGap(rt.dur))) min (large folder)"
+                                           : "changes sync right away")
+        }
+        if config.liveOn { return "Synced every \(mins(Self.timerInterval(iv, rt.dur, live: false))) min" }   // fell back
         if Self.pacedInterval(rt.dur, iv) > iv { return "syncs less often: large folder" }
-        if live.covers(f.key) { return "Checked every \(mins(Self.timerInterval(iv, rt.dur, live: true))) min; changes sync right away" }
         return nil
     }
 
@@ -1585,14 +1589,17 @@ final class AppModel: ObservableObject {
 
     nonisolated static let liveNoticeText = "Changes now sync as they happen. You can turn this off in Settings ▸ Sync."
 
-    /// Once, on the first run of 2.0 for someone who never chose the live sync setting (it is
-    /// on by default now): a notification (if they are on) and an Activity line.
+    /// Once, for someone who never chose the live sync setting (on by default since 2.0): an
+    /// Activity line, and a notification when they are on (the caller shows it). Nothing kept
+    /// yet: it waits for the first kept folder. Marked as given only then (the Activity line
+    /// counts as given when notifications are off), or when the setting was chosen.
     private func liveSyncNotice() -> Note? {
         let key = "notifiedLiveSync"
         guard !UserDefaults.standard.bool(forKey: key) else { return nil }
-        UserDefaults.standard.set(true, forKey: key)
-        guard config.liveSync == nil, config.isConfigured, !config.kept.isEmpty else { return nil }
+        if config.liveSync != nil { UserDefaults.standard.set(true, forKey: key); return nil }   // chosen
+        guard config.isConfigured, !config.kept.isEmpty else { return nil }   // later
         addChanges([Change(time: Date(), folder: "", name: "OpenCloud Bar", path: "", action: "summary", text: Self.liveNoticeText)])
+        UserDefaults.standard.set(true, forKey: key)
         return Note(title: "Changes now sync right away", body: Self.liveNoticeText, page: .sync)
     }
 

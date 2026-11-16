@@ -203,19 +203,28 @@ func updateNote(u UpdateState, file string) *note {
 
 const liveNoticeText = "Changes now sync as they happen. You can turn this off in Settings ▸ Sync."
 
-// liveSyncNotice: once, on the first run of 2.0 for someone who never chose the live sync
-// setting (it is on by default now): a notification and an Activity line. The marker file
-// says it was given (or wasn't needed).
+// liveSyncNotice: once, for someone who never chose the live sync setting (on by default
+// since 2.0): an Activity line, and a notification when they are on (the caller shows it).
+// Nothing kept yet: it waits for the first kept folder. The marker file is written only once
+// the notice was given (the Activity line counts as given when notifications are off), or
+// when the setting was chosen and no notice is needed.
 func liveSyncNotice(cfg Config, marker string, now time.Time) *note {
 	if exists(marker) {
 		return nil
 	}
-	_ = os.MkdirAll(filepath.Dir(marker), 0o700)
-	if err := os.WriteFile(marker, []byte(now.UTC().Format(time.RFC3339)+"\n"), 0o600); err != nil {
-		return nil // can't remember it: don't risk repeating it
+	mark := func() bool {
+		_ = os.MkdirAll(filepath.Dir(marker), 0o700)
+		return os.WriteFile(marker, []byte(now.UTC().Format(time.RFC3339)+"\n"), 0o600) == nil
 	}
-	if cfg.LiveSync != nil || !cfg.Configured() || len(cfg.Kept) == 0 {
-		return nil // chosen already, or nothing kept yet (the setting is in plain sight then)
+	if cfg.LiveSync != nil {
+		mark() // chosen: nothing to tell
+		return nil
+	}
+	if !cfg.Configured() || len(cfg.Kept) == 0 {
+		return nil // later, when a folder is kept
+	}
+	if !mark() {
+		return nil // can't remember it: don't risk repeating it every tick
 	}
 	addChanges(cfg, []Change{{Time: now, Name: "OpenCloud Bar", Action: actSummary, Text: liveNoticeText}})
 	return &note{"Changes now sync right away", liveNoticeText, "sync"}
@@ -238,7 +247,7 @@ func (e *Engine) checkNotifications() {
 	e.mu.Unlock()
 	if cfgOK {
 		if n := liveSyncNotice(cfg, filepath.Join(appDir(), "notified-live-sync"), time.Now()); n != nil && on {
-			notes = append(notes, *n)
+			notes = append(notes, *n) // with notifications off, the Activity line is the notice
 		}
 	}
 	if !on {

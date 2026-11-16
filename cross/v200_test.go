@@ -115,10 +115,19 @@ func TestSafetyNetTimer(t *testing.T) {
 	if n := e.scheduleNoteLocked(f, 30*time.Second); n != "Checked every 15 min; changes sync right away" {
 		t.Errorf("note %q", n)
 	}
+	if n := e.scheduleNoteLocked(f, 4*time.Minute); n != "Checked every 15 min; changes sync at most every 10 min (large folder)" {
+		t.Errorf("large covered note %q", n)
+	}
 	e.runTimes["Docs"] = runTimes{start: time.Now().Add(-6 * time.Minute), dur: 30 * time.Second}
 	lf.fallback = "watch limit"
-	if e.pacedOutLocked(f, time.Now()) || e.scheduleNoteLocked(f, 30*time.Second) != "" {
+	if e.pacedOutLocked(f, time.Now()) {
 		t.Error("fallen-back folder: not on the interval")
+	}
+	if n := e.scheduleNoteLocked(f, 30*time.Second); n != "Synced every 5 min" {
+		t.Errorf("fallback note %q", n)
+	}
+	if n := e.scheduleNoteLocked(f, 4*time.Minute); n != "Synced every 8 min" {
+		t.Errorf("fallback large note %q", n)
 	}
 	lf.fallback = ""
 	e.cfg.Auth = "rclone" // no server checks
@@ -130,8 +139,18 @@ func TestSafetyNetTimer(t *testing.T) {
 	if e.pacedOutLocked(f, time.Now()) {
 		t.Error("unwatched folder: not on the interval")
 	}
-	if n := e.scheduleNoteLocked(f, 4*time.Minute); n != "large folder: syncs at most every 10 min" {
-		t.Errorf("large note %q", n)
+	// Another detail set on success isn't overwritten; our own note is.
+	e.status["Docs"].State, e.status["Docs"].Detail = StOK, "conflicts found"
+	e.noteRunLocked(f, time.Now().Add(-time.Minute), true)
+	if d := e.status["Docs"].Detail; d != "conflicts found" {
+		t.Errorf("detail clobbered: %q", d)
+	}
+	e.status["Docs"].Detail = ""
+	e.noteRunLocked(f, time.Now().Add(-time.Minute), true)
+	first := e.status["Docs"].Detail
+	e.noteRunLocked(f, time.Now().Add(-4*time.Minute), true)
+	if d := e.status["Docs"].Detail; first == "" || d == first || d != "Synced every 8 min" {
+		t.Errorf("own note not replaced: %q then %q", first, d)
 	}
 }
 
@@ -186,9 +205,19 @@ func TestLiveSyncNoticeOnce(t *testing.T) {
 	if liveSyncNotice(cfg, filepath.Join(dir, "m2"), time.Now()) != nil {
 		t.Error("notice for someone who chose")
 	}
+	if !exists(filepath.Join(dir, "m2")) {
+		t.Error("a chosen setting not remembered")
+	}
+	// Nothing kept: it waits (no marker), and comes with the first kept folder.
 	cfg.LiveSync = nil
+	kept := cfg.Kept
 	cfg.Kept = nil
-	if liveSyncNotice(cfg, filepath.Join(dir, "m3"), time.Now()) != nil {
-		t.Error("notice with nothing kept")
+	m3 := filepath.Join(dir, "m3")
+	if liveSyncNotice(cfg, m3, time.Now()) != nil || exists(m3) {
+		t.Error("notice (or marker) with nothing kept")
+	}
+	cfg.Kept = kept
+	if liveSyncNotice(cfg, m3, time.Now()) == nil || !exists(m3) {
+		t.Error("no notice after the first folder was kept")
 	}
 }

@@ -321,7 +321,7 @@ struct SyncPage: View {
                     set: { on in Task { error = await model.updateConfig { $0.liveSync = on ? nil : false } } }))
                     .accessibilityLabel("Sync changes right away")
                     .disabled(model.configError != nil || !model.config.isConfigured)
-                Text("A kept folder syncs about 5 seconds after changes in it on this Mac stop (up to a minute while changes continue), and within about 30 seconds of a change in it in OpenCloud (with the browser sign-in). The interval is then a safety net: at least every 15 minutes. Large folders sync at most every 10 minutes.")
+                Text("A kept folder syncs about 5 seconds after changes in it on this Mac stop (up to a minute while changes continue, and at least 30 seconds after its last such sync), and within about 30 seconds of a change in it in OpenCloud (with the browser sign-in). The interval is then a safety net, every 15 minutes or your interval if longer. Large folders sync after changes at most every 10 minutes.")
                     .font(.caption).foregroundStyle(.secondary)
                 ChoicePicker(title: "Sync", choices: Self.intervals, current: model.config.syncIntervalSeconds,
                              customLabel: { "Every \($0) seconds" }) { v in

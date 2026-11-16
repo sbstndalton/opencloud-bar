@@ -14,12 +14,14 @@ Kept folders now sync as things happen, on both sides, and the interval is a saf
 - **Recent Changes and Activity** (1.4, 1.7) say what each sync changed and what started it.
 
 ### Upgrade note
-- **Behaviour change:** live sync is on unless you turned it off. If you never chose the setting, a notification (and an Activity line) says so once: "Changes now sync as they happen. You can turn this off in Settings ▸ Sync." To keep the old behaviour, uncheck **Sync changes right away** in Settings ▸ Sync, or set `"liveSync": false` in `config.json`. An explicit choice made in 1.5–1.7 is kept.
+- **Behaviour change:** live sync is on unless you turned it off. If you never chose the setting, a notification (and an Activity line) says so once: "Changes now sync as they happen. You can turn this off in Settings ▸ Sync." To keep the old behaviour, uncheck **Sync changes right away** in Settings ▸ Sync, or set `"liveSync": false` in `config.json`. If you turned the preview off in 1.5–1.7, 2.0 turns it on again (1.x didn't record that choice: off was the absent key); turn it off in Settings ▸ Sync and it stays off. Turning it on in 1.5–1.7 is kept.
+- **Interval floor:** folders live sync covers are synced by the interval every 15 minutes, or at your interval if longer (large folders can be stretched up to 30 minutes or 3 × the interval). Folders it can't cover keep your interval.
 
 ### Changed
 - Live sync is on when `liveSync` is absent (new installs and existing settings); only `"liveSync": false` turns it off, and turning it on again removes the key. The setting is named **Sync changes right away** (no longer a preview).
-- With live sync covering a folder (watched here and checked in OpenCloud), the interval syncs it at least every 15 minutes (or at the interval if longer): "Checked every 15 min; changes sync right away". Folders it can't cover (watch limit, the rclone sign-in, a missing local copy) keep the interval.
-- A folder whose last sync took more than 2 minutes syncs after changes at most every max(10 minutes, 2 × that sync); changes wait and sync then. Its status says "large folder: syncs at most every N min".
+- With live sync covering a folder (watched here and checked in OpenCloud), the interval syncs it every 15 minutes (or at the interval if longer; a large folder up to 30 minutes or 3 × the interval): "Checked every 15 min; changes sync right away". Folders it can't cover (watch limit, the rclone sign-in, a missing local copy) keep the interval and say "Synced every N min".
+- A covered folder whose last sync took more than 2 minutes syncs after changes at most every max(10 minutes, 2 × that sync); changes wait and sync then. Its status says "Checked every N min; changes sync at most every M min (large folder)".
+- The one-time notice waits until a folder is kept, and is marked as given only once it was: as a notification, or, with notifications off, as the Activity line.
 
 ## [1.7.1] - 2026-11-16
 
