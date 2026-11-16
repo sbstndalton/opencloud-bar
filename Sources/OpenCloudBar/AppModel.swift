@@ -90,6 +90,8 @@ final class AppModel: ObservableObject {
     private var timerOn = false, timerStarting = false
     private var exclQ: [@MainActor () async -> Void] = []
     private var exclOn = false
+    /// An exclusive action (Repair, Stop Keeping, conflict actions…) runs.
+    var exclusiveRunning: Bool { exclOn }
     private var batchN = 0, batchDone = 0
     /// Each folder's last run (pacing: a large folder syncs less often on the timer).
     private var runTimes: [String: (start: Date, dur: TimeInterval)] = [:]

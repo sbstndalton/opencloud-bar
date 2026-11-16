@@ -266,6 +266,8 @@ struct FoldersPage: View {
             .disabled(model.needsSignIn || model.folderBusy(f))
         Button("Copy Public Link…") { model.shareFrom(f) }.accessibilityLabel("Copy Public Link…")
             .disabled(model.needsSignIn || !model.config.isOIDC)
+        Button("File History…") { model.fileHistory(from: f) }.accessibilityLabel("File History…")
+            .disabled(model.needsSignIn || !model.config.isOIDC)
         Divider()
         Button("Stop Keeping on This Mac…") { model.stopKeeping(f) }.accessibilityLabel("Stop Keeping on This Mac…")
     }

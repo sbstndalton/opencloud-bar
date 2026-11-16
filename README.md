@@ -12,6 +12,7 @@ A small menu-bar and tray app for [OpenCloud](https://opencloud.eu) on macOS, Wi
 - **Pause and resume** syncing. The drive keeps working while paused.
 - **Notifications** when a folder needs attention, was merged automatically, when you are signed out, and when an update is available. You get one per change, never repeated.
 - **Update checks** once a day (they can be turned off), plus **Check for Updates…**. A new version is announced, not installed: the app opens the release page and you download it yourself.
+- **File history and deleted files.** See and restore earlier versions of a file in a kept folder, and restore files deleted in OpenCloud back into your kept folders (see [File history](#file-history) and [Deleted files](#deleted-files)).
 - **Settings in a window:** native on the Mac, a small app window on Windows and Linux. It covers kept folders, account and storage, sync, drive, general settings, logs and About. Live activity shows in the menu, for example "Syncing “School” (2 of 3) · 12 files…".
 
 ## Download
@@ -55,6 +56,7 @@ The menu stays short however many folders you keep. It has:
 - the status line;
 - the drive items;
 - a **Kept Folders (N)** submenu;
+- on the Mac, **Copy Public Link…**, **File History…** and **Deleted Files…**;
 - **Sync Now**, **Pause Syncing** and **Settings…**;
 - **Check for Updates…**, **About OpenCloud Bar** and **Quit**.
 
@@ -66,8 +68,9 @@ On the Mac, **Settings…** (⌘,) opens these pages. Windows and Linux have the
 
 | Page | What it does |
 |---|---|
-| **Kept Folders** | A table of your kept folders: name, location on this Mac, status and when each last synced (this survives restarts). Per folder: Open in Finder, Open in Browser, Sync Now, Repair, Allow Large Deletion (when needed) and Stop Keeping. Select a folder to see its paths, its last error and its own exclude rules. |
+| **Kept Folders** | A table of your kept folders: name, location on this Mac, status and when each last synced (this survives restarts). Per folder: Open in Finder, Open in Browser, Sync Now, Repair, Allow Large Deletion (when needed), Choose Subfolders, Copy Public Link, File History and Stop Keeping. Select a folder to see its paths, its last error and its own exclude rules. |
 | **Conflicts** | Conflict copies (`name.conflict1`) in your kept folders, with Reveal, Keep This Version and Discard. See [Conflicts](#conflicts). |
+| **Deleted Files** | OpenCloud's trash for your personal space and the spaces you keep folders from, with **Restore**. See [Deleted files](#deleted-files). |
 | **Account** | Server address and version, your name, email and username, and a storage bar with used and total space. **Open OpenCloud in Browser**, **Refresh**, and **Sign Out** (or **Sign In…**). It reads these from the server with your sign-in; nothing is shown if you're signed out. |
 | **Sync** | How often kept folders sync (1, 5, 15, 30 or 60 minutes), the exclude rules for all folders (with **Restore Defaults**), where kept folders live on this Mac (changeable only while no folder is kept), upload and download limits, and the file names the server refuses. |
 | **OpenCloud Drive** | Connect or eject the drive, its mount location and volume name, the cache size limit and age, and live cache use and pending uploads while it is connected. |
@@ -137,6 +140,27 @@ Every sync remembers what it changed: files uploaded, downloaded, deleted on thi
 - Choose when the link expires (never, 1, 7 or 30 days) and, if you like, type a password for it. The password goes to OpenCloud with the request and isn't stored or logged by OpenCloud Bar.
 - Only for kept folders that have synced, and only for files that are in OpenCloud already; with the browser sign-in only. If the server requires a password for links, it says so.
 - The link is made with OpenCloud's libre-graph API (`createLink`, type `view`); only an https link is accepted. Manage or delete links in OpenCloud's web interface.
+
+## File history
+
+OpenCloud keeps earlier versions of a file each time it changes. You can see them and bring one back:
+
+- **Mac:** the menu's **File History…** (choose any file in your kept folders), or a kept folder's **File History…** in Settings ▸ Kept Folders. Choose the version (date and size) and **Restore**.
+- **Windows, Linux:** select the folder in the settings window, Folders, then **File History…**, choose the file, and **Restore** a version from the list (date and size).
+- Restoring makes that version the current file in OpenCloud; the file it replaces becomes one of OpenCloud's versions. Before that, the copy on this computer is copied to the local backups (`backups/<stateName>/<date and time>/` in the sync state folder, removed after 30 days). If that copy can't be made, nothing is restored. The folder then syncs, which brings the restored version here; while syncing is paused, it comes to this computer when you resume syncing.
+- A restore is refused while that folder is syncing, and when the copy on this computer differs from the current file in OpenCloud (size, or modification time by more than 2 seconds), for example after an edit that hasn't synced yet: "This file has changes that haven't synced yet. Sync first, then restore."
+- Only files in kept folders that have synced, with the browser sign-in. The app asks the file's id with a `PROPFIND` (`oc:fileid`), lists `/dav/meta/<file id>/v` (`PROPFIND`, `Depth: 1`) and restores with `COPY` of the version, as OpenCloud's web interface does. The sign-in token is only sent to your server; redirects aren't followed.
+
+## Deleted files
+
+Files and folders deleted in OpenCloud (in the browser, on another computer, or by a sync of a kept folder) go to OpenCloud's trash. **Deleted Files** lists that trash for your personal space and for each space you keep folders from, newest first, with where each item was, when it was deleted and its size.
+
+- **Mac:** Settings ▸ **Deleted Files** (also the menu's **Deleted Files…**). **Windows, Linux:** the settings window's **Deleted Files** section.
+- By default only items that were inside a kept folder are listed; **Show all** lists everything in those trashes. Items outside your kept folders can only be restored in OpenCloud's web interface.
+- **Restore** puts the item back where it was and then syncs that kept folder, so it comes back on this computer too (while syncing is paused, when you resume syncing). If something is at that place again in OpenCloud, nothing is restored or overwritten: rename or move that first. If something is still at that place on this computer (the deletion hasn't synced here yet), wait for the folder to sync, then restore (while paused, resume syncing first). If the folder it was in is gone too, restore that folder first.
+- The app never deletes anything from the trash for good; empty it in OpenCloud's web interface. OpenCloud may also clear old items from the trash on its own.
+- If the server doesn't say where your personal space is, the page says so instead of showing an empty trash.
+- With the browser sign-in only. The app reads your spaces from `/graph/v1.0/me/drives` (for the personal space only the path of its WebDAV address is used, on your server), lists each trash with a `PROPFIND` of `/dav/spaces/trash-bin/<space id>` and restores with a `MOVE` to the original place (`Overwrite: F`). The sign-in token is only sent to your server; redirects aren't followed.
 
 ## Live sync
 

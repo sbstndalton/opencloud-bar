@@ -2,13 +2,14 @@ import AppKit
 import SwiftUI
 
 enum SettingsPage: String, CaseIterable, Identifiable {
-    case folders, activity, conflicts, account, sync, drive, general, logs
+    case folders, activity, conflicts, trash, account, sync, drive, general, logs
     var id: String { rawValue }
     var title: String {
         switch self {
         case .folders: return "Kept Folders"
         case .activity: return "Activity"
         case .conflicts: return "Conflicts"
+        case .trash: return "Deleted Files"
         case .account: return "Account"
         case .sync: return "Sync"
         case .drive: return "OpenCloud Drive"
@@ -21,6 +22,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .folders: return "folder"
         case .activity: return "clock.arrow.circlepath"
         case .conflicts: return "doc.on.doc"
+        case .trash: return "trash"
         case .account: return "person.crop.circle"
         case .sync: return "arrow.triangle.2.circlepath"
         case .drive: return "externaldrive"
@@ -117,6 +119,7 @@ struct SettingsView: View {
                 case .folders: FoldersPage(model: model, store: store)
                 case .activity: ActivityPage(model: model)
                 case .conflicts: ConflictsPage(model: model)
+                case .trash: DeletedFilesPage(model: model)
                 case .account: AccountPage(model: model, store: store)
                 case .sync: SyncPage(model: model, store: store)
                 case .drive: DrivePage(model: model)

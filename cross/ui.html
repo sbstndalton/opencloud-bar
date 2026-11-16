@@ -76,7 +76,7 @@ tbody tr:focus-visible { outline-offset:-2px; }
 <script nonce="{{NONCE}}">
 "use strict";
 // Plain DOM code, no libraries. Text from the server is only ever set with textContent.
-const SECTIONS = [["folders","Folders"],["activity","Activity"],["conflicts","Conflicts"],["account","Account"],["sync","Sync"],["drive","Drive"],["general","General"],["logs","Logs"],["about","About"]];
+const SECTIONS = [["folders","Folders"],["activity","Activity"],["conflicts","Conflicts"],["trash","Deleted Files"],["account","Account"],["sync","Sync"],["drive","Drive"],["general","General"],["logs","Logs"],["about","About"]];
 let S = null;            // last /ui/api/state
 let section = "folders";
 let selected = null;     // selected folder path
@@ -236,7 +236,7 @@ function go(id, focus) {
   buildNav();
   const main = document.getElementById("main");
   main.replaceChildren();
-  ({ folders, activity, conflicts, account, sync: syncPage, drive, general, logs, about })[id](main, render);
+  ({ folders, activity, conflicts, trash, account, sync: syncPage, drive, general, logs, about })[id](main, render);
   // A section chosen in the list: move the keyboard focus to its heading.
   const h2 = focus && main.querySelector("h2");
   if (h2) { h2.tabIndex = -1; h2.focus(); }
@@ -346,7 +346,8 @@ function folderDetail(f, busy) {
       if (confirm(filtersChangeText(f.name))) save({ keptFilters: { [f.path]: ta.value.split("\n") } });
     } }, "Save Excludes")),
     subfolderBox(f),
-    shareBox(f));
+    shareBox(f),
+    historyBox(f));
 }
 function filtersChangeText(name) {
   return "Change what syncs in " + name + "?\n\nNothing is deleted from OpenCloud, and the copy on this computer stays where it is. " + name + " syncs again right after, comparing both sides: the newer copy of each file wins, and replaced files are kept in the backups.";
@@ -499,6 +500,72 @@ function shareBox(f) {
   return box;
 }
 
+// File history: earlier versions of a file in this kept folder, from OpenCloud.
+let histPick = null; // { folder, sub, items, file, versions }
+async function loadHistItems(f, sub) {
+  try {
+    const r = await get("items?folder=" + encodeURIComponent(f.path) + "&sub=" + encodeURIComponent(sub));
+    histPick = { folder: f.path, sub, items: r.items, file: "", versions: null };
+  } catch (e) { toast(e.message, true); if (histPick && !histPick.items) histPick = null; }
+  drawFolders();
+}
+// What happens after a restore: a sync now, or (paused) when syncing resumes.
+function afterRestoreText() {
+  return S.status.paused ? "It comes to this computer when you resume syncing." : "The folder then syncs.";
+}
+function restoredToast() {
+  return S.status.paused ? "Restored. It comes to this computer when you resume syncing." : "Restored; the folder syncs now";
+}
+async function loadVersions(f, rel) {
+  histPick.file = rel; histPick.versions = null; drawFolders();
+  try {
+    const r = await get("versions?folder=" + encodeURIComponent(f.path) + "&path=" + encodeURIComponent(rel));
+    if (histPick && histPick.file === rel) histPick.versions = r.versions;
+  } catch (e) { toast(e.message, true); if (histPick) histPick.file = ""; }
+  drawFolders();
+}
+function historyBox(f) {
+  const box = h("div", {}, h("h3", { text: "File history" }));
+  if (!histPick || histPick.folder !== f.path) {
+    box.append(h("p", { class: "hint", text: "See the earlier versions OpenCloud keeps of a file in " + f.name + " and restore one." }),
+      h("div", { class: "row" }, h("button", { class: "btn", disabled: !S.config.oidc, onclick: () => { histPick = { folder: f.path, sub: "", items: null, file: "" }; loadHistItems(f, ""); } }, "File History…")));
+    return box;
+  }
+  if (!histPick.items) {
+    box.append(h("div", { class: "row" }, h("button", { class: "btn", onclick: () => { histPick = null; drawFolders(); } }, "Close")));
+    return box;
+  }
+  const sub = histPick.sub;
+  const list = h("div", { class: "card", role: "list", "aria-label": "Files in " + (sub ? f.name + "/" + sub : f.name) });
+  if (sub) list.append(h("div", { role: "listitem" }, h("button", { class: "btn", onclick: () => loadHistItems(f, sub.split("/").slice(0, -1).join("/")) }, "Up")));
+  for (const it of histPick.items) {
+    const rel = sub ? sub + "/" + it.name : it.name;
+    list.append(h("div", { class: "row", role: "listitem" },
+      it.dir ? h("button", { class: "btn", "aria-label": "Open " + it.name, onclick: () => loadHistItems(f, rel) }, it.name + "/")
+        : h("button", { class: "btn" + (histPick.file === rel ? " primary" : ""), "aria-label": "Show the versions of " + it.name, onclick: () => loadVersions(f, rel) }, it.name)));
+  }
+  if (!histPick.items.length) list.append("Nothing here.");
+  box.append(h("p", { class: "hint", text: "Choose a file. Restoring a version makes it the current file in OpenCloud; the copy on this computer is kept in the backups (in the app's sync state folder, for 30 days) first. " + afterRestoreText() + " A file with changes that haven't synced yet can't be restored: sync first." }), list);
+  if (histPick.file) {
+    const vs = histPick.versions;
+    const rel = histPick.file;
+    if (!vs) box.append(h("p", { class: "hint", text: "Loading the versions of " + rel + "…" }));
+    else if (!vs.length) box.append(h("div", { class: "card" }, "OpenCloud has no earlier versions of " + rel + "."));
+    else box.append(h("table", { "aria-label": "Versions of " + rel },
+      h("thead", {}, h("tr", {}, h("th", { text: "Version of " + rel }), h("th", { text: "Size" }), h("th", { text: "" }))),
+      h("tbody", {}, vs.map(v => h("tr", {},
+        h("td", { text: new Date(v.modified).toLocaleString() }),
+        h("td", { text: v.size >= 0 ? fmtBytes(v.size) : "" }),
+        h("td", {}, h("button", { class: "btn", "aria-label": "Restore the version from " + new Date(v.modified).toLocaleString(), onclick: () => {
+          if (confirm("Restore the version of " + rel + " from " + new Date(v.modified).toLocaleString() + "?\n\nIt becomes the current file in OpenCloud (the current one stays in OpenCloud's versions). The copy on this computer is kept in the backups first. " + afterRestoreText())) {
+            act(() => post("restore-version", { folder: f.path, path: rel, key: v.key }), restoredToast()).then(() => { if (histPick && histPick.folder === f.path) loadVersions(f, rel); });
+          }
+        } }, "Restore")))))));
+  }
+  box.append(h("div", { class: "row" }, h("button", { class: "btn", onclick: () => { histPick = null; drawFolders(); } }, "Close")));
+  return box;
+}
+
 // ---- Activity (Recent Changes)
 
 let activityFilter = "";
@@ -562,6 +629,43 @@ function drawConflicts() {
         h("button", { class: "btn", "aria-label": "Keep this version: " + c.file, disabled: busy, onclick: () => { if (confirm("Keep this version of " + c.original + "?\n\nThe conflict copy replaces the current file. The current file is kept in the backups (in the app's sync state folder, for 30 days). The next sync sends the change to OpenCloud.")) conflictAct(f, c, "keep", "Kept; the next sync sends it to OpenCloud"); } }, "Keep This Version"),
         h("button", { class: "btn danger", "aria-label": "Discard " + c.file, disabled: busy, onclick: () => { if (confirm("Discard " + c.file + "?\n\nIt moves to " + trashWhere() + ". The next sync removes it from OpenCloud too.")) conflictAct(f, c, "discard", "Discarded"); } }, "Discard")))))),
     busy ? h("p", { class: "hint", text: "A sync is running; the actions wait until it finishes." }) : null));
+}
+
+// ---- Deleted Files (OpenCloud's trash)
+
+let trashAll = false;
+async function trash(main, r) {
+  header(main, "Deleted Files");
+  main.append(h("p", { class: "hint", text: "Files and folders deleted in OpenCloud, from your personal space and the spaces you keep folders from, newest first. Restore puts an item back where it was, if that was in a kept folder; the folder then syncs (while syncing is paused, when you resume). If something is at that place again, nothing is restored or overwritten. Deleting for good is done in OpenCloud in the browser." }));
+  const all = h("input", { type: "checkbox", id: "trash-all" }); all.checked = trashAll;
+  const body = h("div", { id: "trash-body" }, h("p", { class: "hint", text: "Loading…" }));
+  main.append(h("div", { class: "row" }, h("label", { class: "check" }, all, h("span", { text: "Show all (also items that weren't in a kept folder)" })),
+    h("button", { class: "btn", onclick: () => load() }, "Reload")), body);
+  const load = async () => {
+    let l;
+    try { l = await get("trash" + (trashAll ? "?all=1" : "")); } catch (e) { if (r === render) body.replaceChildren(h("div", { class: "card" }, e.message)); return; }
+    if (r !== render) return;
+    const parts = [];
+    for (const p of l.problems || []) parts.push(h("p", { class: "hint", text: "Couldn't read the trash of " + p }));
+    if (!l.items.length) parts.push(h("div", { class: "card" }, l.hidden ? "Nothing deleted from your kept folders. " + l.hidden + " other item(s) are in the trash; choose Show all to see them." : "The trash is empty."));
+    else parts.push(h("table", { "aria-label": "Deleted files" },
+      h("thead", {}, h("tr", {}, h("th", { text: "Name" }), h("th", { text: "Was in" }), h("th", { text: "Deleted" }), h("th", { text: "Size" }), h("th", { text: "" }))),
+      h("tbody", {}, l.items.map(it => h("tr", {},
+        h("td", { text: it.name + (it.dir ? "/" : "") }),
+        h("td", { class: "path", text: (it.spaceName === "Personal" ? "" : it.spaceName + ": ") + "/" + it.path }),
+        h("td", { text: it.deleted && Date.parse(it.deleted) > 86400000 ? new Date(it.deleted).toLocaleString() : "" }),
+        h("td", { text: it.size >= 0 ? fmtBytes(it.size) : "" }),
+        h("td", {}, it.folder ? h("button", { class: "btn", "aria-label": "Restore " + it.path, onclick: async (ev) => {
+          if (!confirm("Restore " + it.path + " to where it was?\n\n" + (S.status.paused ? "It comes to this computer when you resume syncing." : "The folder then syncs it to this computer."))) return;
+          ev.currentTarget.disabled = true;
+          await act(() => post("restore-trash", { space: it.spaceId, key: it.key }), restoredToast());
+          load();
+        } }, "Restore") : h("span", { class: "hint", text: "Not in a kept folder: restore it in the browser" })))))));
+    if (l.hidden && l.items.length) parts.push(h("p", { class: "hint", text: l.hidden + " item(s) that weren't in a kept folder are hidden; choose Show all to see them." }));
+    keepFocus(body, () => body.replaceChildren(...parts));
+  };
+  all.addEventListener("change", () => { trashAll = all.checked; load(); });
+  await load();
 }
 
 // ---- Account

@@ -108,6 +108,10 @@ struct MenuContent: View {
         recentChangesMenu
         Button("Copy Public Link…") { model.shareFile() }
             .disabled(model.needsSignIn || !model.config.isOIDC || model.config.kept.isEmpty)
+        Button("File History…") { model.fileHistory() }
+            .disabled(model.needsSignIn || !model.config.isOIDC || model.config.kept.isEmpty)
+        Button("Deleted Files…") { model.openSettings(.trash) }
+            .disabled(model.needsSignIn || !model.config.isOIDC)
         if model.conflictCount > 0 {
             Button("\(AppModel.conflictsText(model.conflictCount).prefix(1).uppercased() + AppModel.conflictsText(model.conflictCount).dropFirst())…") { model.openSettings(.conflicts) }
         }

@@ -192,7 +192,7 @@ func (u *webUI) loginURL(section string) string {
 
 func validSection(s string) bool {
 	switch s {
-	case "folders", "conflicts", "activity", "account", "sync", "drive", "general", "logs", "about":
+	case "folders", "conflicts", "trash", "activity", "account", "sync", "drive", "general", "logs", "about":
 		return true
 	}
 	return false
@@ -326,6 +326,36 @@ func (u *webUI) handler(e *Engine) http.Handler {
 			return
 		}
 		writeJSON(w, 200, map[string]any{"url": link})
+	})
+	mux.HandleFunc("GET /ui/api/versions", func(w http.ResponseWriter, r *http.Request) {
+		vs, err := e.FileVersions(r.URL.Query().Get("folder"), r.URL.Query().Get("path"))
+		if err != nil {
+			jsonErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"versions": vs})
+	})
+	mux.HandleFunc("POST /ui/api/restore-version", func(w http.ResponseWriter, r *http.Request) {
+		var b struct{ Folder, Path, Key string }
+		if !readJSON(w, r, &b) {
+			return
+		}
+		jsonOK(w, e.RestoreVersion(b.Folder, b.Path, b.Key))
+	})
+	mux.HandleFunc("GET /ui/api/trash", func(w http.ResponseWriter, r *http.Request) {
+		l, err := e.ListTrash(r.URL.Query().Get("all") == "1")
+		if err != nil {
+			jsonErr(w, http.StatusConflict, err)
+			return
+		}
+		writeJSON(w, 200, l)
+	})
+	mux.HandleFunc("POST /ui/api/restore-trash", func(w http.ResponseWriter, r *http.Request) {
+		var b struct{ Space, Key string }
+		if !readJSON(w, r, &b) {
+			return
+		}
+		jsonOK(w, e.RestoreTrash(b.Space, b.Key))
 	})
 	mux.HandleFunc("GET /ui/api/spaces", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
