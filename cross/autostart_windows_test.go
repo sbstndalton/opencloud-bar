@@ -13,6 +13,7 @@ import (
 
 func TestAutostartRegistryRoundTrip(t *testing.T) {
 	testEnv(t)
+	name := installerRunValueName(t) // read before the key is swapped below
 	// A key of its own under HKCU, never the real Run key.
 	sub := fmt.Sprintf(`Software\OpenCloudBarTest-%d`, os.Getpid())
 	old := autostartRunKey
@@ -35,7 +36,7 @@ func TestAutostartRegistryRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v, _, err := k.GetStringValue(installerRunValueName(t)) // the name the installer writes, from its script
+	v, _, err := k.GetStringValue(name) // the name the installer writes, from its script
 	k.Close()
 	if err != nil {
 		t.Fatal(err)
