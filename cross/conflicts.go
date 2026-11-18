@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	pathpkg "path"
@@ -211,14 +212,26 @@ func moveFile(from, to string) error {
 	if err := os.Rename(from, to); err == nil {
 		return nil
 	}
-	b, err := os.ReadFile(from)
+	in, err := os.Open(from)
 	if err != nil {
 		return err
 	}
-	st, _ := os.Stat(from)
-	if err := os.WriteFile(to, b, 0o600); err != nil {
+	defer in.Close()
+	st, _ := in.Stat()
+	out, err := os.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
 		return err
 	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		_ = os.Remove(to)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(to)
+		return err
+	}
+	in.Close()
 	if st != nil {
 		_ = os.Chtimes(to, st.ModTime(), st.ModTime())
 	}

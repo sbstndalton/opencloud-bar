@@ -24,6 +24,7 @@ h3 { margin:22px 0 8px; font-size:14px; }
 .row > label { width:210px; flex:none; }
 .check, .row > label.check { display:flex; gap:6px; align-items:center; margin:4px 0; width:auto; }
 .hint { color:var(--muted); font-size:12.5px; margin:2px 0; }
+.sub-indent { margin-left:2em; }
 input[type=text], input[type=password], input[type=search], input[type=number], select, textarea { font:inherit; color:var(--text); background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:6px 8px; min-width:0; }
 input[type=text], input[type=password], input[type=search] { width:320px; max-width:100%; }
 input[type=number] { width:110px; }
@@ -424,7 +425,7 @@ function subfolderBox(f) {
     list.append(h("div", { class: "row" }, row(it.name, it, false),
       on && it.choosable && !kids ? h("button", { class: "btn", "aria-label": "Show subfolders of " + it.name, onclick: () => loadSubfolders(f, it.name) }, "Show Subfolders") : null));
     if (kids) {
-      const inner = h("div", { style: "margin-left: 2em" });
+      const inner = h("div", { class: "sub-indent" });
       if (!kids.length) inner.append(h("span", { class: "hint", text: "No subfolders." }));
       for (const k of kids) inner.append(row(it.name + "/" + k.name, k, !on));
       list.append(inner);

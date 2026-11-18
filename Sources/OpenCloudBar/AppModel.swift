@@ -340,7 +340,7 @@ final class AppModel: ObservableObject {
             checkQuotaIfDue()
             checkServerNotesIfDue()
         }
-        driveMounted = Shell.isMounted(config.mountURL)
+        driveMounted = Shell.isDriveMount(config.mountURL)
         Task { await refreshDriveQueue() }
         checkFinderEject()
         if config.tunnel {
@@ -445,9 +445,15 @@ final class AppModel: ObservableObject {
         let mnt = config.mountURL
         // A previous rclone crashed and left a dead mount behind (opencloud.localhost:/, or
         // localhost:/ from rclone nfsmount before 2.0.1): clear it first.
-        if Shell.isMounted(mnt) {
+        if Shell.isDriveMount(mnt) {
             forceUnmount()
             mountRestartAt = Date().addingTimeInterval(10)
+            return
+        }
+        if Shell.isMounted(mnt) {
+            // Another disk is mounted there (the location may be any folder): never unmount it.
+            lastMessage = "Something else is mounted at \(mnt.path); choose another drive location in Settings"
+            mountRestartAt = Date().addingTimeInterval(60)
             return
         }
         try? fm.createDirectory(at: mnt, withIntermediateDirectories: true)
@@ -537,7 +543,7 @@ final class AppModel: ObservableObject {
     private func mountExited(_ code: Int32) {
         mount = nil
         driveMountedByUs = false
-        let stillMounted = Shell.isMounted(config.mountURL)
+        let stillMounted = Shell.isDriveMount(config.mountURL)
         driveMounted = stillMounted
         if quitting { return }
         if unmountRequested {
@@ -673,7 +679,13 @@ final class AppModel: ObservableObject {
             }
             if timer { self.timerStarting = false }
             if busy {
-                for f in folders { self.status[f.key]?.state = .skipped("server busy") }
+                for f in folders {
+                    // Don't hide a warning or a running sync behind "busy".
+                    switch self.status[f.key]?.state {
+                    case .idle?, .ok?, .skipped?, .failed?: self.status[f.key]?.state = .skipped("server busy")
+                    default: break
+                    }
+                }
             } else if !self.quitting {
                 for f in folders { self.enqueue(WorkItem(key: f.key, manual: manual, prio: !timer, timer: timer)) }
             }
@@ -1471,8 +1483,11 @@ final class AppModel: ObservableObject {
     // MARK: - Repair and large deletions
 
     func repair(_ f: KeptFolder) {
+        let changed = needsRepairReason(f) == "server or account settings changed"
+            ? " This folder last synced with a different server or account: its files on this Mac will be uploaded to the one you're signed in to now. If that's not what you want, use Stop Keeping instead."
+            : ""
         guard confirm("Repair “\(f.displayName)”?",
-                      "This merges this Mac's copy with OpenCloud. For each file the newer copy wins; the older copy is kept in the backups (\(Backups.folderName) in OpenCloud, and in the app's backups folder on this Mac for 30 days). Files deleted since the last good sync will come back.",
+                      "This merges this Mac's copy with OpenCloud. For each file the newer copy wins; the older copy is kept in the backups (\(Backups.folderName) in OpenCloud, and in the app's backups folder on this Mac for 30 days). Files deleted since the last good sync will come back.\(changed)",
                       button: "Repair") else { return }
         _ = exclusive { [weak self] in
             guard let self else { return }
@@ -2098,7 +2113,7 @@ final class AppModel: ObservableObject {
             nextSyncAt = min(nextSyncAt, Date().addingTimeInterval(TimeInterval(max(60, c.syncIntervalSeconds))))
         }
         if reconnect {
-            restartConnection()
+            restartConnection(mountedAt: old.mountURL)
         } else if c.cacheMaxSize != old.cacheMaxSize || c.cacheMaxAge != old.cacheMaxAge
                     || c.bwLimitUp != old.bwLimitUp || c.bwLimitDown != old.bwLimitDown {
             restartDriveForNewSettings()
@@ -2186,7 +2201,7 @@ final class AppModel: ObservableObject {
                       button: "Sign Out") else { return }
         Task {
             guard await confirmUploads(action: "Sign Out Anyway", later: "They upload after you sign in again.") else { return }
-            Auth.logout()
+            await Auth.logout()
             signedOut = true
             lastMessage = Self.signedOutText
             resetQuota(stateFolders: [config.stateURL])
@@ -2211,12 +2226,14 @@ final class AppModel: ObservableObject {
     }
 
     /// Stops the drive and tunnel so tick() starts them again with the current settings.
-    private func restartConnection() {
+    /// `mountedAt`: where the running drive is mounted, when the settings just moved it.
+    private func restartConnection(mountedAt: URL? = nil) {
         let m = mount
+        let path = (mountedAt ?? config.mountURL).path
         unmountRequested = true
         Task {
             if let m, m.isRunning {
-                _ = await Shell.run("/usr/sbin/diskutil", ["unmount", config.mountURL.path], timeout: 30)
+                _ = await Shell.run("/usr/sbin/diskutil", ["unmount", path], timeout: 30)
                 m.terminate()
             }
             await stopTunnel()

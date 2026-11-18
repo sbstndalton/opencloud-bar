@@ -329,7 +329,10 @@ enum Auth {
     }
 
     /// Forgets the sign-in on this Mac. (The discovery document lists no revocation endpoint.)
-    static func logout() {
+    static func logout() async {
+        // Under the sign-in lock, so a refresh already in flight can't write the files back.
+        let locked = (try? await lock()) != nil
+        defer { if locked { unlock() } }
         if let s = readState(), readRefresh() == nil {
             // Not moved to the file yet: the token may still be in the Keychain. Deleting can
             // also wait for a permission prompt, so it runs in the background.

@@ -36,6 +36,12 @@ func interrupt(c *exec.Cmd) {
 }
 
 // isMounted reports whether target is a mount point, without touching the (possibly dead) mount.
+// prepareMountPoint creates the folder FUSE mounts over.
+func prepareMountPoint(target string) string {
+	_ = os.MkdirAll(target, 0o700)
+	return ""
+}
+
 func isMounted(target string) bool {
 	target = filepath.Clean(target)
 	if runtime.GOOS == "linux" {
@@ -138,10 +144,10 @@ func uniquePath(p string) string {
 
 func openPath(p string) {
 	if runtime.GOOS == "darwin" {
-		_ = exec.Command("open", p).Start()
+		_ = startReaped(exec.Command("open", p))
 		return
 	}
-	_ = exec.Command("xdg-open", p).Start()
+	_ = startReaped(exec.Command("xdg-open", p))
 }
 
 func hasDisplay() bool {
@@ -194,9 +200,9 @@ func dialogPickFolder(start, prompt string) (string, bool) {
 // openURL opens a web address in the default browser.
 func openURL(u string) error {
 	if runtime.GOOS == "darwin" {
-		return exec.Command("open", u).Start()
+		return startReaped(exec.Command("open", u))
 	}
-	return exec.Command("xdg-open", u).Start()
+	return startReaped(exec.Command("xdg-open", u))
 }
 
 // dialogEntry asks for one line of text. ok is false if cancelled or if no dialog tool is available.
