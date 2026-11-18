@@ -4,6 +4,18 @@ All notable changes to OpenCloud Bar. The format follows [Keep a Changelog](http
 
 The release workflow copies the section for a tag into that tag's GitHub release, so every version heading must stay in the form `## [X.Y.Z] - date`.
 
+## [2.7.1] - 2026-11-18
+
+### Fixed
+- **macOS:** the app no longer force-unmounts whatever disk is mounted at the drive location. Only its own drive (`opencloud.localhost:/`) is cleared; if something else is there, it says so instead.
+- **macOS and Linux:** moving the drive location in Settings now unmounts the drive from the old place. Before, the old mount stayed behind with no server, and on Linux the new location never mounted.
+- **Windows:** a folder (not a drive letter) as the drive location now mounts. The app used to create the folder first, which WinFsp refuses ("mountpoint path already exists"). A plain folder there no longer counts as mounted, and an empty leftover folder is cleared.
+- **macOS:** signing out waits for any sign-in refresh already running, so that refresh can't write the credentials back.
+- **macOS:** a username containing "USER" (such as `SUPERUSER`) no longer makes the app think it isn't set up. Out-of-range ports in `config.json` are reported instead of crashing the app.
+- **macOS:** "server busy" no longer hides a folder's needs-repair or large-deletion warning, or a running sync.
+- **macOS:** Repair says so when the folder last synced with a different server or account, because its files will be uploaded to the current one.
+- **Windows/Linux:** Keep This Version streams the file when the backups are on another disk, instead of reading the whole file into memory. Open Folder and Open in Browser no longer leave zombie processes. Notification text that starts with a non-ASCII character is no longer garbled. Nested subfolders are indented again on the settings page; the page's CSP had been blocking the inline style.
+
 ## [2.7.0] - 2026-11-18
 
 ### Added

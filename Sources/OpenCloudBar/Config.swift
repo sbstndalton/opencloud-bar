@@ -239,7 +239,7 @@ struct Config: Codable {
 
     /// Complete settings. Whether an OIDC config is also signed in is the model's business (Keychain).
     var isConfigured: Bool {
-        if davPath.contains("USER") { return false }
+        if davPath.hasSuffix("/dav/files/USER") { return false }   // the untouched placeholder
         if isOIDC { return !(serverURL ?? "").isEmpty }
         return !sshHost.isEmpty || (!(serverURL ?? "").isEmpty && !tunnel)
     }
@@ -274,6 +274,8 @@ struct Config: Codable {
         if let v = webdavVendor, v.contains(where: { "',: ".contains($0) }) { return "webdavVendor isn't a valid rclone vendor name" }
         if let a = auth, a != "oidc" && a != "rclone" { return "auth must be \"oidc\" or \"rclone\", not “\(a)”" }
         if tunnel && sshHost.isEmpty { return "useTunnel needs sshHost" }
+        if !(1...65535).contains(serverPort) { return "serverPort must be 1–65535" }
+        if !(1...65535).contains(localPort) { return "localPort must be 1–65535" }
         if let p = Config.bwLimitProblem("bwLimitUp", bwLimitUp ?? "") { return p }
         if let p = Config.bwLimitProblem("bwLimitDown", bwLimitDown ?? "") { return p }
         return nil

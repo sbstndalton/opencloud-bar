@@ -118,19 +118,32 @@ enum Shell {
     }
 
     /// True if `url` is currently a mount point (listed by getmntinfo, no blocking stat).
-    static func isMounted(_ url: URL) -> Bool {
+    static func isMounted(_ url: URL) -> Bool { mountSource(url) != nil }
+
+    /// True only for the app's own NFS drive (opencloud.localhost:/, or localhost:/ from rclone
+    /// nfsmount before 2.0.1), never another disk mounted at that path.
+    static func isDriveMount(_ url: URL) -> Bool {
+        guard let s = mountSource(url) else { return false }
+        return s.hasPrefix("opencloud.localhost:") || s.hasPrefix("localhost:")
+    }
+
+    /// What is mounted at `url` (e.g. "opencloud.localhost:/", "/dev/disk4s1"), nil if nothing.
+    static func mountSource(_ url: URL) -> String? {
         var mnt: UnsafeMutablePointer<statfs>?
         let n = getmntinfo(&mnt, MNT_NOWAIT)
-        guard n > 0, let mnt else { return false }
+        guard n > 0, let mnt else { return nil }
         let target = url.standardizedFileURL.path
         for i in 0..<Int(n) {
             var m = mnt[i]
             let on = withUnsafePointer(to: &m.f_mntonname) {
                 $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
             }
-            if on == target { return true }
+            guard on == target else { continue }
+            return withUnsafePointer(to: &m.f_mntfromname) {
+                $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
+            }
         }
-        return false
+        return nil
     }
 }
 

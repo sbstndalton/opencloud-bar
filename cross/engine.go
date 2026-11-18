@@ -14,7 +14,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -504,8 +503,13 @@ func (e *Engine) startMountLocked() {
 	if strings.HasPrefix(e.message, "Drive letter ") || strings.HasPrefix(e.message, "The drive needs WinFsp") {
 		e.message = ""
 	}
-	if runtime.GOOS != "windows" || len(target) > 2 {
-		_ = os.MkdirAll(target, 0o700)
+	if p := prepareMountPoint(target); p != "" {
+		if e.message != p {
+			e.logLine("drive: %s", p)
+		}
+		e.message = p
+		e.mountRetryAt = time.Now().Add(time.Minute)
+		return
 	}
 	cache := filepath.Join(appDir(), "vfs-cache")
 	_ = os.MkdirAll(cache, 0o700)
@@ -614,8 +618,11 @@ func (e *Engine) restartDrive() {
 
 // unmount stops the drive: the OS unmount where there is one, else rclone's own quit,
 // then waits for rclone to exit. Fails (and leaves rclone running) if the drive is busy.
-func (e *Engine) unmount(m *exec.Cmd) error {
-	err := unmountOS(e.mountTarget())
+func (e *Engine) unmount(m *exec.Cmd) error { return e.unmountAt(m, e.mountTarget()) }
+
+// unmountAt is unmount for a drive mounted at target (the old place when settings moved it).
+func (e *Engine) unmountAt(m *exec.Cmd, target string) error {
+	err := unmountOS(target)
 	if err == errNoOSUnmount {
 		_, err = e.rc("core/quit", 15*time.Second)
 	}
@@ -1821,6 +1828,7 @@ func (e *Engine) Reload() error {
 		// what piled up isn't news. The next fetch only records (no flood).
 		e.resetSrvNotesLocked(e.cfg, cfg)
 	}
+	oldTarget := e.mountTargetLocked() // where a running drive is mounted
 	e.cfg, e.cfgErr = cfg, nil
 	e.signedOut = out
 	if out {
@@ -1850,7 +1858,7 @@ func (e *Engine) Reload() error {
 			e.mu.Lock()
 			e.unmountRequest = true
 			e.mu.Unlock()
-			_ = e.unmount(m)
+			_ = e.unmountAt(m, oldTarget)
 		}
 		if t != nil && t.Process != nil {
 			_ = t.Process.Kill()
@@ -2028,4 +2036,14 @@ func init() { log.SetFlags(0) }
 // replace the user's settings (kept folders included) with defaults.
 func settingsBroken(err error) error {
 	return fmt.Errorf("the settings file has a problem (%v); fix or remove %s first, then reload the settings", err, configFile())
+}
+
+// startReaped starts a helper (a file manager, a browser opener) and waits for it in the
+// background so it doesn't linger as a zombie.
+func startReaped(c *exec.Cmd) error {
+	if err := c.Start(); err != nil {
+		return err
+	}
+	go func() { _ = c.Wait() }()
+	return nil
 }

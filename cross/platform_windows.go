@@ -56,10 +56,32 @@ func interrupt(c *exec.Cmd) {
 func isMounted(target string) bool {
 	t := target
 	if len(t) == 2 && t[1] == ':' {
-		t += `\`
+		_, err := os.Stat(t + `\`)
+		return err == nil
 	}
-	_, err := os.Stat(t)
-	return err == nil
+	// A folder mount point is a reparse point while WinFsp has it mounted; a plain folder
+	// at that path is not a mount.
+	p, err := syscall.UTF16PtrFromString(t)
+	if err != nil {
+		return false
+	}
+	a, err := syscall.GetFileAttributes(p)
+	return err == nil && a&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+// prepareMountPoint: WinFsp wants a folder mount point not to exist yet (rclone: "mountpoint
+// path already exists"), only its parent. An empty folder left from earlier is removed.
+func prepareMountPoint(target string) string {
+	if len(target) == 2 && target[1] == ':' {
+		return ""
+	}
+	_ = os.MkdirAll(filepath.Dir(target), 0o700)
+	if fi, err := os.Lstat(target); err == nil {
+		if !fi.IsDir() || os.Remove(target) != nil {
+			return "The drive folder " + target + " must be empty or not exist yet — choose another in Settings ▸ Drive"
+		}
+	}
+	return ""
 }
 
 func unmountOS(string) error { return errNoOSUnmount }
@@ -115,7 +137,7 @@ func openPath(p string) {
 	if len(p) == 2 && p[1] == ':' {
 		p += `\`
 	}
-	_ = exec.Command("explorer.exe", p).Start()
+	_ = startReaped(exec.Command("explorer.exe", p))
 }
 
 func hasDisplay() bool { return true }
@@ -172,7 +194,7 @@ const windowsAppID = "OpenCloudBar.OpenCloudBar"
 // openURL opens a web address in the default browser. rundll32 passes the whole URL through
 // untouched (explorer.exe mangles URLs containing & in some cases).
 func openURL(u string) error {
-	return exec.Command("rundll32.exe", "url.dll,FileProtocolHandler", u).Start()
+	return startReaped(exec.Command("rundll32.exe", "url.dll,FileProtocolHandler", u))
 }
 
 // dialogEntry asks for one line of text with a Visual Basic input box. The box returns an empty
