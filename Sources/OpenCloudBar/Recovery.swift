@@ -282,21 +282,72 @@ enum Updates {
 
 // MARK: - Sync activity
 
-/// bisync runs with `--stats 2s --stats-log-level NOTICE`: every 2 seconds rclone prints a
-/// progress block. This reads the transferred-file count from it and keeps the blocks out of
-/// the output (and so out of the sync log). Same as statsFilter in cross/activity.go (tested there).
+/// One file rclone is moving right now (a line of the progress block's "Transferring:" section).
+/// `percent` is -1 when rclone doesn't know the size yet; `size`, `speed` and `eta` are rclone's
+/// own text, empty when unknown. rclone doesn't say which way a file goes, so there is no direction.
+struct Transfer: Equatable, Identifiable, Sendable {
+    var folder: String   // the kept folder's key
+    var name: String
+    var percent: Int
+    var size: String
+    var speed: String
+    var eta: String
+    var id: String { folder + "\u{0}" + name }
+}
+
+/// bisync runs with `--stats 2s --stats-log-level NOTICE --stats-file-name-length 0`: every 2
+/// seconds rclone prints a progress block. This reads the transferred-file count and the files
+/// in flight from it and keeps the blocks out of the output (and so out of the sync log). Same
+/// as statsFilter in cross/activity.go (tested there, with real rclone v1.76 blocks; the lines
+/// are written by rclone's accounting package, stats.go and Account.String):
+///
+///     Transferring:
+///      * sub dir/big, file: v1 (45%).bin: 34% / 2.861 MiB, 1019.990 KiB/s, 1s
+///      * b.bin:100% / 1.907 MiB, 976.550 KiB/s, -
+///      * name: transferring               (size not known yet)
 final class StatsFilter: @unchecked Sendable {
+    // The name may hold ": ", ", " and "45%": the tail (percent, size, speed, ETA) is what is matched.
+    private static let transferRe = try! NSRegularExpression(pattern: #"^\s*\*\s+(.*):\s*(\d{1,3})%\s*/\s*([^,]+),\s*([^,]+),\s*(\S.*?)\s*$"#)
+    private static let bareRe = try! NSRegularExpression(pattern: #"^\s*\*\s+(.*):\s*transferring\s*$"#)
+
+    /// One line of the "Transferring:" section (nil if it isn't one).
+    static func parseTransfer(_ text: String, folder: String) -> Transfer? {
+        let whole = NSRange(text.startIndex..., in: text)
+        func group(_ m: NSTextCheckingResult, _ i: Int) -> String {
+            Range(m.range(at: i), in: text).map { String(text[$0]).trimmingCharacters(in: .whitespaces) } ?? ""
+        }
+        if let m = transferRe.firstMatch(in: text, range: whole) {
+            let name = Range(m.range(at: 1), in: text).map { String(text[$0]) } ?? ""
+            guard !name.isEmpty else { return nil }
+            let eta = group(m, 5)
+            return Transfer(folder: folder, name: name, percent: min(Int(group(m, 2)) ?? 0, 100), size: group(m, 3),
+                            speed: group(m, 4), eta: eta == "-" ? "" : eta)
+        }
+        if let m = bareRe.firstMatch(in: text, range: whole) {
+            let name = Range(m.range(at: 1), in: text).map { String(text[$0]) } ?? ""
+            return name.isEmpty ? nil : Transfer(folder: folder, name: name, percent: -1, size: "", speed: "", eta: "")
+        }
+        return nil
+    }
+
     private let lock = NSLock()
     private var partial = Data()
     private var inStats = false
+    private var inXfers = false   // inside the block's "Transferring:" section
+    private var xfers: [Transfer] = []
+    private let folder: String
     private let out: OutputBuffer
     private let log: LogStream?
     private let onLine: (@Sendable (String) -> Void)?
     private let onFiles: @Sendable (Int) -> Void
+    private let onTransfers: (@Sendable ([Transfer]) -> Void)?
 
     /// Every line but the progress blocks goes to `out`, `log` and `onLine` (Recent Changes).
-    init(into out: OutputBuffer, log: LogStream? = nil, onLine: (@Sendable (String) -> Void)? = nil,
-         onFiles: @escaping @Sendable (Int) -> Void) {
+    /// `onTransfers` gets the files in flight once per progress block (empty when none).
+    init(into out: OutputBuffer, log: LogStream? = nil, folder: String = "", onLine: (@Sendable (String) -> Void)? = nil,
+         onTransfers: (@Sendable ([Transfer]) -> Void)? = nil, onFiles: @escaping @Sendable (Int) -> Void) {
+        self.folder = folder
+        self.onTransfers = onTransfers
         self.out = out
         self.log = log
         self.onLine = onLine
@@ -323,6 +374,13 @@ final class StatsFilter: @unchecked Sendable {
         if inStats {
             if text.trimmingCharacters(in: .whitespaces).isEmpty {
                 inStats = false
+                inXfers = false
+                onTransfers?(xfers)
+                xfers = []
+            } else if text.trimmingCharacters(in: .whitespaces) == "Transferring:" {
+                inXfers = true
+            } else if inXfers {
+                if let t = Self.parseTransfer(text, folder: folder) { xfers.append(t) }
             } else if text.hasPrefix("Transferred:") {
                 // "Transferred:   260 / 300, 87%" (files); the bytes line has units and doesn't parse.
                 let rest = text.dropFirst("Transferred:".count).trimmingCharacters(in: .whitespaces)

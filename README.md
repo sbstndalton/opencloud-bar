@@ -58,6 +58,7 @@ The menu stays short however many folders you keep. It has:
 - the drive items;
 - a **Kept Folders (N)** submenu;
 - on the Mac, **Search OpenCloud…** (⌘F), **Copy Public Link…**, **File History…** and **Deleted Files…**;
+- **Transfers (N)…**, only while something is transferring (see [Transfers](#transfers));
 - **Sync Now**, **Pause Syncing** (a submenu: **For 1 Hour**, **Until Tomorrow**, **Until I Resume**; while paused it is **Resume Syncing**, and the status line says "Paused until 14:30") and **Settings…**;
 - **Check for Updates…**, **About OpenCloud Bar** and **Quit**.
 
@@ -70,6 +71,7 @@ On the Mac, **Settings…** (⌘,) opens these pages. Windows and Linux have the
 | Page | What it does |
 |---|---|
 | **Kept Folders** | A table of your kept folders: name, location on this Mac, status and when each last synced (this survives restarts). Per folder: Open in Finder, Open in Browser, Sync Now, Repair, Allow Large Deletion (when needed), Choose Subfolders, Copy Public Link, File History and Stop Keeping. Select a folder to see its paths, its last error and its own exclude rules. |
+| **Transfers** | The files moving right now, per kept folder, and the drive's uploads. See [Transfers](#transfers). |
 | **Conflicts** | Conflict copies (`name.conflict1`) in your kept folders, with Reveal, Keep This Version and Discard. See [Conflicts](#conflicts). |
 | **Deleted Files** | OpenCloud's trash for your personal space and the spaces you keep folders from, with **Restore**. See [Deleted files](#deleted-files). |
 | **Account** | Server address and version, your name, email and username, and a storage bar with used and total space. **Open OpenCloud in Browser**, **Refresh**, and **Sign Out** (or **Sign In…**). It reads these from the server with your sign-in; nothing is shown if you're signed out. |
@@ -131,6 +133,15 @@ Every sync remembers what it changed: files uploaded, downloaded, deleted on thi
 - A merge (a first sync, a Repair, the automatic merge) is one line, like "Repair of Notes: 512 files compared, 2 updated", and so is a sync that changed more than 200 files ("Sync of Photos: 5000 uploaded"). Conflict copies and the backup folder aren't listed.
 - bisync doesn't report renames or moves: a renamed or moved file shows as a new file and a deleted one.
 - Syncs now log at rclone's INFO level (every file copied or deleted). Each folder's sync log starts a new file at 5 MB (the previous one is kept as `.1`), also during a long sync, and the app keeps only the start and end of a sync's output in memory.
+
+## Transfers
+
+A read-only list of what is moving right now.
+
+- **Kept folders:** while a folder syncs, each file in flight with its progress (percent), size, speed and time left, as rclone reports them (every 2 seconds). A file whose size rclone doesn't know yet shows "Transferring" without a percent. The list is empty again when the folder's sync ends. Windows and Linux ask for whole file names (`--stats-file-name-length 0`), so a long name isn't shortened.
+- **OpenCloud Drive uploads:** the files the drive is uploading or has waiting, read from rclone's upload queue (`vfs/queue`). With an rclone that doesn't have it, only the counts from `vfs/stats` are shown. The drive is asked at most every 5 seconds.
+- rclone doesn't say which way a file is going, so the list doesn't either: it says "Transferring", with no arrow.
+- **Mac:** Settings ▸ **Transfers**, and a **Transfers (N)…** item in the menu that appears only while something is transferring. **Windows, Linux:** the **Transfers** section of the settings window (`GET /ui/api/transfers`, behind the page's own sign-in like the other pages). When nothing moves it says "Nothing is transferring."
 
 ## Share links
 

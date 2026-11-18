@@ -16,18 +16,66 @@ import (
 // Sync activity: bisync runs with `--stats 2s --stats-log-level NOTICE`, so rclone prints a
 // progress block every 2 seconds. statsFilter reads the transferred-file count from it and
 // keeps the blocks out of the sync log (they would fill it). Everything else passes through.
+//
+// The block's "Transferring:" section lists the files in flight, one per line (rclone's
+// accounting package: stats.go writes the section, accounting.go's Account.String the line).
+// With `--stats-file-name-length 0` the name is whole and unpadded, as rclone v1.76 prints it:
+//
+//	Transferring:
+//	 * sub dir/big, file: v1 (45%).bin: 34% / 2.861 MiB, 1019.990 KiB/s, 1s
+//	 * b.bin:100% / 1.907 MiB, 976.550 KiB/s, -
+//	 * name: transferring               (size not known yet)
+//
+// rclone doesn't say which way a file is going, so a Transfer carries no direction.
 
 var (
 	statsStartRe = regexp.MustCompile(`^\d{4}/\d\d/\d\d \d\d:\d\d:\d\d NOTICE:\s*$`)
 	statsFilesRe = regexp.MustCompile(`^Transferred:\s+(\d+) / (\d+), `)
+	// The name may hold ": ", ", " and "45%": the tail (percent, size, speed, ETA) is what is matched,
+	// from the last colon that is followed by one.
+	transferRe     = regexp.MustCompile(`^\s*\*\s+(.*):\s*(\d{1,3})%\s*/\s*([^,]+),\s*([^,]+),\s*(\S.*?)\s*$`)
+	transferBareRe = regexp.MustCompile(`^\s*\*\s+(.*):\s*transferring\s*$`)
 )
+
+// Transfer is one file rclone is moving right now. Percent is -1 when rclone doesn't know the
+// size yet; Size, Speed and ETA are rclone's own text ("2.861 MiB", "1.9 MiB/s", "1s"), empty when unknown.
+type Transfer struct {
+	Folder  string `json:"folder"` // the kept folder's key
+	Name    string `json:"name"`
+	Percent int    `json:"percent"`
+	Size    string `json:"size"`
+	Speed   string `json:"speed"`
+	ETA     string `json:"eta"`
+}
+
+// parseTransfer reads one line of the "Transferring:" section.
+func parseTransfer(text string) (Transfer, bool) {
+	if m := transferRe.FindStringSubmatch(text); m != nil {
+		pct, _ := strconv.Atoi(m[2])
+		eta := strings.TrimSpace(m[5])
+		if eta == "-" {
+			eta = ""
+		}
+		return Transfer{Name: m[1], Percent: min(pct, 100), Size: strings.TrimSpace(m[3]),
+			Speed: strings.TrimSpace(m[4]), ETA: eta}, m[1] != ""
+	}
+	if m := transferBareRe.FindStringSubmatch(text); m != nil {
+		return Transfer{Name: m[1], Percent: -1}, m[1] != ""
+	}
+	return Transfer{}, false
+}
 
 type statsFilter struct {
 	w       io.Writer // may be nil
 	onFiles func(done int)
-	onLine  func(line string) // every line but the progress blocks (Recent Changes); may be nil
-	partial []byte
-	inStats bool
+	// onTransfers gets the files in flight once per progress block (empty when none); may be nil.
+	onTransfers func([]Transfer)
+	folder      string            // the kept folder's key, put on each Transfer
+	onLine      func(line string) // every line but the progress blocks (Recent Changes); may be nil
+	partial     []byte
+	inStats     bool
+	inXfers     bool // inside the block's "Transferring:" section
+	xfers       []Transfer
 }
 
 func (s *statsFilter) Write(p []byte) (int, error) {
@@ -55,7 +103,18 @@ func (s *statsFilter) line(b []byte) {
 	text := strings.TrimRight(string(b), "\r\n")
 	if s.inStats {
 		if strings.TrimSpace(text) == "" {
-			s.inStats = false
+			s.inStats, s.inXfers = false, false
+			if s.onTransfers != nil {
+				s.onTransfers(s.xfers)
+			}
+			s.xfers = nil
+		} else if strings.TrimSpace(text) == "Transferring:" {
+			s.inXfers = true
+		} else if s.inXfers {
+			if t, ok := parseTransfer(text); ok {
+				t.Folder = s.folder
+				s.xfers = append(s.xfers, t)
+			}
 		} else if m := statsFilesRe.FindStringSubmatch(text); m != nil && s.onFiles != nil {
 			n, _ := strconv.Atoi(m[1])
 			s.onFiles(n)

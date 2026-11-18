@@ -141,6 +141,8 @@ type Engine struct {
 	// What the running syncs are doing, for "Syncing “X” (2 of 3) · 12 files…".
 	active            map[string]*activeRun
 	batchN, batchDone int
+	transfers         map[string][]Transfer // files in flight per folder key, from the progress blocks (transfers.go)
+	driveQ            driveQueueCache
 }
 
 const syncTimeout = 3 * time.Hour
@@ -954,6 +956,7 @@ func (e *Engine) syncFolder(f KeptFolder, mode syncMode) (ok bool) {
 	defer func() {
 		e.mu.Lock()
 		delete(e.active, f.Key())
+		delete(e.transfers, f.Key())
 		e.mu.Unlock()
 	}()
 	parkedReason := ""
@@ -1200,12 +1203,13 @@ func (e *Engine) bisync(r folderRun, kind string, extra ...string) (string, erro
 		"--resilient", "--recover", "--max-lock", "10m",
 		"--conflict-resolve", "newer", "--conflict-loser", "num",
 		"--transfers", strconv.Itoa(tr), "--checkers", strconv.Itoa(ck), "--log-level", level,
-		"--stats", "2s", "--stats-log-level", "NOTICE"} // progress for the menu (activity.go)
+		"--stats", "2s", "--stats-log-level", "NOTICE", // progress for the menu (activity.go)
+		"--stats-file-name-length", "0"} // whole file names in the Transferring: lines
 	args = append(args, bwLimitArgs(r.cfg.BwLimitUp, r.cfg.BwLimitDown)...)
 	args = append(args, extra...)
 	changes := newChangeCollector()
 	key := r.f.Key()
-	sf := &statsFilter{onLine: changes.line, onFiles: func(n int) {
+	sf := &statsFilter{onLine: changes.line, folder: key, onTransfers: func(list []Transfer) { e.setTransfers(key, list) }, onFiles: func(n int) {
 		e.mu.Lock()
 		changed := false
 		if a := e.active[key]; a != nil && a.files != n {
@@ -1229,6 +1233,7 @@ func (e *Engine) bisync(r folderRun, kind string, extra ...string) (string, erro
 	e.mu.Unlock()
 	out, err := e.run(syncTimeout, sf, r.cfg.Rclone(), args...)
 	sf.Flush()
+	e.setTransfers(key, nil) // the run is over
 	wrote, over := changes.localWrites()
 	e.mu.Lock()
 	e.ownWritesLocked(r.f.Key(), wrote, over || kind != "sync") // live sync: the run's own writes

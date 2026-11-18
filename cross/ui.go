@@ -249,6 +249,7 @@ func (u *webUI) handler(e *Engine) http.Handler {
 	mux.HandleFunc("GET /ui/api/state", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, e.uiState()) })
 	mux.HandleFunc("GET /ui/api/account", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, e.uiAccount(r.Context())) })
 	mux.HandleFunc("GET /ui/api/drive", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, e.driveStats()) })
+	mux.HandleFunc("GET /ui/api/transfers", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, e.transfersForPage()) })
 	mux.HandleFunc("GET /ui/api/unsynced", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]int{"unsynced": e.UnsyncedCount(r.URL.Query().Get("path"))})
 	})

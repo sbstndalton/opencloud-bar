@@ -173,7 +173,9 @@ func TestStatsFilter(t *testing.T) {
 		"2026/11/15 06:35:13 ERROR : Bisync critical error: path1 and path2 are out of sync"
 	var log bytes.Buffer
 	var counts []int
-	sf := &statsFilter{w: &log, onFiles: func(n int) { counts = append(counts, n) }}
+	var xfers [][]Transfer
+	sf := &statsFilter{w: &log, folder: "Docs", onFiles: func(n int) { counts = append(counts, n) },
+		onTransfers: func(l []Transfer) { xfers = append(xfers, l) }}
 	for i := 0; i < len(out); i += 7 { // arrives in pieces, split anywhere
 		end := min(i+7, len(out))
 		_, _ = sf.Write([]byte(out[i:end]))
@@ -181,6 +183,11 @@ func TestStatsFilter(t *testing.T) {
 	sf.Flush()
 	if len(counts) != 2 || counts[0] != 260 || counts[1] != 300 {
 		t.Errorf("counts %v", counts)
+	}
+	// The Transferring: line of the first block (the 100% line has no ETA); the second block has none.
+	if len(xfers) != 2 || len(xfers[0]) != 1 || len(xfers[1]) != 0 ||
+		xfers[0][0] != (Transfer{Folder: "Docs", Name: "f561.bin", Percent: 100, Size: "292.969 KiB", Speed: "0 B/s"}) {
+		t.Errorf("transfers %+v", xfers)
 	}
 	want := "2026/11/15 06:35:11 NOTICE: f.txt: Can't follow symlink without -L/--copy-links\r\n" +
 		"2026/11/15 06:35:13 ERROR : Bisync critical error: path1 and path2 are out of sync"

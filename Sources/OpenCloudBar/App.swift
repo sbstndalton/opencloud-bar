@@ -107,6 +107,9 @@ struct MenuContent: View {
 
         keptFoldersMenu
         recentChangesMenu
+        if model.transferCount > 0 {
+            Button("Transfers (\(model.transferCount))…") { model.openSettings(.transfers) }
+        }
         Button("Search OpenCloud…") { model.showSearch() }
             .disabled(model.needsSignIn || !model.config.isOIDC)
             .keyboardShortcut("f")
