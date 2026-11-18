@@ -336,13 +336,18 @@ function drawFolders() {
   if (typedVal) body.querySelector("#keep-path").value = typedVal;
   if (wasOpen) body.querySelector("details.keep").open = true;
 }
-// Keep by path. A folder that is big, or bigger than the free space here, answers needsConfirm
-// (with the text to ask) and isn't kept until the same request is sent again with confirm.
+// Keep by path. A folder that is big, or bigger than the free space here, is answered with
+// status 409 and {needsConfirm, size, free, message}; it isn't kept until the same request is
+// sent again with confirm.
+async function keepRequest(body) {
+  try { return await post("keep", body); }
+  catch (e) { if (e.data && e.data.needsConfirm) return e.data; throw e; }
+}
 async function keepPost(path, space) {
-  let r = await post("keep", { path, space });
+  let r = await keepRequest({ path, space });
   if (r.needsConfirm) {
     if (!confirm(r.message || "This folder is big. Keep it anyway?")) return { cancelled: true };
-    r = await post("keep", { path, space, confirm: true });
+    r = await keepRequest({ path, space, confirm: true });
   }
   return r;
 }

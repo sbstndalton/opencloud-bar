@@ -1816,6 +1816,11 @@ func (e *Engine) Reload() error {
 		e.quotaID = id
 		e.resetQuotaLocked(e.cfg, cfg)
 	}
+	if e.cfgErr == nil && !e.cfg.ServerNotesOn() && cfg.ServerNotesOn() {
+		// "Show OpenCloud notifications" turned on: nothing was polled while it was off, so
+		// what piled up isn't news. The next fetch only records (no flood).
+		e.resetSrvNotesLocked(e.cfg, cfg)
+	}
 	e.cfg, e.cfgErr = cfg, nil
 	e.signedOut = out
 	if out {

@@ -89,7 +89,7 @@ Changing exclude rules (for one folder or for all) asks first. Each affected fol
 
 `opencloud-bar run` starts the app (`run --no-tray` on a server). Then control it with:
 - `status`, `sync [PATH]` (one kept folder), `pause [--for 1h]` (a length like `30m`, `1h` or `8h`, from a minute to 30 days, also for the settings page's timed pause; without it, until `resume`), `resume`;
-- `keep PATH [--local DIR] [--yes]` (PATH is relative to your OpenCloud space), `keep-drive PATH [--yes]` (PATH is a folder inside the mounted OpenCloud drive; see [Keep a folder from Finder or Explorer](#keep-a-folder-from-finder-or-explorer)), `unkeep PATH`, `repair PATH`, `allow-delete PATH`;
+- `keep PATH [--local DIR] [--yes]` (PATH is relative to your OpenCloud space), `keep-drive PATH [--yes] [--dialogs]` (PATH is a folder inside the mounted OpenCloud drive; see [Keep a folder from Finder or Explorer](#keep-a-folder-from-finder-or-explorer)), `unkeep PATH`, `repair PATH`, `allow-delete PATH`;
 - `connect`, `eject`, `settings`, `check-updates`, `version`, `reload`, `quit`.
 
 `setup [URL]` signs in through the browser and `logout` forgets the sign-in. `token` prints an access token; rclone runs it, and you rarely need it.
@@ -194,8 +194,8 @@ With the browser sign-in, the app checks your personal space's storage every 30 
 Right-click a folder **inside the OpenCloud drive** and keep it, without opening Settings. Only folders in the drive can be kept this way: the path is mapped to the folder's path in OpenCloud, and a folder outside the drive is refused with a message saying so. Single files can't be kept (a sync works on folders), and neither can the drive itself.
 
 - **macOS:** Finder ▸ right-click ▸ **Services ▸ Keep on This Mac with OpenCloud Bar**. If you pick a file, the app offers to keep its folder. The item comes from OpenCloud Bar's `Info.plist` (`NSServices`), so macOS lists it once the app has been opened from Applications. If it isn't in the menu, switch it on under System Settings ▸ Keyboard ▸ Keyboard Shortcuts ▸ Services ▸ Files and Folders. Keep a Folder… in the menu uses the same code.
-- **Windows:** Explorer ▸ right-click a folder ▸ **Keep on this PC with OpenCloud Bar** (Windows 11: under **Show more options**). The installer adds it for the user it runs as (`HKCU\Software\Classes\Directory\shell\OpenCloudBarKeep`, running `"<install folder>\opencloud-bar.exe" keep-drive "<folder>"`) and uninstalling removes it. A console window appears briefly, because `opencloud-bar.exe` is the console program; messages and questions come up in dialogs.
-- **Linux:** there is no file-manager item. Run `opencloud-bar keep-drive PATH`, for example `opencloud-bar keep-drive ~/OpenCloud-Drive/Documents/Work`. It prints why it refuses a path (outside the drive, a file, the drive itself) and exits with a non-zero status. `opencloud-bar keep PATH` does the same for a path relative to your space.
+- **Windows:** Explorer ▸ right-click a folder ▸ **Keep on this PC with OpenCloud Bar** (Windows 11: under **Show more options**). The installer adds it for the user it runs as (`HKCU\Software\Classes\Directory\shell\OpenCloudBarKeep`, running `"<install folder>\OpenCloud Bar.exe" keep-drive --dialogs "<folder>"`) and uninstalling removes it. It runs the windowed `OpenCloud Bar.exe` (the same program as `opencloud-bar.exe`, without a console), so no console window flashes. `--dialogs` makes messages and questions come up in dialogs; without it `keep-drive` answers on the console like on the command line.
+- **Linux:** there is no file-manager item. Run `opencloud-bar keep-drive PATH`, for example `opencloud-bar keep-drive ~/OpenCloud-Drive/Documents/Work`. It prints why it refuses a path (outside the drive, a folder that isn't there, a file, the drive itself) and exits with a non-zero status. Each part of the path takes its upper and lower case from the drive's own listing; if two folders differ only in case, it asks you to rename one. `opencloud-bar keep PATH` does the same for a path relative to your space.
 
 The app must be running and signed in with the browser. The drive must be connected on the Mac.
 
@@ -203,15 +203,15 @@ The app must be running and signed in with the browser. The drive must be connec
 
 Before a folder is kept, the app asks OpenCloud how big it is (a `PROPFIND` for `oc:size`, Depth 0, sent to your server only). It warns when the folder is **bigger than the free space** at the local folder (`localRoot`) or **bigger than 5 GB**, and you can keep it anyway or cancel. If the size can't be found out (no browser sign-in, the server doesn't say, no network), nothing is blocked.
 - **macOS:** an alert when you keep a folder with the menu, the Finder item, or Settings ▸ Kept Folders (by path or space).
-- **Windows and Linux:** a dialog for the folder picker and `keep-drive` from Explorer; the settings page asks with a confirm box. On the command line, `keep` and `keep-drive` print the warning, keep nothing and exit non-zero unless you add `--yes`.
+- **Windows and Linux:** a dialog for the folder picker and for `keep-drive --dialogs` (the Explorer item); `keep-drive` without `--dialogs` answers on the console; the settings page asks with a confirm box. On the command line, `keep` and `keep-drive` print the warning, keep nothing and exit non-zero unless you add `--yes`.
 
 ## OpenCloud notifications
 
 OpenCloud's own notifications, the ones in the bell of the web interface (shares, space memberships, expiring shares, virus finds, mentions), also appear as desktop notifications. With the browser sign-in the app asks `GET /ocs/v2.php/apps/notifications/api/v1/notifications?format=json` every 3 minutes (the userlog service). It only reads: nothing is marked as read or deleted in OpenCloud, so the bell still shows them.
 
 - Each notification is shown once. The first successful check after you install, sign in or change the server (or account) only records what is there, so you get no flood of old ones. The ids seen (about 500) are kept in the sync state folder (`server-notifications.json`) and forgotten when you sign out, sign in or change the server, like the storage warning.
-- Checks happen only while you are signed in with the browser, syncing isn't paused, and the computer isn't asleep. Errors are retried later, doubling the wait up to 30 minutes. If the server has no such service (a 404), the app stops asking until you sign in again or change the server, without a message.
-- **Settings ▸ General ▸ Show OpenCloud notifications** (on by default; `serverNotifications` in `config.json`) turns it off. It also needs **Show notifications**: with that off, the ids are still recorded, so turning it on shows no flood.
+- Checks happen only while you are signed in with the browser, syncing isn't paused, and (Mac only) the computer isn't asleep; Windows and Linux don't pause for sleep. Errors are retried later, doubling the wait up to 30 minutes. If the server has no such service (a 404), the app stops asking until you sign in again or change the server, without a message.
+- **Settings ▸ General ▸ Show OpenCloud notifications** (on by default; `serverNotifications` in `config.json`) turns it off; turning it on again records what is waiting first and shows only what comes after. It also needs **Show notifications**: with that off, the ids are still recorded, so turning it on shows no flood.
 - More than five new ones at once show the first four and a summary.
 
 ## File history

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -29,6 +30,9 @@ import (
 // keepWarnBytes: a folder bigger than this is confirmed before it is kept (5 GB).
 const keepWarnBytes int64 = 5 << 30
 
+// keepSizeTimeout caps the size PROPFIND: a slow answer is an unknown size, and never blocks.
+const keepSizeTimeout = 10 * time.Second
+
 // driveRel is the path in OpenCloud of picked, a path inside the mounted drive root (the
 // mount point: a drive letter like "O:" on Windows, a folder elsewhere). ok is false for a path
 // outside the drive and for the drive itself. Comparisons follow the platform's rules (a drive
@@ -43,6 +47,84 @@ func driveRel(root, picked string) (string, bool) {
 		return "", false
 	}
 	return filepath.ToSlash(rel), true
+}
+
+// Why a path can't be mapped to a folder in OpenCloud.
+var (
+	errDriveOutside   = errors.New("outside the drive")
+	errDriveMissing   = errors.New("not found in the drive")
+	errDriveAmbiguous = errors.New("more than one folder matches")
+)
+
+// driveListFn lists the names in a folder of the drive (a test hook).
+var driveListFn = func(dir string) ([]string, error) {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(ents))
+	for _, e := range ents {
+		names = append(names, e.Name())
+	}
+	return names, nil
+}
+
+// resolveDriveRel maps picked to its path in OpenCloud like driveRel, and also requires the
+// folder to exist. Each segment takes its case from the drive's own listing, walking down from
+// the root and matching case-insensitively (on Windows the picked path keeps whatever case the
+// caller typed, and OpenCloud's paths are case-sensitive). Two entries that match only
+// case-insensitively (possible on a case-sensitive server) are ambiguous: refused.
+//
+// Names are not otherwise transformed. rclone mount does not apply the Windows "encoding" (the
+// fullwidth look-alikes for : * ? " < > | or a trailing dot or space): that is the local
+// backend's --local-encoding (https://rclone.org/overview/#restricted-filenames), and the
+// mount code (cmd/cmount/fs.go) passes names between WinFsp and the VFS unchanged; the webdav
+// backend's encoding is the identity for OpenCloud. So the drive shows the server's names as
+// they are, and nothing needs mapping back.
+func resolveDriveRel(root, picked string) (string, error) {
+	rel, ok := driveRel(root, picked)
+	if !ok {
+		return "", errDriveOutside
+	}
+	cur := filepath.Clean(root)
+	if runtime.GOOS == "windows" && len(cur) == 2 && cur[1] == ':' {
+		cur += `\`
+	}
+	var out []string
+	for _, seg := range strings.Split(rel, "/") {
+		names, err := driveListFn(cur)
+		if err != nil {
+			return "", errDriveMissing
+		}
+		match := ""
+		n := 0
+		for _, name := range names {
+			if strings.EqualFold(name, seg) {
+				match = name
+				n++
+			}
+		}
+		switch {
+		case n == 0:
+			return "", errDriveMissing
+		case n > 1:
+			return "", errDriveAmbiguous
+		}
+		out = append(out, match)
+		cur = filepath.Join(cur, match)
+	}
+	return strings.Join(out, "/"), nil
+}
+
+// driveRelMessage says why a path isn't kept.
+func driveRelMessage(err error, mount, path string) (title, text string) {
+	switch err {
+	case errDriveMissing:
+		return "That folder isn't there", "“" + path + "” doesn't exist in the OpenCloud drive (" + mount + ")."
+	case errDriveAmbiguous:
+		return "Which folder?", "“" + path + "” matches more than one folder that differs only in upper and lower case. Rename one in OpenCloud, or keep it by its exact path in Settings."
+	}
+	return "That folder isn't in OpenCloud", "Only a folder inside the OpenCloud drive (" + mount + ") can be kept. “" + path + "” isn't in it."
 }
 
 // SizeCheck is the answer of the size check. Size and Free are -1 when unknown.
@@ -158,7 +240,7 @@ func checkKeepSize(cfg Config, davURL, name, localPath string) SizeCheck {
 	if err != nil {
 		return unknown
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), keepSizeTimeout)
 	defer cancel()
 	size, err := keepSizeFn(ctx, davURL, tok)
 	if err != nil {
@@ -167,7 +249,7 @@ func checkKeepSize(cfg Config, davURL, name, localPath string) SizeCheck {
 	}
 	dir := expand(cfg.LocalRoot)
 	if localPath != "" {
-		dir = localPath
+		dir = expand(localPath)
 	}
 	return newSizeCheck(name, size, freeAtFn(dir))
 }
@@ -218,7 +300,7 @@ func keepWithDialogs(e *Engine, rel string) {
 type keepDriveEnv struct {
 	mount     string // the drive's mount point
 	out, errw io.Writer
-	dialogs   bool // answer in dialogs (started from the file manager, no terminal)
+	dialogs   bool // answer in dialogs (--dialogs, or on other platforms: started without a terminal)
 	alert     func(title, text string)
 	confirm   func(title, text, button string) bool
 	// keep asks the running app to keep rel; with confirm false it may answer NeedsConfirm.
@@ -233,7 +315,7 @@ func (k keepDriveEnv) say(title, text string) {
 	}
 }
 
-// run is `keep-drive PATH [--yes]`; the result is the exit code.
+// run is `keep-drive PATH [--yes] [--dialogs]`; the result is the exit code.
 func (k keepDriveEnv) run(args []string) int {
 	var path string
 	yes := false
@@ -241,20 +323,23 @@ func (k keepDriveEnv) run(args []string) int {
 		switch {
 		case a == "--yes" || a == "-y":
 			yes = true
+		case a == "--dialogs":
+			k.dialogs = true
 		case path == "" && !strings.HasPrefix(a, "-"):
 			path = a
 		default:
-			fmt.Fprintln(k.errw, "usage: opencloud-bar keep-drive PATH [--yes]")
+			fmt.Fprintln(k.errw, "usage: opencloud-bar keep-drive PATH [--yes] [--dialogs]")
 			return 2
 		}
 	}
 	if path == "" {
-		fmt.Fprintln(k.errw, "usage: opencloud-bar keep-drive PATH [--yes]")
+		fmt.Fprintln(k.errw, "usage: opencloud-bar keep-drive PATH [--yes] [--dialogs]")
 		return 2
 	}
-	rel, ok := driveRel(k.mount, path)
-	if !ok {
-		k.say("That folder isn't in OpenCloud", "Only a folder inside the OpenCloud drive ("+k.mount+") can be kept. “"+path+"” isn't in it.")
+	rel, err := resolveDriveRel(k.mount, path)
+	if err != nil {
+		title, text := driveRelMessage(err, k.mount, path)
+		k.say(title, text)
 		return 1
 	}
 	if st, err := os.Stat(path); err == nil && !st.IsDir() {
@@ -288,4 +373,11 @@ func (k keepDriveEnv) run(args []string) int {
 func stdinIsTerminal() bool {
 	st, err := os.Stdin.Stat()
 	return err == nil && st.Mode()&os.ModeCharDevice != 0
+}
+
+// autoDialogs is the fallback when --dialogs isn't given: dialogs when there is no terminal.
+// Not on Windows: a console program started by Explorer still has a console as stdin (a
+// character device), so the test says "terminal" there; the Explorer verb passes --dialogs.
+func autoDialogs() bool {
+	return runtime.GOOS != "windows" && hasDialogs() && !stdinIsTerminal()
 }

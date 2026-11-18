@@ -2076,6 +2076,11 @@ final class AppModel: ObservableObject {
             quotaIdentity = Self.quotaIdentity(c)
             resetQuota(stateFolders: [old.stateURL, c.stateURL])
         }
+        if c.serverNotifications && !old.serverNotifications {
+            // Nothing was polled while it was off, so what piled up isn't news: the next fetch
+            // only records.
+            resetServerNotes(stateFolders: [old.stateURL, c.stateURL])
+        }
         config = c
         applyEnvironment()
         refreshStatusEntries()

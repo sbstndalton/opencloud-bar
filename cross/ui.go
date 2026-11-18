@@ -753,14 +753,18 @@ func (e *Engine) serveKeep(w http.ResponseWriter, r *http.Request) {
 
 // keepAnswer keeps a folder after the size check. A folder that is big or may not fit isn't kept
 // until the request says confirm: the answer is {"needsConfirm": true, "size", "free",
-// "message"} (sizes in bytes, -1 unknown). Otherwise {"needsConfirm": false}.
+// "message"} with status 409 (sizes in bytes, -1 unknown). Otherwise 200 {"needsConfirm": false}.
 func keepAnswer(w http.ResponseWriter, space, path string, confirm bool, e *Engine) {
 	sc, err := e.KeepChecked(space, path, "", confirm)
 	if err != nil {
 		jsonErr(w, http.StatusConflict, err)
 		return
 	}
-	writeJSON(w, 200, sc)
+	code := 200
+	if sc.NeedsConfirm {
+		code = http.StatusConflict
+	}
+	writeJSON(w, code, sc)
 }
 
 // serveOpen opens something on this computer. The page never sends a path or address: only

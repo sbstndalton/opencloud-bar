@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -153,14 +154,17 @@ func TestKeepDriveKeepsAFolderInsideTheDrive(t *testing.T) {
 	if len(k.rels) != 1 || k.rels[0] != "Docs/Work" || k.calls[0] {
 		t.Errorf("calls %v %v", k.rels, k.calls)
 	}
-	// A folder that isn't there (a mount that isn't visible to this check) still maps.
-	k = newKDRig(t, false)
-	if code := k.env.run([]string{filepath.Join(k.mount, "Later")}); code != 0 || k.rels[0] != "Later" {
-		t.Errorf("exit %d, %v", code, k.rels)
+	// A folder that isn't there is refused (and nothing is asked of the app).
+	k = newKDRig(t, true)
+	if code := k.env.run([]string{filepath.Join(k.mount, "Later")}); code == 0 || len(k.rels) != 0 || len(k.alerts) != 1 || !strings.Contains(k.errw.String(), "doesn't exist") {
+		t.Errorf("missing folder: exit %d, %v, %v, %q", code, k.rels, k.alerts, k.errw.String())
 	}
 	// The app not running (or refusing) is an error.
 	k = newKDRig(t, true)
 	k.keepErr = errors.New("opencloud-bar isn't running")
+	if err := os.MkdirAll(filepath.Join(k.mount, "Later"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if code := k.env.run([]string{filepath.Join(k.mount, "Later")}); code == 0 || len(k.alerts) != 1 {
 		t.Errorf("exit %d, alerts %v", code, k.alerts)
 	}
@@ -175,6 +179,9 @@ func TestKeepDriveBigFolderNeedsYesOrADialog(t *testing.T) {
 	k := newKDRig(t, false)
 	k.check = big
 	dir := filepath.Join(k.mount, "Big")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if code := k.env.run([]string{dir}); code == 0 || len(k.rels) != 1 {
 		t.Fatalf("without --yes: exit %d, calls %v", code, k.calls)
 	}
@@ -189,6 +196,9 @@ func TestKeepDriveBigFolderNeedsYesOrADialog(t *testing.T) {
 	k = newKDRig(t, true)
 	k.check = big
 	dir = filepath.Join(k.mount, "Big")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if code := k.env.run([]string{dir}); code == 0 || k.confirms != 1 || len(k.calls) != 1 {
 		t.Fatalf("cancelled: exit %d, confirms %d, calls %v", code, k.confirms, k.calls)
 	}
@@ -424,7 +434,7 @@ func TestKeepAPIReturnsNeedsConfirmUntilConfirmed(t *testing.T) {
 		client: &http.Client{Jar: newJar(), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 	r.login()
 	resp, body := r.post("/ui/api/keep", `{"path":"Big"}`)
-	if resp.StatusCode != 200 || !strings.Contains(body, `"needsConfirm":true`) || !strings.Contains(body, `"size":7516192768`) || !strings.Contains(body, `"free":536870912000`) {
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(body, `"needsConfirm":true`) || !strings.Contains(body, `"size":7516192768`) || !strings.Contains(body, `"free":536870912000`) {
 		t.Fatalf("%d %s", resp.StatusCode, body)
 	}
 	if strings.Contains(keptPaths(e), "Big") {
@@ -438,7 +448,7 @@ func TestKeepAPIReturnsNeedsConfirmUntilConfirmed(t *testing.T) {
 	e2, _ := sizeRig(t, 7*gb, nil, 500*gb)
 	srv2 := httptest.NewServer(apiHandler(e2, func() {}, "tok", newWebUI()))
 	t.Cleanup(srv2.Close)
-	post := func(q string) string {
+	post := func(q string) (int, string) {
 		req, _ := http.NewRequest("POST", srv2.URL+"/keep?"+q, nil)
 		req.Header.Set("Authorization", "Bearer tok")
 		resp, err := http.DefaultClient.Do(req)
@@ -447,13 +457,22 @@ func TestKeepAPIReturnsNeedsConfirmUntilConfirmed(t *testing.T) {
 		}
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(resp.Body)
-		return string(b)
+		return resp.StatusCode, string(b)
 	}
-	if b := post("path=Big"); !strings.Contains(b, `"needsConfirm":true`) || strings.Contains(keptPaths(e2), "Big") {
-		t.Errorf("CLI without confirm: %s %s", b, keptPaths(e2))
+	if c, b := post("path=Big"); c != http.StatusConflict || !strings.Contains(b, `"needsConfirm":true`) || !strings.Contains(b, `"size":7516192768`) || !strings.Contains(b, `"free":536870912000`) || strings.Contains(keptPaths(e2), "Big") {
+		t.Errorf("CLI without confirm: %d %s %s", c, b, keptPaths(e2))
 	}
-	if b := post("path=Big&confirm=1"); !strings.Contains(b, `"needsConfirm":false`) || !strings.Contains(keptPaths(e2), "Big") {
-		t.Errorf("CLI with confirm: %s %s", b, keptPaths(e2))
+	if c, b := post("path=Big&confirm=1"); c != 200 || !strings.Contains(b, `"needsConfirm":false`) || !strings.Contains(keptPaths(e2), "Big") {
+		t.Errorf("CLI with confirm: %d %s %s", c, b, keptPaths(e2))
+	}
+	// A folder that doesn't need confirming is a plain 200.
+	e3, _ := sizeRig(t, 1<<20, nil, 500<<30)
+	srv3 := httptest.NewServer(apiHandler(e3, func() {}, "tok", newWebUI()))
+	t.Cleanup(srv3.Close)
+	req, _ := http.NewRequest("POST", srv3.URL+"/keep?path=Small", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	if resp, err := http.DefaultClient.Do(req); err != nil || resp.StatusCode != 200 {
+		t.Errorf("small folder: %v %v", resp, err)
 	}
 }
 
@@ -495,7 +514,7 @@ func TestInstallerAddsTheKeepVerbAndRemovesItOnUninstall(t *testing.T) {
 	if verb["ValueData"] != "Keep on this PC with OpenCloud Bar" {
 		t.Errorf("menu text %q", verb["ValueData"])
 	}
-	if want := `"{app}\opencloud-bar.exe" keep-drive "%V"`; command["ValueData"] != want {
+	if want := `"{app}\OpenCloud Bar.exe" keep-drive --dialogs "%V"`; command["ValueData"] != want {
 		t.Errorf("command %q, want %q", command["ValueData"], want)
 	}
 	if !deletes {
@@ -1058,5 +1077,189 @@ func TestConfigToggleServerNotifications(t *testing.T) {
 	}
 	if _, body := rig.do("GET", "/ui/api/state", "", "", nil); !strings.Contains(body, `"serverNotifications":false`) {
 		t.Errorf("the page isn't told: %.300s", body)
+	}
+}
+
+// ---- path mapping, --dialogs, checkKeepSize's local path
+
+func withDriveListing(t *testing.T, tree map[string][]string) {
+	t.Helper()
+	old := driveListFn
+	driveListFn = func(dir string) ([]string, error) {
+		names, ok := tree[filepath.ToSlash(dir)]
+		if !ok {
+			return nil, os.ErrNotExist
+		}
+		return names, nil
+	}
+	t.Cleanup(func() { driveListFn = old })
+}
+
+func TestResolveDriveRelTakesCaseFromTheListing(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "oc")
+	r := filepath.ToSlash(root)
+	withDriveListing(t, map[string][]string{
+		r:                 {"Docs", "Photos"},
+		r + "/Docs":       {"Work", "Plans"},
+		r + "/Docs/Work":  {"Q1"},
+		r + "/Photos":     {"a", "A"}, // differ only by case
+		r + "/Docs/Plans": {},
+	})
+	// The picked path's case is whatever the caller had; the result is the real names. On
+	// case-sensitive systems driveRel only accepts the root's exact case, so vary the rest.
+	got, err := resolveDriveRel(root, filepath.Join(root, "docs", "WORK", "q1"))
+	if err != nil || got != "Docs/Work/Q1" {
+		t.Errorf("got %q, %v", got, err)
+	}
+	if got, err = resolveDriveRel(root, filepath.Join(root, "Docs")); err != nil || got != "Docs" {
+		t.Errorf("got %q, %v", got, err)
+	}
+	if _, err = resolveDriveRel(root, filepath.Join(root, "Docs", "Nope")); err != errDriveMissing {
+		t.Errorf("missing: %v", err)
+	}
+	if _, err = resolveDriveRel(root, filepath.Join(root, "Gone", "x")); err != errDriveMissing {
+		t.Errorf("missing parent: %v", err)
+	}
+	if _, err = resolveDriveRel(root, filepath.Join(root, "photos", "a")); err != errDriveAmbiguous {
+		t.Errorf("ambiguous: %v", err)
+	}
+	if _, err = resolveDriveRel(root, root); err != errDriveOutside {
+		t.Errorf("the drive itself: %v", err)
+	}
+	if _, err = resolveDriveRel(root, filepath.Join(filepath.Dir(root), "other")); err != errDriveOutside {
+		t.Errorf("outside: %v", err)
+	}
+}
+
+func TestResolveDriveRelOnARealFolder(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "Docs", "Work"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := resolveDriveRel(root, filepath.Join(root, "Docs", "Work")); err != nil || got != "Docs/Work" {
+		t.Errorf("got %q, %v", got, err)
+	}
+	if _, err := resolveDriveRel(root, filepath.Join(root, "Docs", "Later")); err != errDriveMissing {
+		t.Errorf("missing: %v", err)
+	}
+}
+
+func TestKeepDriveDialogsFlag(t *testing.T) {
+	k := newKDRig(t, false) // no dialogs by default
+	if err := os.MkdirAll(filepath.Join(k.mount, "Docs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	k.env.run([]string{"--dialogs", filepath.Join(k.mount, "Nope")})
+	if len(k.alerts) != 1 {
+		t.Errorf("--dialogs: alerts %v", k.alerts)
+	}
+	k = newKDRig(t, false)
+	k.env.run([]string{filepath.Join(k.mount, "Nope")})
+	if len(k.alerts) != 0 {
+		t.Errorf("without --dialogs: alerts %v", k.alerts)
+	}
+	// The flag may come after the path too, and a big folder then asks in a dialog.
+	k = newKDRig(t, false)
+	k.check = newSizeCheck("Big", 6<<30, 100<<30)
+	k.answer = true
+	dir := filepath.Join(k.mount, "Big")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if code := k.env.run([]string{dir, "--dialogs"}); code != 0 || k.confirms != 1 {
+		t.Errorf("exit %d, confirms %d", code, k.confirms)
+	}
+}
+
+func TestCheckKeepSizeExpandsTheLocalPath(t *testing.T) {
+	e, _ := sizeRig(t, 1, nil, 1)
+	var asked string
+	old := freeAtFn
+	freeAtFn = func(dir string) int64 { asked = dir; return 1 << 40 }
+	t.Cleanup(func() { freeAtFn = old })
+	cfg := e.config()
+	checkKeepSize(cfg, "https://x/dav/spaces/a/", "A", "~/Elsewhere")
+	if asked != expand("~/Elsewhere") || strings.HasPrefix(asked, "~") {
+		t.Errorf("free space asked of %q", asked)
+	}
+}
+
+func TestSizeCheckIsCappedAt10Seconds(t *testing.T) {
+	if keepSizeTimeout != 10*time.Second {
+		t.Errorf("timeout %v", keepSizeTimeout)
+	}
+	e, _ := sizeRig(t, 1, nil, 1)
+	var left time.Duration
+	old := keepSizeFn
+	keepSizeFn = func(ctx context.Context, _, _ string) (int64, error) {
+		d, _ := ctx.Deadline()
+		left = time.Until(d)
+		return 1, nil
+	}
+	t.Cleanup(func() { keepSizeFn = old })
+	checkKeepSize(e.config(), "https://x/dav/spaces/a/", "A", "")
+	if left <= 0 || left > 10*time.Second {
+		t.Errorf("deadline in %v", left)
+	}
+}
+
+func TestTurningServerNotificationsOnSeedsAgain(t *testing.T) {
+	r := newNotesRig(t, "")
+	file := srvNotesFile(r.e.config())
+	setting := func(on bool) {
+		t.Helper()
+		raw, err := os.ReadFile(configFile())
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := map[string]any{}
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatal(err)
+		}
+		m["serverNotifications"] = on
+		b, _ := json.Marshal(m)
+		if err := os.WriteFile(configFile(), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		signInTo(t, r.f.srv.URL)
+		// A refresh token, so the reload sees a signed-in account (else it resets everything).
+		_ = os.MkdirAll(appDir(), 0o700)
+		if err := os.WriteFile(refreshFallback(), []byte("refresh"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.e.Reload(); err != nil {
+			t.Fatal(err)
+		}
+		signedIn(r.e)
+	}
+	setting(true) // the first reload settles the account's identity (that resets, too)
+	r.f.set(200, notesJSON("n1"))
+	r.poll() // seeds
+	setting(false)
+	if !exists(file) {
+		t.Fatalf("turning it off forgot what was seen: %s signedOut=%v", file, r.e.signedOut)
+	}
+	setting(true)
+	if exists(file) {
+		t.Fatal("turning it on kept the old ids")
+	}
+	// Notifications arrived while it was off: the first fetch after turning it on only records.
+	r.f.set(200, notesJSON("n1", "n2"))
+	r.poll()
+	if got := r.titles(); len(got) != 0 {
+		t.Fatalf("shown after turning on: %v", got)
+	}
+	if seen := readSrvSeen(file); !seen.Seeded || strings.Join(seen.IDs, ",") != "n1,n2" {
+		t.Errorf("not recorded: %+v", seen)
+	}
+	r.f.set(200, notesJSON("n1", "n2", "n3"))
+	r.poll()
+	if got := r.titles(); len(got) != 1 || !strings.Contains(got[0], "n3") {
+		t.Errorf("after the seed: %v", got)
+	}
+	// Saving another setting while it stays on doesn't reset anything.
+	setting(true)
+	if !exists(file) {
+		t.Error("an unchanged setting reset the ids")
 	}
 }

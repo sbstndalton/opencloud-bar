@@ -92,9 +92,10 @@ func pickAndKeep(e *Engine) {
 	if !ok {
 		return
 	}
-	rel, ok := driveRel(target, picked)
-	if !ok {
-		dialogAlert("That folder isn't in OpenCloud", "Choose a folder inside the OpenCloud drive.")
+	rel, err := resolveDriveRel(target, picked)
+	if err != nil {
+		title, text := driveRelMessage(err, target, picked)
+		dialogAlert(title, text)
 		return
 	}
 	keepWithDialogs(e, rel)
