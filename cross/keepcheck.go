@@ -39,7 +39,11 @@ const keepSizeTimeout = 10 * time.Second
 // letter or a folder's case doesn't matter on Windows). The result uses "/".
 func driveRel(root, picked string) (string, bool) {
 	root = filepath.Clean(root)
-	if len(root) == 2 && root[1] == ':' {
+	// A bare drive letter: Clean turns "O:" into "O:." on Windows, which is "the current folder
+	// on O:", not the drive's root.
+	if v := filepath.VolumeName(root); v != "" && (root == v || root == v+".") {
+		root = v + `\`
+	} else if len(root) == 2 && root[1] == ':' {
 		root += `\`
 	}
 	rel, err := filepath.Rel(root, filepath.Clean(picked))
