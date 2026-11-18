@@ -93,9 +93,17 @@ final class AppModel: ObservableObject {
     @Published private(set) var activeFiles: [String: Int] = [:]
     /// The files each running sync is moving (key → files), read from rclone's progress blocks.
     @Published private(set) var transfers: [String: [Transfer]] = [:]
-    /// The drive's upload queue, asked at most every 5 s while the drive runs (see refreshDriveQueue).
+    /// The drive's upload queue: asked every 5 s while a sync runs, the queue isn't empty or the
+    /// Transfers page is open, otherwise every 30 s (see refreshDriveQueue).
     @Published private(set) var driveQueue = DriveQueue()
     private var driveQueueAt = Date.distantPast
+    /// The Transfers page is on screen (set by the page): keeps the faster refresh.
+    var transfersPageOpen = false
+    /// This session's rclone answered vfs/stats but not vfs/queue: don't try vfs/queue again.
+    private var queueCallUnsupported = false
+    /// The run whose progress blocks may still set `transfers` (per folder). A late block of an
+    /// earlier run, still queued on the main actor, finds another id (or none) and is dropped.
+    private var transferRun: [String: UUID] = [:]
     /// Live sync (on by default): watches the kept folders (LiveSync.swift).
     private(set) lazy var live = LiveSync(model: self)
     /// What started each folder's running sync ("timer", "local change", "server change"), for Recent Changes.
@@ -864,6 +872,7 @@ final class AppModel: ObservableObject {
             activeNames[f.key] = nil
             activeFiles[f.key] = nil
             transfers[f.key] = nil   // the run is over
+            transferRun[f.key] = nil
         }
         let fm = FileManager.default
         let parkedReason = mode == .driftRetry ? needsRepairReason(f) : nil
@@ -1047,6 +1056,7 @@ final class AppModel: ObservableObject {
         let changes = ChangeCollector()   // fed off the main thread, line by line
         let r = await runTracked(config.rclone, args, log: log, key: run.f.key, onLine: { changes.line($0) })
         transfers[run.f.key] = nil
+        transferRun[run.f.key] = nil   // a block of this run still on its way is dropped
         let (wrote, over) = changes.localWrites()
         live.ownWrites(run.f.key, wrote, unknown: over || kind != "sync")   // live sync: the run's own writes
         if r.status == 0 {
@@ -1330,6 +1340,8 @@ final class AppModel: ObservableObject {
         defer { if let p = tracked { procs[ObjectIdentifier(p)] = nil } }
         let timedOut = Flag()
         let timeout = syncTimeout
+        let runID = UUID()
+        transferRun[key] = runID
         let result: Shell.Result = await withCheckedContinuation { cont in
             let p = Process()
             p.executableURL = URL(fileURLWithPath: exe)
@@ -1343,7 +1355,7 @@ final class AppModel: ObservableObject {
             let stats = StatsFilter(into: buffer, log: logStream, folder: key, onLine: onLine, onTransfers: { list in
                 Task { @MainActor in
                     // Only while the run goes on, and only if it changed (nothing republished otherwise).
-                    guard self.activeNames[key] != nil, (self.transfers[key] ?? []) != list else { return }
+                    guard self.transferRun[key] == runID, self.activeNames[key] != nil, (self.transfers[key] ?? []) != list else { return }
                     self.transfers[key] = list.isEmpty ? nil : list
                 }
             }) { n in
@@ -1734,22 +1746,28 @@ final class AppModel: ObservableObject {
     }
 
     /// Reads the drive's upload queue with `vfs/queue` (rclone lists it in rc/list, v1.76 here;
-    /// rclone.org/rc/#vfs-queue), or, if that isn't answered, the counts in `vfs/stats`. Asked at
-    /// most every 5 s however often it is called (the menu's tick, the Transfers page).
+    /// rclone.org/rc/#vfs-queue), or, if that isn't answered, the counts in `vfs/stats` (and then
+    /// vfs/queue is not tried again this session). Asked at most every 5 s while a sync runs, the
+    /// last answer was not empty or the Transfers page is open, and every 30 s otherwise,
+    /// however often it is called (the menu's tick, the page).
     func refreshDriveQueue() async {
         guard mount?.isRunning == true else {
             if driveQueue != DriveQueue() { driveQueue = DriveQueue() }
             return
         }
-        guard Date().timeIntervalSince(driveQueueAt) >= 5 else { return }
+        // Often only while something moves or the page is open; an idle drive is asked every 30 s.
+        let busy = !activeNames.isEmpty || driveQueue.total > 0 || transfersPageOpen
+        guard Date().timeIntervalSince(driveQueueAt) >= (busy ? 5 : 30) else { return }
         driveQueueAt = Date()
         var next: DriveQueue?
-        if let json = await rc("vfs/queue", timeout: 5), let list = json["queue"] as? [[String: Any]] {
+        if !queueCallUnsupported, let json = await rc("vfs/queue", timeout: 5), let list = json["queue"] as? [[String: Any]] {
             let all = list.map { DriveUpload(name: $0["name"] as? String ?? "", size: ($0["size"] as? NSNumber)?.int64Value ?? 0,
                                              uploading: $0["uploading"] as? Bool ?? false) }
             let n = all.filter(\.uploading).count
             next = DriveQueue(files: Array(all.prefix(DriveQueue.listMax)), uploading: n, queued: all.count - n)
         } else if let s = await driveStats() {
+            // rclone answers, so a vfs/queue that failed isn't a blip: it has none. Not asked again.
+            queueCallUnsupported = true
             next = DriveQueue(files: [], uploading: s.uploading, queued: s.queued, countsOnly: true)
         }
         let result = mount?.isRunning == true ? (next ?? DriveQueue()) : DriveQueue()

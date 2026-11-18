@@ -76,9 +76,16 @@ type statsFilter struct {
 	inStats     bool
 	inXfers     bool // inside the block's "Transferring:" section
 	xfers       []Transfer
+	mu          sync.Mutex // rclone's output copier can still write after the run is closed (WaitDelay)
+	ended       bool       // set by Flush: later writes are ignored
 }
 
 func (s *statsFilter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ended {
+		return len(p), nil
+	}
 	s.partial = append(s.partial, p...)
 	for {
 		i := bytes.IndexByte(s.partial, '\n')
@@ -91,8 +98,12 @@ func (s *statsFilter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// Flush writes a last line that had no newline.
+// Flush writes a last line that had no newline and closes the filter: anything written after
+// it (a copier that outlived WaitDelay) is dropped, so it can't re-add a finished run's files.
 func (s *statsFilter) Flush() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ended = true
 	if len(s.partial) > 0 {
 		s.line(s.partial)
 		s.partial = nil

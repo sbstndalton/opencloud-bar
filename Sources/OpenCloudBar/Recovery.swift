@@ -297,9 +297,11 @@ struct Transfer: Equatable, Identifiable, Sendable {
 
 /// bisync runs with `--stats 2s --stats-log-level NOTICE --stats-file-name-length 0`: every 2
 /// seconds rclone prints a progress block. This reads the transferred-file count and the files
-/// in flight from it and keeps the blocks out of the output (and so out of the sync log). Same
-/// as statsFilter in cross/activity.go (tested there, with real rclone v1.76 blocks; the lines
-/// are written by rclone's accounting package, stats.go and Account.String):
+/// in flight from it and keeps the blocks out of the output (and so out of the sync log). It
+/// mirrors statsFilter in cross/activity.go, which the Go tests check with real rclone v1.76
+/// blocks. There is no Swift test target, so this port is only checked by `selfCheck()` below
+/// (DEBUG builds, once at startup), which runs the same fixture. The lines are written by
+/// rclone's accounting package, stats.go and Account.String:
 ///
 ///     Transferring:
 ///      * sub dir/big, file: v1 (45%).bin: 34% / 2.861 MiB, 1019.990 KiB/s, 1s
@@ -407,3 +409,58 @@ func activityText(name: String?, index: Int, count: Int, files: Int) -> String {
     if files == 1 { s += " · 1 file" } else if files > 1 { s += " · \(files) files" }
     return s + "…"
 }
+
+#if DEBUG
+extension StatsFilter {
+    /// The fixture of `transferBlocks` in cross/v250_test.go (real rclone v1.76 output) and what
+    /// the Go test expects of it. Run at startup in DEBUG builds only (`--self-check` runs it and quits).
+    static func selfCheck() {
+        let blocks = "2026/11/18 02:23:32 NOTICE: \n" +
+            "Transferred:   \t    1.992 MiB / 4.768 MiB, 42%, 1.992 MiB/s, ETA 1s\n" +
+            "Checks:                 0 / 0, -, Listed 3\n" +
+            "Transferred:            0 / 2, 0%\n" +
+            "Elapsed time:         1.0s\n" +
+            "Transferring:\n" +
+            " * b.bin: 52% / 1.907 MiB, 1019.975 KiB/s, 0s\n" +
+            " * sub dir/big, file: v1 (45%).bin: 34% / 2.861 MiB, 1019.990 KiB/s, 1s\n" +
+            "\n" +
+            "2026/11/18 02:23:35 NOTICE: \n" +
+            "Transferred:   \t    4.768 MiB / 4.768 MiB, 100%, 1.192 MiB/s, ETA 0s\n" +
+            "Transferred:            1 / 2, 50%\n" +
+            "Transferring:\n" +
+            " * sub dir/big, file: v1 (45%).bin:100% / 2.861 MiB, 732.420 KiB/s, -\n" +
+            "\n" +
+            "2026/11/18 02:23:35 NOTICE: f.txt: Can't follow symlink without -L/--copy-links\n" +
+            "2026/11/18 02:23:36 NOTICE: \n" +
+            "Transferred:            2 / 2, 100%\n" +
+            "Elapsed time:         4.7s\n" +
+            "\n"
+        final class Seen: @unchecked Sendable { var blocks: [[Transfer]] = []; var files: [Int] = [] }
+        let seen = Seen()
+        let out = OutputBuffer(headMax: 64 << 10, tailMax: 64 << 10)
+        let sf = StatsFilter(into: out, folder: "Docs", onTransfers: { seen.blocks.append($0) }, onFiles: { seen.files.append($0) })
+        let bytes = Array(blocks.utf8)
+        var i = 0
+        while i < bytes.count {   // arrives in pieces, split anywhere
+            sf.feed(Data(bytes[i..<min(i + 11, bytes.count)]))
+            i += 11
+        }
+        sf.flush()
+        precondition(seen.blocks.count == 3 && seen.blocks[0].count == 2 && seen.blocks[1].count == 1 && seen.blocks[2].isEmpty,
+                     "StatsFilter self-check: blocks \(seen.blocks)")
+        precondition(seen.blocks[0][0] == Transfer(folder: "Docs", name: "b.bin", percent: 52, size: "1.907 MiB", speed: "1019.975 KiB/s", eta: "0s"),
+                     "StatsFilter self-check: \(seen.blocks[0][0])")
+        precondition(seen.blocks[0][1] == Transfer(folder: "Docs", name: "sub dir/big, file: v1 (45%).bin", percent: 34, size: "2.861 MiB", speed: "1019.990 KiB/s", eta: "1s"),
+                     "StatsFilter self-check: \(seen.blocks[0][1])")
+        let x = seen.blocks[1][0]
+        precondition(x.percent == 100 && x.eta.isEmpty && x.name == "sub dir/big, file: v1 (45%).bin", "StatsFilter self-check: 100% \(x)")
+        precondition(seen.files == [0, 1, 2], "StatsFilter self-check: files \(seen.files)")
+        precondition(out.string == "2026/11/18 02:23:35 NOTICE: f.txt: Can't follow symlink without -L/--copy-links\n",
+                     "StatsFilter self-check: progress blocks leaked into the output: \(out.string)")
+        let bare = StatsFilter.parseTransfer(" * name: transferring", folder: "k")
+        precondition(bare == Transfer(folder: "k", name: "name", percent: -1, size: "", speed: "", eta: ""), "StatsFilter self-check: bare")
+        precondition(StatsFilter.parseTransfer(" * : 5% / 1 B, 1 B/s, 1s", folder: "k") == nil
+                     && StatsFilter.parseTransfer("no star: 5% / 1 B, 1 B/s, 1s", folder: "k") == nil, "StatsFilter self-check: bad lines")
+    }
+}
+#endif

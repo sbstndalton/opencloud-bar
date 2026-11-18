@@ -95,17 +95,30 @@ type fakeRc struct {
 	mu    sync.Mutex
 	hits  map[string]int
 	reply map[string]string
+	delay time.Duration // held before each answer (to make requests overlap)
 }
+
+// The fake rc's login: it answers 401 to anything else, like rclone started with --rc-user/--rc-pass.
+const (
+	fakeRcUser = "rc-user"
+	fakeRcPass = "rc-pass"
+)
 
 func rcRig(t *testing.T, reply map[string]string) (*Engine, *fakeRc) {
 	t.Helper()
 	e := pausedRig(t, "")
 	f := &fakeRc{hits: map[string]int{}, reply: reply}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if u, p, ok := r.BasicAuth(); !ok || u != fakeRcUser || p != fakeRcPass {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		f.mu.Lock()
 		f.hits[strings.TrimPrefix(r.URL.Path, "/")]++
 		body, ok := f.reply[strings.TrimPrefix(r.URL.Path, "/")]
+		delay := f.delay
 		f.mu.Unlock()
+		time.Sleep(delay)
 		if !ok {
 			http.NotFound(w, r)
 			return
@@ -116,7 +129,8 @@ func rcRig(t *testing.T, reply map[string]string) (*Engine, *fakeRc) {
 	var port int
 	_, _ = fmt.Sscanf(srv.URL, "http://127.0.0.1:%d", &port)
 	e.cfg.LocalPort = port - 100 // RcPort is LocalPort + 100
-	e.mount = &exec.Cmd{}        // a drive "running"
+	e.rcUser, e.rcPass = fakeRcUser, fakeRcPass
+	e.mount = &exec.Cmd{} // a drive "running"
 	return e, f
 }
 
@@ -138,6 +152,9 @@ func TestDriveQueueListsFiles(t *testing.T) {
 	if d["mounted"] != true || len(files) != 2 || files[0] != (DriveUpload{Name: "a/one.bin", Size: 2048, Uploading: true}) ||
 		d["uploadsInProgress"] != 1 || d["uploadsQueued"] != 1 || d["countsOnly"] != nil {
 		t.Fatalf("queue: %+v", d)
+	}
+	if rc.count("vfs/queue") != 1 {
+		t.Error("vfs/queue wasn't answered with the rc login (401 otherwise)")
 	}
 	if rc.count("vfs/stats") != 0 {
 		t.Error("vfs/stats asked although vfs/queue answered")
@@ -221,5 +238,83 @@ func TestTransfersAPI(t *testing.T) {
 	r.e.setTransfers("z", nil)
 	if a := get(); len(a.Folders) != 1 {
 		t.Errorf("cleared folder still listed: %+v", a.Folders)
+	}
+}
+
+// Several requests at once (two pages open, a page and a poll) share one fetch from rclone.
+func TestTransfersConcurrentCallsShareOneFetch(t *testing.T) {
+	e, rc := rcRig(t, map[string]string{"vfs/queue": `{"queue":[{"name":"a","size":1,"uploading":true}]}`})
+	rc.delay = 300 * time.Millisecond
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if d := e.transfersForPage()["drive"].(map[string]any); d["uploadsInProgress"] != 1 {
+				t.Errorf("drive: %+v", d)
+			}
+		}()
+	}
+	wg.Wait()
+	if n := rc.count("vfs/queue"); n != 1 {
+		t.Errorf("rc asked %d times for 8 concurrent calls", n)
+	}
+}
+
+// Through the page's own endpoint, with its login.
+func TestTransfersAPIConcurrentSingleFetch(t *testing.T) {
+	r := newUIRig(t)
+	r.login()
+	f := &fakeRc{hits: map[string]int{}, reply: map[string]string{"vfs/queue": `{"queue":[]}`}, delay: 300 * time.Millisecond}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, q *http.Request) {
+		if u, p, ok := q.BasicAuth(); !ok || u != fakeRcUser || p != fakeRcPass {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		f.mu.Lock()
+		f.hits[strings.TrimPrefix(q.URL.Path, "/")]++
+		f.mu.Unlock()
+		time.Sleep(f.delay)
+		_, _ = w.Write([]byte(f.reply["vfs/queue"]))
+	}))
+	t.Cleanup(srv.Close)
+	var port int
+	_, _ = fmt.Sscanf(srv.URL, "http://127.0.0.1:%d", &port)
+	r.e.mu.Lock()
+	r.e.cfg.LocalPort = port - 100
+	r.e.rcUser, r.e.rcPass = fakeRcUser, fakeRcPass
+	r.e.mount = &exec.Cmd{}
+	r.e.mu.Unlock()
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if resp, body := r.do("GET", "/ui/api/transfers", "", "", nil); resp.StatusCode != 200 || !strings.Contains(body, `"mounted":true`) {
+				t.Errorf("transfers: %d %s", resp.StatusCode, body)
+			}
+		}()
+	}
+	wg.Wait()
+	if n := f.count("vfs/queue"); n != 1 {
+		t.Errorf("rc asked %d times for 6 concurrent requests", n)
+	}
+}
+
+// A report that arrives after the run is closed doesn't bring its files back.
+func TestStatsFilterIgnoresWritesAfterFlush(t *testing.T) {
+	calls := 0
+	sf := &statsFilter{folder: "Docs", onTransfers: func([]Transfer) { calls++ }}
+	_, _ = sf.Write([]byte("2026/11/18 02:23:32 NOTICE: \nTransferring:\n * a.bin: 5% / 1 MiB, 1 KiB/s, 1s\n\n"))
+	sf.Flush()
+	_, _ = sf.Write([]byte(transferBlocks))
+	sf.Flush()
+	if calls != 1 {
+		t.Errorf("onTransfers called %d times, want 1 (nothing after Flush)", calls)
+	}
+	e := pausedRig(t, "")
+	e.setTransfers("gone", []Transfer{{Folder: "gone", Name: "x"}})
+	if len(e.transfers) != 0 {
+		t.Errorf("transfers of a folder that isn't syncing were kept: %+v", e.transfers)
 	}
 }

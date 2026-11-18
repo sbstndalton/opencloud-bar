@@ -7,7 +7,7 @@ struct TransfersPage: View {
     @ObservedObject var model: AppModel
 
     private var folders: [(name: String, key: String, files: [Transfer])] {
-        let names = Dictionary(uniqueKeysWithValues: model.config.kept.map { ($0.key, $0.displayName) })
+        let names = Dictionary(model.config.kept.map { ($0.key, $0.displayName) }, uniquingKeysWith: { a, _ in a })
         return model.transfers.map { (names[$0.key] ?? model.activeNames[$0.key] ?? $0.key, $0.key, $0.value) }
             .sorted { ($0.name, $0.key) < ($1.name, $1.key) }
     }
@@ -63,8 +63,10 @@ struct TransfersPage: View {
             }
         }
         .task {
+            model.transfersPageOpen = true   // the drive is asked every 5 s while this page is open
+            defer { model.transfersPageOpen = false }
             while !Task.isCancelled {
-                await model.refreshDriveQueue()   // asks the drive at most every 5 s
+                await model.refreshDriveQueue()
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
         }

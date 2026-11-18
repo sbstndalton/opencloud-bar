@@ -138,8 +138,8 @@ Every sync remembers what it changed: files uploaded, downloaded, deleted on thi
 
 A read-only list of what is moving right now.
 
-- **Kept folders:** while a folder syncs, each file in flight with its progress (percent), size, speed and time left, as rclone reports them (every 2 seconds). A file whose size rclone doesn't know yet shows "Transferring" without a percent. The list is empty again when the folder's sync ends. Windows and Linux ask for whole file names (`--stats-file-name-length 0`), so a long name isn't shortened.
-- **OpenCloud Drive uploads:** the files the drive is uploading or has waiting, read from rclone's upload queue (`vfs/queue`). With an rclone that doesn't have it, only the counts from `vfs/stats` are shown. The drive is asked at most every 5 seconds.
+- **Kept folders:** while a folder syncs, each file in flight with its progress (percent), size, speed and time left, as rclone reports them (every 2 seconds). A file whose size rclone doesn't know yet shows "Transferring" without a percent. The list is empty again when the folder's sync ends. Syncs ask for whole file names (`--stats-file-name-length 0`), so a long name isn't shortened, on the Mac and on Windows and Linux.
+- **OpenCloud Drive uploads:** the files the drive is uploading or has waiting, read from rclone's upload queue (`vfs/queue`). With an rclone that doesn't have it, only the counts from `vfs/stats` are shown. The drive is asked at most every 5 seconds. On the Mac it is asked that often while a folder syncs, while uploads are waiting or while the page is open, and about every 30 seconds otherwise; Windows and Linux ask only while the page is open.
 - rclone doesn't say which way a file is going, so the list doesn't either: it says "Transferring", with no arrow.
 - **Mac:** Settings ▸ **Transfers**, and a **Transfers (N)…** item in the menu that appears only while something is transferring. **Windows, Linux:** the **Transfers** section of the settings window (`GET /ui/api/transfers`, behind the page's own sign-in like the other pages). When nothing moves it says "Nothing is transferring."
 

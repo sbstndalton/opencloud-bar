@@ -1233,7 +1233,7 @@ func (e *Engine) bisync(r folderRun, kind string, extra ...string) (string, erro
 	e.mu.Unlock()
 	out, err := e.run(syncTimeout, sf, r.cfg.Rclone(), args...)
 	sf.Flush()
-	e.setTransfers(key, nil) // the run is over
+	e.setTransfers(key, nil) // the run is over (sf is closed, so nothing re-adds them)
 	wrote, over := changes.localWrites()
 	e.mu.Lock()
 	e.ownWritesLocked(r.f.Key(), wrote, over || kind != "sync") // live sync: the run's own writes
