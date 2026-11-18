@@ -19,6 +19,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 enum Launcher {
     static func main() {
         if CommandLine.arguments.contains("--token") { Auth.runTokenMode() }
+        #if DEBUG
+        StatsFilter.selfCheck()   // DEBUG builds only: traps if the Swift parser drifts from the Go one
+        if CommandLine.arguments.contains("--self-check") { print("self-check ok"); exit(0) }
+        #endif
         guard SingleInstance.claim() else {
             // A second copy would start a second drive and a second sync of the same folders.
             NSApplication.shared.setActivationPolicy(.accessory)
@@ -107,6 +111,9 @@ struct MenuContent: View {
 
         keptFoldersMenu
         recentChangesMenu
+        if model.transferCount > 0 {
+            Button("Transfers (\(model.transferCount))…") { model.openSettings(.transfers) }
+        }
         Button("Search OpenCloud…") { model.showSearch() }
             .disabled(model.needsSignIn || !model.config.isOIDC)
             .keyboardShortcut("f")

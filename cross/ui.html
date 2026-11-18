@@ -76,7 +76,7 @@ tbody tr:focus-visible { outline-offset:-2px; }
 <script nonce="{{NONCE}}">
 "use strict";
 // Plain DOM code, no libraries. Text from the server is only ever set with textContent.
-const SECTIONS = [["folders","Folders"],["search","Search"],["activity","Activity"],["conflicts","Conflicts"],["trash","Deleted Files"],["account","Account"],["sync","Sync"],["drive","Drive"],["general","General"],["logs","Logs"],["about","About"]];
+const SECTIONS = [["folders","Folders"],["search","Search"],["activity","Activity"],["transfers","Transfers"],["conflicts","Conflicts"],["trash","Deleted Files"],["account","Account"],["sync","Sync"],["drive","Drive"],["general","General"],["logs","Logs"],["about","About"]];
 let S = null;            // last /ui/api/state
 let section = "folders";
 let selected = null;     // selected folder path
@@ -240,7 +240,7 @@ function go(id, focus) {
   buildNav();
   const main = document.getElementById("main");
   main.replaceChildren();
-  ({ folders, search, activity, conflicts, trash, account, sync: syncPage, drive, general, logs, about })[id](main, render);
+  ({ folders, search, activity, transfers, conflicts, trash, account, sync: syncPage, drive, general, logs, about })[id](main, render);
   // A section chosen in the list: move the keyboard focus to its heading.
   const h2 = focus && main.querySelector("h2");
   if (h2) { h2.tabIndex = -1; h2.focus(); }
@@ -619,6 +619,52 @@ async function activity(main, r) {
   };
   await load();
   timers.push(setInterval(load, 10000));
+}
+
+// ---- Transfers (what is moving now; read-only)
+
+async function transfers(main, r) {
+  header(main, "Transfers");
+  main.append(h("p", { class: "hint", text: "Files moving right now: kept folders while they sync, and files the drive is uploading. rclone doesn't say which way a file is going, so none is shown." }));
+  const body = h("div", { id: "transfers-body" });
+  main.append(body);
+  const load = async () => {
+    let d;
+    try { d = await get("transfers"); } catch (e) { return; }
+    if (r !== render) return;
+    const dr = d.drive || {};
+    const files = dr.files || [];
+    const nDrive = (dr.uploadsInProgress || 0) + (dr.uploadsQueued || 0);
+    if (!d.folders.length && !nDrive && !dr.error) { body.replaceChildren(h("div", { class: "card" }, "Nothing is transferring.")); return; }
+    const parts = [];
+    if (d.folders.length) {
+      parts.push(h("h3", { text: "Kept folders" }), h("table", { "aria-label": "Kept folder transfers" },
+        h("thead", {}, h("tr", {}, h("th", { text: "Folder" }), h("th", { text: "File" }), h("th", { text: "Progress" }), h("th", { text: "Size" }), h("th", { text: "Speed" }), h("th", { text: "Time left" }))),
+        h("tbody", {}, d.folders.map(t => h("tr", {},
+          h("td", { text: t.folderName }),
+          h("td", { class: "path", text: t.name }),
+          h("td", { text: t.percent < 0 ? "Transferring" : t.percent + "%" }),
+          h("td", { text: t.size || "–" }),
+          h("td", { text: t.speed || "–" }),
+          h("td", { text: t.eta || "–" }))))));
+    }
+    if (dr.error) parts.push(h("h3", { text: "Drive uploads" }), h("p", { class: "hint", text: dr.error }));
+    else if (nDrive) {
+      parts.push(h("h3", { text: "Drive uploads" }), h("p", { class: "hint", text: (dr.uploadsInProgress || 0) + " uploading, " + (dr.uploadsQueued || 0) + " waiting" + (dr.countsOnly ? ". This rclone doesn't list the files." : "") }));
+      if (files.length) {
+        parts.push(h("table", { "aria-label": "Drive uploads" },
+          h("thead", {}, h("tr", {}, h("th", { text: "File" }), h("th", { text: "Size" }), h("th", { text: "Status" }))),
+          h("tbody", {}, files.map(u => h("tr", {},
+            h("td", { class: "path", text: u.name }),
+            h("td", { text: fmtBytes(u.size) }),
+            h("td", { text: u.uploading ? "Transferring" : "Waiting" }))))));
+        if (nDrive > files.length) parts.push(h("p", { class: "hint", text: "And " + (nDrive - files.length) + " more." }));
+      }
+    }
+    keepFocus(body, () => body.replaceChildren(...parts));
+  };
+  await load();
+  timers.push(setInterval(load, 2000)); // go() clears these when another section opens; the server asks the drive at most every 5 s
 }
 
 // ---- Search (names in OpenCloud, all spaces)

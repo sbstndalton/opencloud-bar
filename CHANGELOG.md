@@ -4,6 +4,18 @@ All notable changes to OpenCloud Bar. The format follows [Keep a Changelog](http
 
 The release workflow copies the section for a tag into that tag's GitHub release, so every version heading must stay in the form `## [X.Y.Z] - date`.
 
+## [2.5.0] - 2026-11-18
+
+### Added
+- **Transfers.** A read-only list of what is moving right now. Mac: Settings ▸ **Transfers**, and a **Transfers (N)…** menu item that appears only while something is transferring. Windows and Linux: a **Transfers** section in the settings window, from `GET /ui/api/transfers` (behind the same sign-in as the page's other reads). It shows:
+  - each file a kept folder's sync is moving, with its progress, size, speed and time left, read from rclone's progress blocks (the "Transferring:" lines, every 2 seconds). A file whose size isn't known yet shows "Transferring" without a percent. A folder's files are cleared when its run ends;
+  - the drive's uploads, from rclone's `vfs/queue` (file names, sizes, uploading or waiting). If it doesn't answer, the `vfs/stats` counts of uploads in progress and waiting are shown, without names. The drive is asked at most every 5 seconds: on the Mac while a folder syncs, while uploads are waiting or while the page is open, and about every 30 seconds otherwise (once an rclone has shown it has no `vfs/queue`, only `vfs/stats` is asked); the Windows/Linux page asks only while it is open;
+  - "Nothing is transferring." when there is nothing.
+  rclone doesn't report which way a file goes, so nothing says upload or download and there is no arrow.
+
+### Changed
+- Syncs (Mac, Windows and Linux) now run rclone with `--stats-file-name-length 0` (next to `--stats 2s`), so the progress blocks carry whole file names instead of names cut to 45 characters. The blocks are still kept out of the sync log.
+
 ## [2.4.0] - 2026-11-17
 
 ### Added
