@@ -103,7 +103,8 @@ struct NotePlanner {
 }
 
 /// Shows notifications with UserNotifications. Permission is asked the first time one is
-/// needed; if it is refused, notifications are skipped without a word. A click opens Settings.
+/// needed; if it is refused, notifications are skipped (Settings ▸ General then says so, with
+/// a button to System Settings ▸ Notifications). A click opens Settings.
 @MainActor
 final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     private weak var model: AppModel?
@@ -136,6 +137,30 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
             let req = UNNotificationRequest(identifier: UUID().uuidString, content: c, trigger: nil)
             try? await UNUserNotificationCenter.current().add(req)
         }
+    }
+
+    /// Whether macOS shows this app's notifications: nil when it does (or can't be asked, as
+    /// in a bare `swift run` binary), else a one-line explanation. Builds that aren't signed by a
+    /// registered developer are often never offered the permission prompt, so the status stays
+    /// "not determined" (or "denied") and notifications silently don't appear.
+    nonisolated static func blockedText() async -> String? {
+        guard Bundle.main.bundleIdentifier != nil else { return nil }
+        switch await UNUserNotificationCenter.current().notificationSettings().authorizationStatus {
+        case .denied:
+            return "macOS is blocking notifications from OpenCloud Bar. Allow them in System Settings ▸ Notifications."
+        case .notDetermined:
+            return "macOS hasn't allowed notifications from OpenCloud Bar yet (this build isn't signed by a registered developer, so it may never ask). Allow them in System Settings ▸ Notifications."
+        default:
+            return nil
+        }
+    }
+
+    /// System Settings ▸ Notifications, at this app when macOS knows it. Only opened when the
+    /// user clicks; nothing is changed here.
+    nonisolated static var settingsURL: URL? {
+        let base = "x-apple.systempreferences:com.apple.Notifications-Settings.extension"
+        if let id = Bundle.main.bundleIdentifier, let u = URL(string: base + "?id=" + id) { return u }
+        return URL(string: base)
     }
 
     // A menu bar app is rarely "in front"; show the banner anyway.

@@ -10,8 +10,9 @@ A small menu-bar and tray app for [OpenCloud](https://opencloud.eu) on macOS, Wi
   - Anything that needs you says why in the menu.
 - **Browser sign-in.** You sign in on your server's own page, the same way OpenCloud's desktop client does it (OpenID Connect with PKCE). There is no app token, SSH key or rclone set-up.
 - **Pause and resume** syncing. The drive keeps working while paused.
-- **Notifications** when a folder needs attention, was merged automatically, when you are signed out, and when an update is available. You get one per change, never repeated.
+- **Notifications** when a folder needs attention, was merged automatically, when you are signed out, when your storage is almost full, and when an update is available. You get one per change, never repeated.
 - **Update checks** once a day (they can be turned off), plus **Check for Updates…**. A new version is announced, not installed: the app opens the release page and you download it yourself.
+- **Search** file and folder names across your OpenCloud, and **storage warnings** at 90% and when it is full (see [Search](#search) and [Storage warnings](#storage-warnings)).
 - **File history and deleted files.** See and restore earlier versions of a file in a kept folder, and restore files deleted in OpenCloud back into your kept folders (see [File history](#file-history) and [Deleted files](#deleted-files)).
 - **Settings in a window:** native on the Mac, a small app window on Windows and Linux. It covers kept folders, account and storage, sync, drive, general settings, logs and About. Live activity shows in the menu, for example "Syncing “School” (2 of 3) · 12 files…".
 
@@ -53,10 +54,10 @@ The app connects straight to your server over HTTPS, so it also works through a 
 ### The menu
 
 The menu stays short however many folders you keep. It has:
-- the status line;
+- the status line, and with the browser sign-in your storage ("Storage: 1.2 GB of 10 GB used"; "Storage almost full: …" from 90%);
 - the drive items;
 - a **Kept Folders (N)** submenu;
-- on the Mac, **Copy Public Link…**, **File History…** and **Deleted Files…**;
+- on the Mac, **Search OpenCloud…** (⌘F), **Copy Public Link…**, **File History…** and **Deleted Files…**;
 - **Sync Now**, **Pause Syncing** and **Settings…**;
 - **Check for Updates…**, **About OpenCloud Bar** and **Quit**.
 
@@ -73,8 +74,8 @@ On the Mac, **Settings…** (⌘,) opens these pages. Windows and Linux have the
 | **Deleted Files** | OpenCloud's trash for your personal space and the spaces you keep folders from, with **Restore**. See [Deleted files](#deleted-files). |
 | **Account** | Server address and version, your name, email and username, and a storage bar with used and total space. **Open OpenCloud in Browser**, **Refresh**, and **Sign Out** (or **Sign In…**). It reads these from the server with your sign-in; nothing is shown if you're signed out. |
 | **Sync** | How often kept folders sync (1, 5, 15, 30 or 60 minutes), the exclude rules for all folders (with **Restore Defaults**), where kept folders live on this Mac (changeable only while no folder is kept), upload and download limits, and the file names the server refuses. |
-| **OpenCloud Drive** | Connect or eject the drive, its mount location and volume name, the cache size limit and age, and live cache use and pending uploads while it is connected. |
-| **General** | Open at Login, the version, update checks (**Check Now**) and notifications. With an SSH tunnel: whether to check the server's memory before syncing. Under **Advanced**: the SSH tunnel settings, the rclone path, **Open Settings File** and **Reload Settings**. |
+| **OpenCloud Drive** | Connect or eject the drive, its mount location, the cache size limit and age, and live cache use and pending uploads while it is connected. On the Mac, Finder names the drive after the last folder of its location (`~/OpenCloud-Drive` shows as "OpenCloud-Drive"); to rename it, choose a location with that name. Windows and Linux also have a volume name. |
+| **General** | Open at Login, the version, update checks (**Check Now**) and notifications (on the Mac, if macOS isn't showing them, a line says so with **Open Notification Settings…**). With an SSH tunnel: whether to check the server's memory before syncing. Under **Advanced**: the SSH tunnel settings, the rclone path, **Open Settings File** and **Reload Settings**. |
 | **Logs** | The app log, the drive and tunnel logs, and each folder's sync log: the last 3000 lines, refreshed every 2 seconds, with errors in red. **Copy**, **Reveal in Finder** and **Clear…**. |
 
 Changing exclude rules (for one folder or for all) asks first. Each affected folder then syncs right away, comparing both sides once (newer copy wins, replaced files kept in the backups, nothing deleted), without a Repair. A filters file changed by hand outside the app still asks for a Repair.
@@ -140,6 +141,24 @@ Every sync remembers what it changed: files uploaded, downloaded, deleted on thi
 - Choose when the link expires (never, 1, 7 or 30 days) and, if you like, type a password for it. The password goes to OpenCloud with the request and isn't stored or logged by OpenCloud Bar.
 - Only for kept folders that have synced, and only for files that are in OpenCloud already; with the browser sign-in only. If the server requires a password for links, it says so.
 - The link is made with OpenCloud's libre-graph API (`createLink`, type `view`); only an https link is accepted. Manage or delete links in OpenCloud's web interface.
+
+## Search
+
+Search finds files and folders in OpenCloud by name, like the search box in OpenCloud's web interface: in your personal space, project spaces and shares, whether or not you keep them here.
+
+- **Mac:** the menu's **Search OpenCloud…** (⌘F) opens a small window. **Windows, Linux:** the settings window's **Search** section.
+- Type part of a name and press Return. Up to 50 matches are listed with their name, folder and when they were last modified; if there are more, it says how many, so you can type more of the name.
+- **Show in Browser** opens the folder the item is in, in OpenCloud's web interface on your server. **Show on This Computer** appears when the item is inside a kept folder and is already on this computer; it shows it in Finder or the file manager.
+- With the browser sign-in only. The app sends a WebDAV `REPORT` (`oc:search-files`, query `name:"*<what you typed>*"`, limit 50) to your server's `/dav/spaces/`, as the web interface does. The server's search service must be running (it is in a standard OpenCloud install); otherwise it says that the server doesn't offer search. The sign-in token is only sent to your server; redirects aren't followed.
+
+## Storage warnings
+
+With the browser sign-in, the app checks your personal space's storage every 30 minutes (`/graph/v1.0/me/drives`, the same numbers as the Account page).
+
+- When it reaches 90%, you get one notification: "Your OpenCloud storage is almost full". When it is full, one more: "Your OpenCloud storage is full". They aren't repeated while the storage stays above 90%; after it goes below 90%, the warnings can come again.
+- The last warning given is remembered in the sync state folder (`quota-warned`), so a restart doesn't repeat it.
+- Without a storage limit (the server gives no total, or 0) there are no warnings.
+- With notifications off, the warning shows in the menu's storage line (Mac) or at the top of the settings window and in Activity (Windows, Linux).
 
 ## File history
 
@@ -269,6 +288,7 @@ Only the refresh token is kept. The short-lived access token is cached next to t
 - **Builds aren't notarized (macOS) or code-signed (Windows) yet**, so the first launch needs the steps above. Notarization needs a paid Apple Developer ID. Windows signing through SignPath is being set up. Once it is, it covers the programs inside the installer (`OpenCloud Bar.exe` and `opencloud-bar.exe`); the installer `OpenCloud-Bar-Setup-<version>.exe` itself is still unsigned, so SmartScreen may still warn when you run it.
 - **Linux tray:** the tray icon uses StatusNotifier. GNOME shows it only with the AppIndicator extension; KDE, Xfce, Cinnamon and most others show it as is. Without a tray the app still runs (`opencloud-bar run --no-tray`) and the settings page and command line work.
 - **Linux dialogs** use `zenity` and notifications use `notify-send` (package `libnotify-bin` or `libnotify`; the packages recommend both). Without zenity, sign in and keep folders from the settings page instead. Quit then only quits when nothing is still uploading; otherwise a notification says so, and `opencloud-bar quit --force` quits anyway.
+- **Mac notifications:** because the Mac build isn't signed by a registered developer, macOS may never show the permission prompt, so notifications silently don't appear. Settings ▸ General then says so; **Open Notification Settings…** opens System Settings ▸ Notifications, where you can allow OpenCloud Bar.
 - One account per computer. The drive shows your personal space only; folders from project spaces and shares can be kept (see [Spaces](#spaces)), but not browsed on the drive. Read-only folders can't be kept. The "Shares" overview itself isn't a space you can keep from; each accepted share is.
 - Conflicts are found in the local copies of kept folders only (not on the drive), up to 200 per folder. Folders excluded everywhere (like `- **/node_modules/**`) aren't searched.
 

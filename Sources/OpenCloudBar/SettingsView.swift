@@ -424,7 +424,6 @@ struct SyncPage: View {
 struct DrivePage: View {
     @ObservedObject var model: AppModel
     @Local private var mountPoint = ""
-    @Local private var volumeName = ""
     @Local private var error: String?
     @Local private var cacheError: String?
     @Local private var stats: AppModel.DriveStats?
@@ -436,7 +435,14 @@ struct DrivePage: View {
         ("24h", "1 day"), ("72h", "3 days"), ("7d", "7 days"),
     ]
 
-    private var dirty: Bool { mountPoint != model.config.mountPoint || volumeName != model.config.volumeName }
+    private var dirty: Bool { mountPoint != model.config.mountPoint }
+
+    /// The name Finder shows for the drive: the mount location's last folder.
+    private var finderName: String {
+        let p = mountPoint.trimmingCharacters(in: .whitespaces)
+        let n = (p as NSString).lastPathComponent
+        return n.isEmpty || n == "/" || n == "~" ? "OpenCloud-Drive" : n
+    }
 
     var body: some View {
         Form {
@@ -456,13 +462,13 @@ struct DrivePage: View {
             }
             Section("Location") {
                 TextField("Mount location", text: $mountPoint)
-                TextField("Volume name", text: $volumeName)
                 HStack {
                     Button("Choose…") { chooseMountPoint() }.accessibilityLabel("Choose…")
                     Button("Apply") { apply() }.disabled(!dirty).accessibilityLabel("Apply")
                     Button("Revert") { load() }.disabled(!dirty).accessibilityLabel("Revert")
                 }
-                Text("Changing the location or name reconnects the drive.").font(.caption).foregroundStyle(.secondary)
+                Text("Finder names the drive after the last folder of its location, so it shows as “\(finderName)”. To give it another name, choose a location with that name. Changing the location reconnects the drive.")
+                    .font(.caption).foregroundStyle(.secondary)
                 InlineError(text: error)
             }
             Section("Cache") {
@@ -504,20 +510,16 @@ struct DrivePage: View {
 
     private func load() {
         mountPoint = model.config.mountPoint
-        volumeName = model.config.volumeName
         error = nil
     }
 
     private func apply() {
-        let mp = mountPoint.trimmingCharacters(in: .whitespaces), vn = volumeName.trimmingCharacters(in: .whitespaces)
+        let mp = mountPoint.trimmingCharacters(in: .whitespaces)
         guard !mp.isEmpty, mp.hasPrefix("/") || mp.hasPrefix("~/") else {
             error = "The mount location must be a full path, for example ~/OpenCloud-Drive."; return
         }
-        guard !vn.isEmpty, !vn.contains("/"), !vn.contains(":") else {
-            error = "The volume name can't be empty or contain / or :."; return
-        }
         Task {
-            error = await model.updateConfig { $0.mountPoint = mp; $0.volumeName = vn }
+            error = await model.updateConfig { $0.mountPoint = mp }
             if error == nil { load() }
         }
     }
@@ -560,6 +562,7 @@ struct GeneralPage: View {
     }
 
     @Local private var updateError: String?
+    @Local private var notificationsBlocked: String?
 
     private var version: String {
         Updates.isDevBuild ? "\(Updates.running) (development build)" : Updates.running
@@ -607,8 +610,23 @@ struct GeneralPage: View {
                     get: { model.config.notifications },
                     set: { on in Task { updateError = await model.updateConfig { $0.notifications = on } } }))
                     .accessibilityLabel("Show notifications")
-                Text("When a folder needs attention or was merged automatically, when you are signed out, and when an update is available. Once per change, never repeated. Clicking one opens Settings.")
+                Text("When a folder needs attention or was merged automatically, when you are signed out, when your storage is almost full, and when an update is available. Once per change, never repeated. Clicking one opens Settings.")
                     .font(.caption).foregroundStyle(.secondary)
+                if model.config.notifications, let why = notificationsBlocked {
+                    HStack {
+                        Label(why, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
+                        Spacer()
+                        Button("Open Notification Settings…") {
+                            if let u = Notifier.settingsURL { NSWorkspace.shared.open(u) }
+                        }
+                        .accessibilityLabel("Open Notification Settings in System Settings")
+                    }
+                }
+            }
+            .task { notificationsBlocked = await Notifier.blockedText() }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                // Back from System Settings: check again.
+                Task { notificationsBlocked = await Notifier.blockedText() }
             }
             if model.config.tunnel {
                 Section("Server") {

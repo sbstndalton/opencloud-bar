@@ -4,6 +4,22 @@ All notable changes to OpenCloud Bar. The format follows [Keep a Changelog](http
 
 The release workflow copies the section for a tag into that tag's GitHub release, so every version heading must stay in the form `## [X.Y.Z] - date`.
 
+## [2.2.0] - 2026-11-17
+
+### Added
+- **Search.** Find files and folders in OpenCloud by name, in your personal space, project spaces and shares, like the web interface's search box. Mac: the menu's **Search OpenCloud…** (⌘F) opens a small window. Windows and Linux: the settings window's **Search** section. Up to 50 matches with name, folder and modification date (and how many there are in all when there are more). **Show in Browser** opens the item's folder in OpenCloud's web interface (`<server>/f/<folder id>`); **Show on This Computer** appears when the item is in a kept folder and is on this computer. Uses a WebDAV `REPORT` with `oc:search-files` on `<dav>/spaces/` and the query `name:"*<term>*"`, as OpenCloud's web interface does (answered by OpenCloud's webdav and search services).
+- **Storage warnings.** With the browser sign-in, the personal space's quota is checked every 30 minutes. One notification at 90% ("Your OpenCloud storage is almost full") and one when it is full; not repeated until the use has gone below 90% again. The last warning is remembered in the sync state folder (`quota-warned`). No warnings without a limit (total missing or 0). Mac: the menu shows "Storage: X of Y used" ("Storage almost full: …" from 90%). Windows and Linux: a notice at the top of the settings window from 90%, and an Activity line with each warning; the Account page shows X of Y used as before.
+- **Mac:** when macOS isn't showing the app's notifications (not allowed, or never asked, which is common for builds not signed by a registered developer), Settings ▸ General says so in one line, with **Open Notification Settings…** (opens System Settings ▸ Notifications; nothing is changed by the app).
+
+### Changed
+- **Mac:** the **Volume name** setting is gone. It never did anything since the drive became an NFS mount: macOS names an NFS volume after its mount point folder, and `rclone serve nfs` only exports `/`, so there is no other name to set. The OpenCloud Drive page now says that Finder names the drive after the last folder of its location; choose a location with the name you want to rename it. An existing `volumeName` in `config.json` is kept but ignored on the Mac. Windows and Linux keep the setting (rclone mount's `--volname`).
+
+### Fixed
+- **Windows/Linux tests:** the tests no longer write sync logs into the real app folder (for example `~/Library/Application Support/OpenCloudBar/logs` when run on a Mac). An engine a test started could write a log after the test had restored its environment; the test run now points the home and config folders at a temporary folder for the whole run, and fails if any test resolves the real app folder.
+
+### Security
+- Search and quota requests only go to the configured server (URLs built from its origin and the paths the server gave), with no redirects followed. The browser link is built from the configured server and an id that must be one plain path segment; the page never sends an address. Search results are shown with plain text only.
+
 ## [2.1.0] - 2026-11-16
 
 ### Added

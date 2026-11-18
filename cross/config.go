@@ -276,8 +276,17 @@ func appDir() string {
 	if err != nil {
 		d = filepath.Join(home(), ".config")
 	}
-	return filepath.Join(d, "OpenCloudBar")
+	d = filepath.Join(d, "OpenCloudBar")
+	if appDirGuard != nil {
+		appDirGuard(d)
+	}
+	return d
 }
+
+// appDirGuard is set by the tests only: it sees every app folder resolved, so they can fail
+// when one is the real one (nil in the app).
+var appDirGuard func(string)
+
 func configFile() string { return filepath.Join(appDir(), "config.json") }
 func logDir() string     { return filepath.Join(appDir(), "logs") }
 

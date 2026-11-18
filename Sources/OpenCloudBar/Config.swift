@@ -118,6 +118,8 @@ struct Config: Codable {
     var rclonePath = ""
     var localRoot = "~/OpenCloud/Personal"
     var mountPoint = "~/OpenCloud-Drive"
+    /// Not used on the Mac since 2.2: Finder names the NFS drive after the mount point folder.
+    /// Kept so an existing config.json keeps the value.
     var volumeName = "OpenCloud"
     var cacheMaxSize = "20G"
     var cacheMaxAge = "72h"

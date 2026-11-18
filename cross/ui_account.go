@@ -167,14 +167,9 @@ func fetchAccount(ctx context.Context, serverURL, tok string, info *accountInfo)
 			info.Username = me.SamAccount
 		}
 	}
-	var drives struct {
-		Value []struct {
-			Quota *quotaInfo `json:"quota"`
-		} `json:"value"`
-	}
-	if err := ocGet(ctx, base, "/graph/v1.0/me/drives", url.Values{"$filter": {"driveType eq 'personal'"}}, tok, &drives); err != nil {
+	if q, err := fetchQuota(ctx, base, tok); err != nil {
 		info.Errors = append(info.Errors, "storage: "+err.Error())
-	} else if len(drives.Value) > 0 && drives.Value[0].Quota != nil {
-		info.Quota = drives.Value[0].Quota
+	} else {
+		info.Quota = q
 	}
 }
