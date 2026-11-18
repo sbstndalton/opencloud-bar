@@ -45,6 +45,9 @@ type configPatch struct {
 	KeptSubfolders map[string]map[string]bool `json:"keptSubfolders"`
 	BwLimitUp      *string                    `json:"bwLimitUp"` // "" for no limit
 	BwLimitDown    *string                    `json:"bwLimitDown"`
+	// Start at sign-in is the operating system's setting (the Run key, an autostart entry), not
+	// the settings file's: it is applied by serveConfigPost and never written to config.json.
+	OpenAtLogin *bool `json:"openAtLogin"`
 }
 
 var (
@@ -381,6 +384,29 @@ func (e *Engine) serveConfigPost(w http.ResponseWriter, r *http.Request) {
 	if p.isEmpty() {
 		writeJSON(w, 200, map[string]any{"saved": false}) // nothing changed: the file stays as it is
 		return
+	}
+	openAtLogin := p.OpenAtLogin
+	p.OpenAtLogin = nil
+	// Start at sign-in first: it is the part that can be refused for reasons the settings
+	// check can't see, and a refusal then leaves the settings file untouched.
+	if openAtLogin != nil {
+		st := autostartState()
+		if !st.Supported {
+			jsonErr(w, http.StatusBadRequest, errors.New("Start at sign-in isn't available on this system"))
+			return
+		}
+		if *openAtLogin && st.Note != "" { // turning it off is always allowed
+			jsonErr(w, http.StatusBadRequest, errors.New(st.Note))
+			return
+		}
+		if err := setAutostart(*openAtLogin); err != nil {
+			jsonErr(w, http.StatusBadRequest, fmt.Errorf("couldn't change start at sign-in: %w", err))
+			return
+		}
+		if p.isEmpty() { // nothing in the settings file changed: no reload
+			writeJSON(w, 200, map[string]any{"saved": true})
+			return
+		}
 	}
 	restart, err := applyConfigPatch(p)
 	if err != nil {

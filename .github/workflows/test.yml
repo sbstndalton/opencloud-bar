@@ -1,0 +1,51 @@
+# Tests on every push and pull request: the Go app (Windows and Linux) on all three systems,
+# and the Mac app's build.
+#   Windows: the tray build, as released (the tray needs no cgo: release.yml builds it with CGO_ENABLED=0)
+#   Linux, macOS: -tags notray (no tray; these runners have no desktop to test one on)
+name: Test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            tags: ""
+          - os: ubuntu-latest
+            tags: "-tags notray"
+          - os: macos-15
+            tags: "-tags notray"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cross/go.mod
+          cache-dependency-path: cross/go.sum
+
+      - name: Go vet
+        working-directory: cross
+        run: go vet ${{ matrix.tags }} ./...
+
+      # -race needs cgo; each runner has a C compiler.
+      - name: Go test
+        working-directory: cross
+        run: go test -race -count=1 ${{ matrix.tags }} ./...
+
+      # The same build as scripts/build-app.sh: the native build system when this Swift has the flag.
+      - name: Swift build
+        if: runner.os == 'macOS'
+        run: |
+          native=()
+          if swift build --help 2>&1 | grep -q -- "--build-system"; then native=(--build-system native); fi
+          swift build -c release "${native[@]}"

@@ -810,6 +810,13 @@ function selectField(label, key, options, hint) {
   sel.addEventListener("change", () => save({ [key]: typeof S.config[key] === "number" ? parseInt(sel.value, 10) : sel.value }));
   return h("div", { class: "row" }, h("label", { text: label }), sel, hint ? h("span", { class: "hint", text: hint }) : null);
 }
+function loginField() {
+  const c = S.config, locked = !!c.openAtLoginLocked;
+  const cb = h("input", { type: "checkbox" }); cb.checked = !!c.openAtLogin; cb.disabled = locked;
+  cb.addEventListener("change", () => save({ openAtLogin: cb.checked }));
+  return h("div", { class: "row" }, h("label", { text: "Start at sign-in" }), cb,
+    h("span", { class: "hint", text: c.openAtLoginNote ? c.openAtLoginNote : "Open OpenCloud Bar when you sign in to this computer." }));
+}
 function checkField(label, key, hint) {
   const cb = h("input", { type: "checkbox" }); cb.checked = !!S.config[key];
   cb.addEventListener("change", () => save({ [key]: cb.checked }));
@@ -906,6 +913,7 @@ function general(main, r) {
     const upLine = h("p", { class: "hint", id: "update-line", text: updateText(u) });
     main.append(h("div", { class: "card" }, h("h3", { text: "OpenCloud Bar" }),
       h("div", { class: "row" }, h("label", { text: "Version" }), h("span", { text: S.version })),
+      c.openAtLoginAvailable ? loginField() : null,
       checkField("Check for updates automatically", "checkForUpdates", "Once a day, from GitHub. Nothing about you is sent."),
       checkField("Show notifications", "notifications", "When a folder needs attention, is merged automatically, or an update is available. Once per change, not repeated."),
       upLine,

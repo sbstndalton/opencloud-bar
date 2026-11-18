@@ -37,7 +37,9 @@ SetupIconFile=..\icon\icon.ico
 LicenseFile={#Src}\LICENSE.txt
 
 [Tasks]
-Name: "startup"; Description: "Start OpenCloud Bar when I sign in"; Flags: checkedonce
+; Offered on a first install only: an update leaves the setting as the user has it (Settings
+; > General > Start at sign-in), whichever way they set it.
+Name: "startup"; Description: "Start OpenCloud Bar when I sign in"; Flags: checkedonce; Check: FirstInstall
 
 [Files]
 Source: "{#Src}\OpenCloud Bar.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -53,7 +55,12 @@ Name: "{group}\OpenCloud Bar"; Filename: "{app}\OpenCloud Bar.exe"; AppUserModel
 Name: "{group}\Uninstall OpenCloud Bar"; Filename: "{uninstallexe}"
 
 [Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "OpenCloud Bar"; ValueData: """{app}\OpenCloud Bar.exe"""; Flags: uninsdeletevalue; Tasks: startup
+; Written on a first install with the task ticked; an update never turns the setting back on.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "OpenCloud Bar"; ValueData: """{app}\OpenCloud Bar.exe"""; Flags: uninsdeletevalue; Tasks: startup; Check: FirstInstall
+; No task and no Check, so this is processed (and logged for the uninstaller) on every install:
+; uninstalling removes the value even when the task wasn't ticked, e.g. the app's own setting
+; turned it on later. It creates no value and leaves an existing one alone.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "OpenCloud Bar"; Flags: uninsdeletevalue
 Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}"; Check: NeedsAddPath(ExpandConstant('{app}'))
 
 [Run]
@@ -66,6 +73,22 @@ Filename: "{app}\OpenCloud Bar.exe"; Description: "Start OpenCloud Bar now"; Fla
 Filename: "{app}\opencloud-bar.exe"; Parameters: "logout --force"; Flags: runhidden waituntilterminated; RunOnceId: "Logout"
 
 [Code]
+// Whether an earlier install exists (the uninstall key Inno writes for this AppId; this setup
+// runs in 64-bit mode, where HKLM is the 64-bit view the key is in). Read once, in
+// InitializeSetup, before this run writes anything: later it would always be found.
+var PreviousInstall: Boolean;
+
+function InitializeSetup(): Boolean;
+begin
+  PreviousInstall := RegKeyExists(HKLM, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{6B7C0E2B-3D7E-4F0A-9C55-0C1B2A7F4E21}_is1');
+  Result := True;
+end;
+
+function FirstInstall: Boolean;
+begin
+  Result := not PreviousInstall;
+end;
+
 // WinFsp's installer records InstallDir under HKLM\SOFTWARE\WinFsp in the 32-bit registry view,
 // which on 64-bit Windows is HKLM\SOFTWARE\WOW6432Node\WinFsp. (rclone's FUSE layer, cgofuse,
 // looks it up the same way: Software\WinFsp with RRF_SUBKEY_WOW6432KEY.) This setup runs in
