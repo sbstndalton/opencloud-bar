@@ -14,7 +14,7 @@ import SwiftUI
 /// OpenCloud's webdav service answers it (services/webdav/pkg/service/v0/search.go; reva's own
 /// ocdav answers 501). <dav>/spaces/ is the personal space's root.webDavUrl path without its
 /// last segment, against the configured server's origin. "Show in Browser" opens
-/// <server>/f/<the folder's id> (the web UI's private-link route). The bearer token only goes
+/// <server>/f/<the item's own id> (the web UI's private-link route: it opens a file's folder with the file selected, and a folder directly). The bearer token only goes
 /// to the server: DavHistory.session follows no redirects.
 enum ServerSearch {
     static let limit = 50
@@ -25,17 +25,21 @@ enum ServerSearch {
         var modified: Date?
         var dir: Bool
         var size: Int64
-        var webID: String?          // what Show in Browser opens (its folder's id)
+        var webID: String?          // what Show in Browser opens (the item's own id)
         var local: URL?             // its copy on this Mac, when it is in a kept folder and there
         var id: String
     }
 
     struct Space { var id: String; var name: String; var kept: [KeptFolder] }
 
-    static func cleanTerm(_ t: String) -> String? {
+    /// The trimmed term, or why it can't be searched for (same words as the Go app).
+    static func cleanTerm(_ t: String) throws -> String {
         let term = t.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !term.isEmpty, term.count <= 200,
-              !term.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return nil }
+        if term.isEmpty { throw AuthError.message("Type part of a name to search for.") }
+        if term.unicodeScalars.count > 200 { throw AuthError.message("That's too long to search for.") }
+        if term.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) {
+            throw AuthError.message("That isn't something a name can contain.")
+        }
         return term
     }
 
@@ -70,7 +74,7 @@ enum ServerSearch {
             && !id.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
     }
 
-    /// <server>/f/<id>: the web UI's link for a match's folder.
+    /// <server>/f/<id>: the web UI's link for a match.
     static func webURL(server: String, id: String) -> URL? {
         guard validWebID(id) else { return nil }
         let base = server.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
@@ -108,8 +112,9 @@ enum ServerSearch {
             if name.isEmpty || name.contains("/") || name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) {
                 name = clean.isEmpty ? ref : String(clean.split(separator: "/").last ?? "")
             }
-            let parent = r.props["file-parent"] ?? ""
-            let webID = validWebID(parent) ? parent : (validWebID(fileID) ? fileID : nil)
+            // The item's own id: the web UI's /f/:fileId opens a file's folder with the file
+            // selected, and opens a folder directly (never the parent's id).
+            let webID = validWebID(fileID) ? fileID : nil
             let dirPath = "/" + clean.split(separator: "/").dropLast().joined(separator: "/")
             let sp = spaces.first { spaceMatches($0.id, ref) }
             let folder = (sp.map { $0.name != "Personal" && !$0.name.isEmpty } ?? false) ? sp!.name + ": " + dirPath : dirPath
@@ -132,7 +137,7 @@ enum ServerSearch {
     /// Searches names in OpenCloud (all spaces): the matches (at most `limit`) and how many
     /// there are on the server.
     static func search(_ c: Config, term raw: String) async throws -> ([Result], Int) {
-        guard let term = cleanTerm(raw) else { throw AuthError.message("Type part of a name to search for.") }
+        let term = try cleanTerm(raw)
         let server = c.serverURL ?? ""
         let token = try await Auth.accessToken(serverURL: server)
         let value = try await DavHistory.drives(c, token: token)

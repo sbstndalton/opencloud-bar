@@ -13,13 +13,18 @@ import (
 
 // Storage quota warnings: the personal space's quota, as GET /graph/v1.0/me/drives gives it
 // (libre-graph Drive.quota: used, total, remaining, state; total missing or 0 means no limit),
-// checked at most every 30 minutes from the engine's tick. A warning is given once when the
+// checked at most every 30 minutes from the engine's tick (a failed check is tried again after
+// 2 minutes). A warning is given once when the
 // storage reaches 90% and once when it is full (100%); it is given again only after the use
 // went below 90%. The last level warned about is kept in the sync state folder
-// (<stateDir>/quota-warned), so a restart doesn't repeat it. The macOS app does the same
-// (Quota.swift).
+// (<stateDir>/quota-warned), so a restart doesn't repeat it. Signing out, signing in as
+// someone else or changing the server forgets the shown quota and that file, and the next
+// check runs at once. The macOS app does the same (Quota.swift).
 
-const quotaEvery = 30 * time.Minute
+const (
+	quotaEvery = 30 * time.Minute
+	quotaRetry = 2 * time.Minute // after a failed check
+)
 
 // quotaLevel is the warning level the quota is at: 0, 90 or 100. No limit: 0.
 func quotaLevel(q *quotaInfo) int {
@@ -36,8 +41,12 @@ func quotaLevel(q *quotaInfo) int {
 }
 
 // nextQuotaWarning: given the level last warned about, which warning to give now (0: none)
-// and the level to remember. Below 90% re-arms both warnings.
+// and the level to remember. A reading below 90% (or without a limit) re-arms both warnings;
+// no reading at all (q == nil) keeps the remembered level.
 func nextQuotaWarning(last int, q *quotaInfo) (warn, remember int) {
+	if q == nil {
+		return 0, last
+	}
 	lvl := quotaLevel(q)
 	switch {
 	case lvl == 0:
@@ -132,25 +141,69 @@ func (e *Engine) quotaDueLocked() {
 		return
 	}
 	e.quotaBusy, e.quotaAt = true, time.Now()
+	gen := e.quotaGen
 	go func() {
 		defer func() {
 			e.mu.Lock()
 			e.quotaBusy = false
 			e.mu.Unlock()
 		}()
-		e.checkQuota()
+		e.checkQuota(gen)
 	}()
 }
 
+// quotaIdentity says whose quota it is: the server and the signed-in account.
+func quotaIdentity(cfg Config) string {
+	base, _ := normalizeServerURL(cfg.ServerURL)
+	st, err := readAuthState()
+	if err != nil {
+		return base
+	}
+	return base + "|" + st.account()
+}
+
+// resetQuotaLocked forgets the shown quota and what was warned about, so the next check runs
+// at once (sign-out, sign-in, another server or account). A check still running for the old
+// state is dropped when it ends.
+func (e *Engine) resetQuotaLocked(cfgs ...Config) {
+	e.quotaShown, e.quotaAt = nil, time.Time{}
+	e.quotaGen++
+	for _, c := range cfgs {
+		_ = os.Remove(quotaWarnedFile(c))
+	}
+}
+
+// quotaFailed schedules the retry after a failed check (unless the state was reset meanwhile).
+func (e *Engine) quotaFailed(gen uint64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if gen == e.quotaGen {
+		e.quotaAt = time.Now().Add(quotaRetry - quotaEvery)
+	}
+}
+
 // checkQuota reads the quota and warns when it crossed a level.
-func (e *Engine) checkQuota() {
+func (e *Engine) checkQuota(gen uint64) {
 	cfg := e.config()
+	// Another account or server than the quota on hand is from: forget that one first.
+	if id := quotaIdentity(cfg); id != "" {
+		e.mu.Lock()
+		if e.quotaID != id {
+			e.quotaID = id
+			e.resetQuotaLocked(cfg)
+			e.quotaAt = time.Now() // this check is the one that was due
+			gen = e.quotaGen
+		}
+		e.mu.Unlock()
+	}
 	base, err := normalizeServerURL(cfg.ServerURL)
 	if err != nil {
+		e.quotaFailed(gen)
 		return
 	}
 	tok, err := accessToken(cfg.ServerURL)
 	if err != nil {
+		e.quotaFailed(gen)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -158,14 +211,28 @@ func (e *Engine) checkQuota() {
 	q, err := fetchQuota(ctx, base, tok)
 	if err != nil {
 		appLog("storage check: %v", err)
+		e.quotaFailed(gen)
 		return
 	}
-	e.applyQuota(cfg, q, time.Now())
+	e.applyQuotaFor(gen, cfg, q, time.Now())
 }
 
-// applyQuota remembers the quota for the status and gives a warning when one is due.
+// applyQuota applies a reading to the current state.
 func (e *Engine) applyQuota(cfg Config, q *quotaInfo, now time.Time) {
 	e.mu.Lock()
+	gen := e.quotaGen
+	e.mu.Unlock()
+	e.applyQuotaFor(gen, cfg, q, now)
+}
+
+// applyQuotaFor remembers the quota for the status and gives a warning when one is due. A
+// reading from before a reset (gen no longer current) is dropped.
+func (e *Engine) applyQuotaFor(gen uint64, cfg Config, q *quotaInfo, now time.Time) {
+	e.mu.Lock()
+	if gen != e.quotaGen {
+		e.mu.Unlock()
+		return
+	}
 	e.quotaShown = q
 	on := e.cfg.NotificationsOn() && e.cfgErr == nil
 	e.mu.Unlock()

@@ -102,15 +102,21 @@ struct NotePlanner {
     }
 }
 
-/// Shows notifications with UserNotifications. Permission is asked the first time one is
-/// needed; if it is refused, notifications are skipped (Settings ▸ General then says so, with
-/// a button to System Settings ▸ Notifications). A click opens Settings.
+/// Shows notifications with UserNotifications. The permission status is read on every
+/// notification (never cached), and the prompt is only asked for while it is "not determined",
+/// so allowing notifications later (Settings ▸ General, or System Settings) works without a
+/// relaunch. When they are refused, notifications are skipped (Settings ▸ General then says
+/// so, with a button to System Settings ▸ Notifications). A click opens Settings.
 @MainActor
 final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     private weak var model: AppModel?
-    /// The one permission request; every notification waits for its answer (two notes at
-    /// once used to see "already asked, not allowed yet" and drop the second).
+    /// The one permission request in flight; every caller waits for its answer (two notes at
+    /// once used to see "already asked, not allowed yet" and drop the second). Cleared when it
+    /// finishes, so a later request asks again.
     private var authorization: Task<Bool, Never>?
+
+    /// What macOS says about this app's notifications.
+    enum Status: Equatable, Sendable { case allowed, notDetermined, denied }
 
     init(model: AppModel) {
         self.model = model
@@ -119,39 +125,51 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         if Bundle.main.bundleIdentifier != nil { UNUserNotificationCenter.current().delegate = self }
     }
 
+    /// The current status, asked each time. A bare `swift run` binary can't be asked: allowed.
+    nonisolated static func status() async -> Status {
+        guard Bundle.main.bundleIdentifier != nil else { return .allowed }
+        switch await UNUserNotificationCenter.current().notificationSettings().authorizationStatus {
+        case .denied: return .denied
+        case .notDetermined: return .notDetermined
+        default: return .allowed
+        }
+    }
+
+    /// Asks macOS for permission through the single authorization task (joining one already
+    /// running). True when it was granted; false when refused or when the request threw.
+    func requestAuthorization() async -> Bool {
+        if authorization == nil {
+            authorization = Task { [weak self] in
+                defer { self?.authorization = nil }
+                do {
+                    return try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
+                } catch {
+                    Log.line("notification permission request failed: \(error.localizedDescription)")
+                    return false
+                }
+            }
+        }
+        return await authorization?.value ?? false
+    }
+
     func show(_ n: Note) {
         guard Bundle.main.bundleIdentifier != nil else { return }
         Task {
-            if authorization == nil {
-                authorization = Task {
-                    let ok = (try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])) ?? false
-                    if !ok { Log.line("notifications not allowed; skipping them") }
-                    return ok
-                }
+            var status = await Self.status()
+            if status == .notDetermined {
+                _ = await requestAuthorization()
+                status = await Self.status()
             }
-            guard await authorization?.value == true else { return }
+            guard status == .allowed else {
+                Log.line("notifications not allowed; skipping this one")
+                return
+            }
             let c = UNMutableNotificationContent()
             c.title = n.title
             c.body = n.body
             c.userInfo = ["page": n.page.rawValue]
             let req = UNNotificationRequest(identifier: UUID().uuidString, content: c, trigger: nil)
             try? await UNUserNotificationCenter.current().add(req)
-        }
-    }
-
-    /// Whether macOS shows this app's notifications: nil when it does (or can't be asked, as
-    /// in a bare `swift run` binary), else a one-line explanation. Builds that aren't signed by a
-    /// registered developer are often never offered the permission prompt, so the status stays
-    /// "not determined" (or "denied") and notifications silently don't appear.
-    nonisolated static func blockedText() async -> String? {
-        guard Bundle.main.bundleIdentifier != nil else { return nil }
-        switch await UNUserNotificationCenter.current().notificationSettings().authorizationStatus {
-        case .denied:
-            return "macOS is blocking notifications from OpenCloud Bar. Allow them in System Settings ▸ Notifications."
-        case .notDetermined:
-            return "macOS hasn't allowed notifications from OpenCloud Bar yet (this build isn't signed by a registered developer, so it may never ask). Allow them in System Settings ▸ Notifications."
-        default:
-            return nil
         }
     }
 

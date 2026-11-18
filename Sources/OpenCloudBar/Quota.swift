@@ -2,9 +2,12 @@ import Foundation
 
 /// Storage quota warnings: the personal space's quota from GET /graph/v1.0/me/drives
 /// (libre-graph Drive.quota: used, total, remaining, state; total missing or 0 means no limit),
-/// checked at most every 30 minutes from the model's tick. A warning is given once when the
+/// checked at most every 30 minutes from the model's tick (a failed check is tried again after
+/// 2 minutes). A warning is given once when the
 /// storage reaches 90% and once when it is full (100%); again only after the use went below
-/// 90%. The last level warned about is kept in the sync state folder (quota-warned). Same
+/// 90%. The last level warned about is kept in the sync state folder (quota-warned); signing
+/// out, signing in or changing the server or account forgets it and the shown quota, and the
+/// next check runs at once. Same
 /// rules as the Go app (cross/quota.go, which has the tests).
 struct StorageQuota: Equatable, Sendable {
     var used: Int64
@@ -12,6 +15,7 @@ struct StorageQuota: Equatable, Sendable {
     var state: String?
 
     static let checkEvery: TimeInterval = 30 * 60
+    static let retryAfterFailure: TimeInterval = 2 * 60
 
     /// The warning level: 0, 90 or 100. No limit: 0.
     var level: Int {
@@ -21,15 +25,16 @@ struct StorageQuota: Equatable, Sendable {
     }
 
     /// Given the level last warned about: the warning to give now (0: none), and the level to
-    /// remember. Below 90% re-arms both.
+    /// remember. Below 90% re-arms both; no reading at all (nil) keeps the remembered level.
     static func next(last: Int, _ q: StorageQuota?) -> (warn: Int, remember: Int) {
-        let lvl = q?.level ?? 0
+        guard let q else { return (0, last) }
+        let lvl = q.level
         if lvl == 0 { return (0, 0) }
         if lvl > last { return (lvl, lvl) }
         return (0, last)
     }
 
-    private static func bytes(_ n: Int64) -> String { ByteCountFormatter.string(fromByteCount: n, countStyle: .file) }
+    private static func bytes(_ n: Int64) -> String { ByteCountFormatter.string(fromByteCount: n, countStyle: .binary) }
 
     /// "1.2 GB of 10 GB used", or "1.2 GB used (no limit)".
     var text: String {
@@ -81,22 +86,51 @@ struct StorageQuota: Equatable, Sendable {
 }
 
 extension AppModel {
+    /// Whose quota it is: the server and the signed-in account.
+    static func quotaIdentity(_ c: Config) -> String {
+        let base = (try? Auth.normalizeServerURL(c.serverURL ?? "")) ?? ""
+        return base + "|" + (Auth.readState()?.account ?? "")
+    }
+
     var quotaWarnedURL: URL { config.stateURL.appendingPathComponent("quota-warned") }
 
     /// From tick(): checks the quota when 30 minutes have passed (browser sign-in, signed in).
     func checkQuotaIfDue() {
         guard config.isOIDC, !signedOut, !quotaBusy, Date().timeIntervalSince(quotaCheckedAt) >= StorageQuota.checkEvery else { return }
+        // Another account or server than the quota on hand is from: forget that one first.
+        let id = Self.quotaIdentity(config)
+        if id != quotaIdentity {
+            quotaIdentity = id
+            resetQuota(stateFolders: [config.stateURL])
+        }
         quotaBusy = true
         quotaCheckedAt = Date()
         let c = config
+        let gen = quotaGeneration
         Task {
             defer { quotaBusy = false }
             do {
-                applyQuota(try await StorageQuota.fetch(c))
+                let q = try await StorageQuota.fetch(c)
+                guard gen == quotaGeneration else { return }   // reset meanwhile: an old answer
+                applyQuota(q)
             } catch {
                 Log.line("storage check: \(error.localizedDescription)")
+                // Try again soon rather than after the full 30 minutes.
+                if gen == quotaGeneration {
+                    quotaCheckedAt = Date().addingTimeInterval(StorageQuota.retryAfterFailure - StorageQuota.checkEvery)
+                }
             }
         }
+    }
+
+    /// Forgets the shown quota and what was warned about (the quota-warned file in each of the
+    /// state folders given), so the next check runs at once. For sign-out, sign-in and another
+    /// server or account.
+    func resetQuota(stateFolders: [URL]) {
+        storageQuota = nil
+        quotaCheckedAt = .distantPast
+        quotaGeneration += 1
+        for u in Set(stateFolders) { try? FileManager.default.removeItem(at: u.appendingPathComponent("quota-warned")) }
     }
 
     /// Shows the quota in the menu and warns when it crossed a level.

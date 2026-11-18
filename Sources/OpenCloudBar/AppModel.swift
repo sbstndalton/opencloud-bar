@@ -54,6 +54,8 @@ final class AppModel: ObservableObject {
     /// The personal space's quota, last checked (Quota.swift); nil until then or without a limit given.
     @Published var storageQuota: StorageQuota?
     var quotaCheckedAt = Date.distantPast
+    var quotaGeneration = 0          // bumped when the quota state is reset
+    var quotaIdentity = ""           // server + account the quota on hand is from
     var quotaBusy = false
     var searchWindow: SearchWindowController?
     private var notePlanner = NotePlanner()
@@ -129,6 +131,7 @@ final class AppModel: ObservableObject {
         config = c
         configError = err
         signedOut = c.isOIDC && c.isConfigured && !Auth.haveCredentials(c)
+        quotaIdentity = Self.quotaIdentity(c)
         applyEnvironment()
         refreshStatusEntries()
         recentChanges = Changes.load(changesURL)
@@ -197,6 +200,7 @@ final class AppModel: ObservableObject {
         guard !signedOut else { return }
         signedOut = true
         lastMessage = Self.signedOutText
+        resetQuota(stateFolders: [config.stateURL])
         Log.line("signed out (sign-in missing or revoked)")
     }
 
@@ -1793,6 +1797,10 @@ final class AppModel: ObservableObject {
         }
         do { try c.write() } catch { return "Couldn't save the settings: \(error.localizedDescription)" }
 
+        if c.serverURL != old.serverURL {
+            quotaIdentity = Self.quotaIdentity(c)
+            resetQuota(stateFolders: [old.stateURL, c.stateURL])
+        }
         config = c
         applyEnvironment()
         refreshStatusEntries()
@@ -1856,6 +1864,12 @@ final class AppModel: ObservableObject {
         let out = c.isOIDC && c.isConfigured && !Auth.haveCredentials(c)
         let wasOut = signedOut
         let reconnect = c.connectionKey != config.connectionKey || out
+        let id = Self.quotaIdentity(c)
+        if wasOut || out || c.serverURL != config.serverURL || id != quotaIdentity {
+            // Signed out or in, another server or account: the old quota isn't this one's.
+            quotaIdentity = id
+            resetQuota(stateFolders: [config.stateURL, c.stateURL])
+        }
         config = c
         signedOut = out
         if !out { waitingForKeychain = false }
@@ -1893,6 +1907,7 @@ final class AppModel: ObservableObject {
             Auth.logout()
             signedOut = true
             lastMessage = Self.signedOutText
+            resetQuota(stateFolders: [config.stateURL])
             restartConnection()
         }
     }

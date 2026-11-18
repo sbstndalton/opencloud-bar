@@ -680,7 +680,7 @@ func (e *Engine) serveOpen(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, http.StatusConflict, err)
 			return
 		}
-	case "search-web": // a search match's folder in OpenCloud in the browser (its id only)
+	case "search-web": // a search match in OpenCloud in the browser (its own id only)
 		u, err := searchWebURL(cfg, b.Path)
 		if err != nil {
 			jsonErr(w, http.StatusBadRequest, err)

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -157,18 +158,18 @@ func TestSearchRequestAndResults(t *testing.T) {
 		t.Fatalf("got %d of %d: %+v", len(res.Results), res.Total, res.Results)
 	}
 	r0 := res.Results[0]
-	if r0.Name != "report.txt" || r0.Folder != "/Docs" || r0.Dir || r0.Size != 7 || r0.WebID != "storage-users-1$1111!docs" ||
+	if r0.Name != "report.txt" || r0.Folder != "/Docs" || r0.Dir || r0.Size != 7 || r0.WebID != "storage-users-1$1111!aaaa" ||
 		!r0.Modified.Equal(reportTime) || r0.Kept != "Docs" || r0.Rel != "report.txt" {
 		t.Errorf("kept file: %+v", r0)
 	}
-	if r := res.Results[1]; r.Name != "Reports" || !r.Dir || r.Folder != "/Other" || r.Kept != "" || r.Size != 4096 {
+	if r := res.Results[1]; r.Name != "Reports" || !r.Dir || r.Folder != "/Other" || r.Kept != "" || r.Size != 4096 || r.WebID != "storage-users-1$1111!rrrr" {
 		t.Errorf("folder elsewhere: %+v", r)
 	}
 	// In a kept folder of a space, but not on this computer: no Show on this computer.
-	if r := res.Results[2]; r.Folder != "Marketing: /Docs/plans" || r.Kept != "" || r.WebID != "storage-users-1$2222!plans" {
+	if r := res.Results[2]; r.Folder != "Marketing: /Docs/plans" || r.Kept != "" || r.WebID != "storage-users-1$2222!mmmm" {
 		t.Errorf("space: %+v", r)
 	}
-	// An unusable parent id: the item's own.
+	// An unusable parent id doesn't matter: the item's own id is used.
 	if r := res.Results[3]; r.Name != "report-shared.pdf" || r.WebID != "s3" || r.Folder != "/" {
 		t.Errorf("share: %+v", r)
 	}
@@ -218,9 +219,10 @@ func TestSearchShowsLocalOnlyWhenThere(t *testing.T) {
 
 func TestSearchErrors(t *testing.T) {
 	e, oc := historyRig(t)
-	for _, term := range []string{"", "   ", "a\x00b", strings.Repeat("x", 201)} {
-		if _, err := e.Search(term); err == nil {
-			t.Errorf("%q searched", term)
+	for term, want := range map[string]string{"": "Type part of a name to search for.", "   ": "Type part of a name to search for.",
+		"a\x00b": "That isn't something a name can contain.", strings.Repeat("x", 201): "That's too long to search for."} {
+		if _, err := e.Search(term); err == nil || err.Error() != want {
+			t.Errorf("%q: %v, want %q", term, err, want)
 		}
 	}
 	oc.mu.Lock()
@@ -229,15 +231,21 @@ func TestSearchErrors(t *testing.T) {
 	if n != 0 {
 		t.Errorf("bad terms sent %d requests", n)
 	}
-	for code, want := range map[int]string{501: "doesn't offer search", 400: "try other words", 401: "Sign in again", 500: "answered 500"} {
+	for code, want := range map[int]string{501: "doesn't offer search", 400: "Try other words", 401: "Sign in again", 500: "answered 500"} {
 		oc.report = func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(code) }
-		if _, err := e.Search("x"); err == nil || !strings.Contains(err.Error(), want) {
+		_, err := e.Search("x")
+		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%d: %v", code, err)
+			continue
+		}
+		// Shown to the user: a capitalized full sentence.
+		if m := err.Error(); m[0] < 'A' || m[0] > 'Z' || !strings.HasSuffix(m, ".") {
+			t.Errorf("%d: %q isn't a capitalized sentence", code, m)
 		}
 	}
 	oc.report = func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(207); _, _ = io.WriteString(w, "<nope") }
-	if _, err := e.Search("x"); err == nil {
-		t.Error("garbage accepted")
+	if _, err := e.Search("x"); err == nil || err.Error() != "The server's answer wasn't what was expected." {
+		t.Errorf("garbage: %v", err)
 	}
 	// A redirect isn't followed (the token stays with the server).
 	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Errorf("redirect followed to %s", r.URL) }))
@@ -294,7 +302,7 @@ func TestQuotaThresholds(t *testing.T) {
 		{q(89, 100), 0},    // below 90: re-armed
 		{q(91, 100), 90},   // warns again
 		{q(0, 0), 0},       // no limit: no warnings
-		{nil, 0},           // the server gave none
+		{nil, 0},           // the server gave none: nothing to warn about
 		{q(100, 100), 100},
 	}
 	for i, s := range steps {
@@ -378,8 +386,25 @@ func TestQuotaWarningsOncePerCrossing(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(expand(e.cfg.StateDir), "quota-warned")); strings.TrimSpace(string(b)) != "90" {
 		t.Errorf("remembered %q", b)
 	}
+	mu.Lock()
+	shownBefore := len(shown)
+	mu.Unlock()
+	changesBefore := len(e.RecentChanges(0))
 	e2 := NewEngine()
+	defer e2.Shutdown()
+	if e2.cfg.StateDir != e.cfg.StateDir {
+		t.Fatalf("the restarted engine's state folder is %q, not %q", e2.cfg.StateDir, e.cfg.StateDir)
+	}
 	e2.applyQuota(e2.config(), &quotaInfo{Used: 96, Total: 100}, time.Now())
+	time.Sleep(100 * time.Millisecond) // a (wrong) notification is shown from a goroutine
+	mu.Lock()
+	if len(shown) != shownBefore {
+		t.Errorf("a restart repeated the warning: %q", shown)
+	}
+	mu.Unlock()
+	if n := len(e.RecentChanges(0)); n != changesBefore {
+		t.Errorf("a restart added %d change(s)", n-changesBefore)
+	}
 	apply(100, 100, true)
 	apply(100, 100, false)
 	apply(10, 100, false) // re-armed
@@ -432,4 +457,286 @@ func TestQuotaCheckIsDueEvery30Minutes(t *testing.T) {
 	if n != 2 {
 		t.Errorf("%d checks", n)
 	}
+}
+
+// ---- 2.2 review round
+
+func TestSearchOnlyTalksToTheConfiguredServer(t *testing.T) {
+	e, oc := historyRig(t)
+	var other atomic.Int32
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		other.Add(1)
+		http.Error(w, "no", 400)
+	}))
+	defer foreign.Close()
+	// The server's drives list says the personal space's WebDAV root is on another host.
+	oc.mu.Lock()
+	oc.drives = `{"value":[{"id":"storage-users-1$1111","name":"Sam","driveType":"personal","root":{"webDavUrl":"` + foreign.URL + `/opencloud/dav/spaces/storage-users-1$1111"}}]}`
+	oc.mu.Unlock()
+	var reportHost string
+	oc.report = func(w http.ResponseWriter, r *http.Request) {
+		reportHost = r.Host
+		w.WriteHeader(207)
+		_, _ = io.WriteString(w, searchAnswer)
+	}
+	res, err := e.Search("report")
+	if err != nil || len(res.Results) == 0 {
+		t.Fatalf("%v %+v", err, res)
+	}
+	oc.mu.Lock()
+	gotHost := reportHost
+	oc.mu.Unlock()
+	if want := strings.TrimPrefix(oc.srv.URL, "http://"); gotHost != want {
+		t.Errorf("the search went to %q, not the configured server %q", gotHost, want)
+	}
+	if n := other.Load(); n != 0 {
+		t.Errorf("the other host got %d request(s) (with the bearer token)", n)
+	}
+}
+
+func TestShowInBrowserUsesTheItemsOwnID(t *testing.T) {
+	e, oc := historyRig(t)
+	oc.report = func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(207)
+		_, _ = io.WriteString(w, searchAnswer)
+	}
+	res, err := e.Search("report")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"report.txt": "storage-users-1$1111!aaaa", "Reports": "storage-users-1$1111!rrrr", "report.md": "storage-users-1$2222!mmmm"}
+	for _, r := range res.Results {
+		if w, ok := want[r.Name]; ok {
+			if r.WebID != w {
+				t.Errorf("%s opens %q, want its own id %q", r.Name, r.WebID, w)
+			}
+			u, err := searchWebURL(e.config(), r.WebID)
+			if err != nil || !strings.HasPrefix(u, oc.srv.URL+"/opencloud/f/") || !strings.Contains(u, strings.ReplaceAll(url.PathEscape(w), "%24", "$")) {
+				t.Errorf("%s: link %q %v", r.Name, u, err)
+			}
+		}
+		if strings.Contains(r.WebID, "!docs") || strings.Contains(r.WebID, "!other") || strings.Contains(r.WebID, "!plans") {
+			t.Errorf("%s opens a parent id %q", r.Name, r.WebID)
+		}
+	}
+	// No usable id of its own: no button, even though a parent id was given.
+	noID := `<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:response><d:href>/dav/spaces/storage-users-1$1111/Docs/n.txt</d:href>
+	 <d:propstat><d:prop><oc:file-parent>storage-users-1$1111!docs</oc:file-parent><oc:name>n.txt</oc:name></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>`
+	oc.report = func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(207); _, _ = io.WriteString(w, noID) }
+	res, err = e.Search("n")
+	if err != nil || len(res.Results) != 1 || res.Results[0].WebID != "" {
+		t.Errorf("%+v %v", res, err)
+	}
+}
+
+func TestSearchLocalButtonMatchesItemLocal(t *testing.T) {
+	e, oc := historyRig(t)
+	root := e.cfg.Local(e.cfg.Kept[0])
+	names := []string{"ok.txt", "a:b.txt", "sub:dir/f.txt", "sub/g.txt"}
+	for _, n := range names {
+		p := filepath.Join(root, filepath.FromSlash(n))
+		_ = os.MkdirAll(filepath.Dir(p), 0o700)
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Skipf("this file system can't hold %q: %v", n, err)
+		}
+	}
+	var b strings.Builder
+	b.WriteString(`<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">`)
+	for i, n := range names {
+		fmt.Fprintf(&b, `<d:response><d:href>/dav/spaces/storage-users-1$1111/Docs/%s</d:href><d:propstat><d:prop><oc:fileid>id%d</oc:fileid></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`, n, i)
+	}
+	b.WriteString(`</d:multistatus>`)
+	oc.report = func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(207); _, _ = io.WriteString(w, b.String()) }
+	res, err := e.Search("x")
+	if err != nil || len(res.Results) != len(names) {
+		t.Fatalf("%v %+v", err, res)
+	}
+	for i, r := range res.Results {
+		_, refused := e.itemLocal(e.cfg.Kept[0].Key(), names[i])
+		wantButton := refused == nil
+		if (r.Kept != "") != wantButton {
+			t.Errorf("%q: Show on This Computer %v, but itemLocal refuses: %v", names[i], r.Kept != "", refused)
+		}
+		if r.Kept != "" {
+			if _, err := e.itemLocal(r.Kept, r.Rel); err != nil {
+				t.Errorf("%q: offered a path the item action refuses: %v", names[i], err)
+			}
+		}
+	}
+	// The ':' ones are refused by itemLocal, the plain ones are not.
+	if _, err := e.itemLocal(e.cfg.Kept[0].Key(), "a:b.txt"); err == nil {
+		t.Error("itemLocal accepted a ':' name")
+	}
+	if res.Results[0].Kept == "" || res.Results[1].Kept != "" || res.Results[2].Kept != "" || res.Results[3].Kept == "" {
+		t.Errorf("buttons: %q %q %q %q", res.Results[0].Kept, res.Results[1].Kept, res.Results[2].Kept, res.Results[3].Kept)
+	}
+}
+
+// quotaRig: a signed-in engine whose notifications are counted.
+func quotaRig(t *testing.T) (*Engine, *fakeOC, *atomic.Int32) {
+	t.Helper()
+	e, oc := historyRig(t)
+	signedIn(e)
+	var n atomic.Int32
+	old := showNotification
+	showNotification = func(title, body string) error { n.Add(1); return nil }
+	t.Cleanup(func() { showNotification = old })
+	return e, oc, &n
+}
+
+func TestNoQuotaKeepsTheRememberedLevel(t *testing.T) {
+	if w, rem := nextQuotaWarning(90, nil); w != 0 || rem != 90 {
+		t.Errorf("nil at 90: %d %d", w, rem)
+	}
+	if w, rem := nextQuotaWarning(100, nil); w != 0 || rem != 100 {
+		t.Errorf("nil at 100: %d %d", w, rem)
+	}
+	e, _, n := quotaRig(t)
+	file := quotaWarnedFile(e.config())
+	e.applyQuota(e.config(), &quotaInfo{Used: 95, Total: 100}, time.Now())
+	waitFor(t, func() bool { return n.Load() == 1 })
+	e.applyQuota(e.config(), nil, time.Now()) // the server gave no quota this time
+	if readQuotaWarned(file) != 90 {
+		t.Errorf("a missing quota changed the remembered level to %d", readQuotaWarned(file))
+	}
+	e.applyQuota(e.config(), &quotaInfo{Used: 96, Total: 100}, time.Now())
+	time.Sleep(100 * time.Millisecond)
+	if n.Load() != 1 {
+		t.Errorf("warned again after a missing quota (%d notifications)", n.Load())
+	}
+	// A real reading below 90% re-arms.
+	e.applyQuota(e.config(), &quotaInfo{Used: 10, Total: 100}, time.Now())
+	if readQuotaWarned(file) != 0 {
+		t.Error("not re-armed by a real reading")
+	}
+}
+
+// quotaState: puts the engine in "a quota was checked and warned about" state.
+func quotaState(t *testing.T, e *Engine) string {
+	t.Helper()
+	file := quotaWarnedFile(e.config())
+	if err := writeQuotaWarned(file, 90); err != nil {
+		t.Fatal(err)
+	}
+	e.mu.Lock()
+	e.quotaShown = &quotaInfo{Used: 95, Total: 100}
+	e.quotaAt = time.Now()
+	e.mu.Unlock()
+	return file
+}
+
+func quotaIsReset(t *testing.T, e *Engine, file, why string) {
+	t.Helper()
+	e.mu.Lock()
+	shown, at := e.quotaShown, e.quotaAt
+	e.mu.Unlock()
+	if shown != nil || !at.IsZero() || exists(file) {
+		t.Errorf("%s: shown %+v, checked %v, warned file there %v", why, shown, at, exists(file))
+	}
+	if e.Status().Storage != nil {
+		t.Errorf("%s: status still shows the storage", why)
+	}
+}
+
+func TestQuotaStateResetsOnSignOutSignInAndServerChange(t *testing.T) {
+	e, oc, n := quotaRig(t)
+	file := quotaState(t, e)
+	if err := e.SignOut(true); err != nil {
+		t.Fatal(err)
+	}
+	quotaIsReset(t, e, file, "sign out")
+
+	// Revoked sign-in.
+	signedIn(e)
+	file = quotaState(t, e)
+	e.markSignedOut()
+	quotaIsReset(t, e, file, "revoked sign-in")
+
+	// Signing in as someone else (the next check notices another account).
+	base, _ := normalizeServerURL(e.cfg.ServerURL)
+	if err := writeAuthState(authState{ServerURL: base, Issuer: base, Username: "sam", Access: "tok", Expiry: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	signedIn(e)
+	e.mu.Lock()
+	e.quotaID = "someone-else"
+	e.mu.Unlock()
+	file = quotaState(t, e)
+	oc.mu.Lock()
+	oc.drives = `{"value":[{"id":"storage-users-1$1111","driveType":"personal","quota":{"used":95,"total":100}}]}`
+	oc.mu.Unlock()
+	before := n.Load()
+	e.checkQuota(e.quotaGenNow())
+	// The old account's remembered warning is gone, so this account is warned.
+	waitFor(t, func() bool { return n.Load() == before+1 })
+	if readQuotaWarned(file) != 90 {
+		t.Errorf("the new reading wasn't remembered: %d", readQuotaWarned(file))
+	}
+
+	// Another server, applied by a reload.
+	file = quotaState(t, e)
+	raw, _ := os.ReadFile(configFile())
+	other := strings.Replace(string(raw), oc.srv.URL, "https://other.example.com", 1)
+	if other == string(raw) {
+		t.Fatal("server not in the config")
+	}
+	if err := os.WriteFile(configFile(), []byte(other), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	quotaIsReset(t, e, file, "server change")
+}
+
+func (e *Engine) quotaGenNow() uint64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.quotaGen
+}
+
+func TestFailedQuotaCheckIsRetriedSoon(t *testing.T) {
+	e, oc, _ := quotaRig(t)
+	oc.mu.Lock()
+	oc.drives = `not json`
+	oc.mu.Unlock()
+	count := func() int {
+		oc.mu.Lock()
+		defer oc.mu.Unlock()
+		n := 0
+		for _, r := range oc.requests {
+			if r == "GET /opencloud/graph/v1.0/me/drives" {
+				n++
+			}
+		}
+		return n
+	}
+	e.mu.Lock()
+	e.quotaDueLocked()
+	e.mu.Unlock()
+	waitFor(t, func() bool { e.mu.Lock(); defer e.mu.Unlock(); return !e.quotaBusy })
+	e.mu.Lock()
+	wait := time.Until(e.quotaAt.Add(quotaEvery))
+	e.mu.Unlock()
+	if wait <= 0 || wait > quotaRetry {
+		t.Fatalf("the next check is in %v, want within %v (not %v)", wait, quotaRetry, quotaEvery)
+	}
+	// Not yet due...
+	e.mu.Lock()
+	e.quotaDueLocked()
+	busy := e.quotaBusy
+	e.mu.Unlock()
+	if busy || count() != 1 {
+		t.Errorf("checked again at once (%d)", count())
+	}
+	// ...but due after the retry time, far sooner than 30 minutes.
+	e.mu.Lock()
+	e.quotaAt = e.quotaAt.Add(-quotaRetry - time.Second) // the 2 minutes have passed
+	e.quotaDueLocked()
+	again := e.quotaBusy
+	e.mu.Unlock()
+	if !again {
+		t.Error("not retried after the short wait")
+	}
+	waitFor(t, func() bool { e.mu.Lock(); defer e.mu.Unlock(); return !e.quotaBusy })
 }

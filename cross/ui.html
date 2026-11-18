@@ -846,7 +846,7 @@ function drive(main, r) {
     main.append(h("div", { class: "card" },
       checkField("Show the OpenCloud drive", "mountEnabled", "Mounts your OpenCloud files as a drive that downloads files when you open them."),
       textField("Mount location", "mountPoint", isWin ? "A drive letter like O: or an empty folder." : "An empty folder."),
-      textField("Volume name", "volumeName"),
+      isWin ? textField("Volume name", "volumeName") : null, // rclone --volname only works on Windows and macOS
       selectField("Cache size limit", "cacheMaxSize", [["5G","5 GB"],["10G","10 GB"],["20G","20 GB"],["50G","50 GB"],["100G","100 GB"]]),
       selectField("Keep cached files for", "cacheMaxAge", [["24h","24 hours"],["72h","3 days"],["168h","7 days"]])));
     main.append(h("div", { class: "card", id: "drive-live" }));

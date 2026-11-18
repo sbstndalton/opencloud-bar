@@ -562,7 +562,8 @@ struct GeneralPage: View {
     }
 
     @Local private var updateError: String?
-    @Local private var notificationsBlocked: String?
+    @Local private var notificationsStatus: Notifier.Status = .allowed
+    @Local private var notificationsCantEnable = false
 
     private var version: String {
         Updates.isDevBuild ? "\(Updates.running) (development build)" : Updates.running
@@ -612,9 +613,10 @@ struct GeneralPage: View {
                     .accessibilityLabel("Show notifications")
                 Text("When a folder needs attention or was merged automatically, when you are signed out, when your storage is almost full, and when an update is available. Once per change, never repeated. Clicking one opens Settings.")
                     .font(.caption).foregroundStyle(.secondary)
-                if model.config.notifications, let why = notificationsBlocked {
+                if model.config.notifications, notificationsStatus == .denied {
                     HStack {
-                        Label(why, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
+                        Label("macOS is blocking notifications from OpenCloud Bar. Allow them in System Settings ▸ Notifications.",
+                              systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
                         Spacer()
                         Button("Open Notification Settings…") {
                             if let u = Notifier.settingsURL { NSWorkspace.shared.open(u) }
@@ -622,11 +624,31 @@ struct GeneralPage: View {
                         .accessibilityLabel("Open Notification Settings in System Settings")
                     }
                 }
+                if model.config.notifications, notificationsStatus == .notDetermined {
+                    HStack {
+                        Label("macOS hasn't been asked to allow notifications from OpenCloud Bar yet.",
+                              systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
+                        Spacer()
+                        Button("Allow Notifications…") {
+                            Task {
+                                _ = await model.notifier.requestAuthorization()
+                                let s = await Notifier.status()
+                                notificationsStatus = s
+                                notificationsCantEnable = s == .notDetermined
+                            }
+                        }
+                        .accessibilityLabel("Allow Notifications")
+                    }
+                    if notificationsCantEnable {
+                        Text("This build can't turn notifications on: macOS didn't show its permission prompt (builds that aren't signed by a registered developer are often never offered it).")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
             }
-            .task { notificationsBlocked = await Notifier.blockedText() }
+            .task { notificationsStatus = await Notifier.status() }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
                 // Back from System Settings: check again.
-                Task { notificationsBlocked = await Notifier.blockedText() }
+                Task { notificationsStatus = await Notifier.status() }
             }
             if model.config.tunnel {
                 Section("Server") {

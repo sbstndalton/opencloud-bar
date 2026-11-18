@@ -113,6 +113,8 @@ type Engine struct {
 	quotaAt    time.Time
 	quotaBusy  bool
 	quotaShown *quotaInfo
+	quotaGen   uint64 // bumped when the quota state is reset (sign-out, sign-in, other server)
+	quotaID    string // server|account the quota on hand is from
 
 	notes      notifyState // what has been announced (notify.go)
 	autoMerged []string    // folders merged automatically since the last notification check
@@ -146,6 +148,7 @@ func NewEngine() *Engine {
 		rcUser: "ocb-" + randomToken()[:12], rcPass: randomToken(), updates: newUpdater(),
 		cmds: map[*exec.Cmd]bool{}, running: map[string]workItem{}, runTimes: map[string]runTimes{}, active: map[string]*activeRun{}}
 	e.signedOut = cfg.OIDC() && cfg.Configured() && !haveCredentials(cfg)
+	e.quotaID = quotaIdentity(cfg)
 	e.refreshStatusLocked()
 	return e
 }
@@ -157,6 +160,7 @@ func (e *Engine) markSignedOut() {
 	e.mu.Lock()
 	e.signedOut = true
 	e.message = signedOutMessage
+	e.resetQuotaLocked(e.cfg)
 	e.mu.Unlock()
 	e.logLine("signed out (sign-in missing or revoked)")
 	e.notify()
@@ -217,6 +221,7 @@ func (e *Engine) SignOut(force bool) error {
 	e.mu.Lock()
 	e.signedOut = true
 	e.message = signedOutMessage
+	e.resetQuotaLocked(e.cfg)
 	m, t := e.mount, e.tunnel
 	if m != nil {
 		e.unmountRequest = true
@@ -1620,6 +1625,12 @@ func (e *Engine) Reload() error {
 		}
 	}
 	wasOut := e.signedOut
+	if id := quotaIdentity(cfg); wasOut || out || cfg.ServerURL != e.cfg.ServerURL || id != e.quotaID {
+		// Signed out or in, another server or account: the old quota (and what was warned
+		// about) isn't this one's.
+		e.quotaID = id
+		e.resetQuotaLocked(e.cfg, cfg)
+	}
 	e.cfg, e.cfgErr = cfg, nil
 	e.signedOut = out
 	if out {

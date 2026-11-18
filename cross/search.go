@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os"
 	"path"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -38,9 +37,9 @@ import (
 // opencloud-eu/web packages/web-client/src/webdav/search.ts and client/builders.ts (REPORT on
 // '/spaces/', the oc:search-files body above, totalResults from Content-Range) and
 // packages/web-pkg/src/composables/search/useSearch.ts (buildSearchTerm: name:"*<term>*", the
-// term's quotes doubled by escapeKqlValue). "Show in browser" opens <server>/f/<parent id>,
+// term's quotes doubled by escapeKqlValue). "Show in browser" opens <server>/f/<the item's own id>,
 // the web UI's private-link route (packages/web-runtime/src/router/index.ts '/f/:fileId'),
-// which opens that folder.
+// which opens a file's folder with the file selected, and a folder directly.
 //
 // The spaces root is the personal space's root.webDavUrl path (/me/drives) with its last
 // segment dropped, used against the configured server's origin like the trash. The bearer
@@ -57,7 +56,7 @@ type SearchResult struct {
 	Modified time.Time `json:"modified"`
 	Dir      bool      `json:"dir"`
 	Size     int64     `json:"size"`
-	WebID    string    `json:"webId"`          // the id "Show in browser" opens (its folder's)
+	WebID    string    `json:"webId"`          // the id "Show in browser" opens (its own)
 	Kept     string    `json:"kept,omitempty"` // the kept folder it is in, if it is on this computer
 	Rel      string    `json:"rel,omitempty"`  // its path in that kept folder
 }
@@ -78,10 +77,13 @@ type searchSpace struct {
 func cleanSearchTerm(term string) (string, error) {
 	term = strings.TrimSpace(term)
 	if term == "" {
-		return "", errors.New("type part of a name to search for")
+		return "", errors.New("Type part of a name to search for.")
 	}
-	if len([]rune(term)) > 200 || hasControl(term) {
-		return "", errors.New("that isn't something a name can contain")
+	if len([]rune(term)) > 200 {
+		return "", errors.New("That's too long to search for.")
+	}
+	if hasControl(term) {
+		return "", errors.New("That isn't something a name can contain.")
 	}
 	return term, nil
 }
@@ -107,7 +109,7 @@ func spacesRootURL(origin, personalDavPath string) (string, error) {
 	p := strings.TrimRight(personalDavPath, "/")
 	i := strings.LastIndex(p, "/")
 	if i < 0 || !strings.HasSuffix(p[:i], "/spaces") || p[i+1:] == "" {
-		return "", errors.New("this server's spaces aren't the kind this version understands")
+		return "", errors.New("This server's spaces aren't the kind this version understands.")
 	}
 	return origin + p[:i] + "/", nil
 }
@@ -132,7 +134,6 @@ func parseSearch(r io.Reader, spaces []searchSpace, local func(KeptFolder, strin
 			Props []struct {
 				Status        string `xml:"status"`
 				FileID        string `xml:"prop>fileid"`
-				Parent        string `xml:"prop>file-parent"`
 				Name          string `xml:"prop>name"`
 				LastModified  string `xml:"prop>getlastmodified"`
 				ContentLength string `xml:"prop>getcontentlength"`
@@ -144,7 +145,7 @@ func parseSearch(r io.Reader, spaces []searchSpace, local func(KeptFolder, strin
 		} `xml:"response"`
 	}
 	if err := xml.NewDecoder(io.LimitReader(r, 8<<20)).Decode(&ms); err != nil {
-		return nil, errors.New("the server's answer wasn't what was expected")
+		return nil, errors.New("The server's answer wasn't what was expected.")
 	}
 	out := []SearchResult{}
 	seen := map[string]bool{}
@@ -168,16 +169,13 @@ func parseSearch(r io.Reader, spaces []searchSpace, local func(KeptFolder, strin
 			clean = c
 		}
 		res := SearchResult{Size: -1}
-		var fileID, parentID string
+		var fileID string
 		for _, ps := range resp.Props {
 			if ps.Status != "" && !strings.Contains(ps.Status, " 200") {
 				continue
 			}
 			if v := strings.TrimSpace(ps.FileID); v != "" {
 				fileID = v
-			}
-			if v := strings.TrimSpace(ps.Parent); v != "" {
-				parentID = v
 			}
 			if v := strings.TrimSpace(ps.Name); v != "" {
 				res.Name = v
@@ -206,10 +204,9 @@ func parseSearch(r io.Reader, spaces []searchSpace, local func(KeptFolder, strin
 				res.Name = ref
 			}
 		}
-		switch {
-		case validWebID(parentID):
-			res.WebID = parentID
-		case validWebID(fileID):
+		// The item's own id (never its parent's): the web UI's /f/:fileId opens a file's folder
+		// with the file selected, and opens a folder directly.
+		if validWebID(fileID) {
 			res.WebID = fileID
 		}
 		dir := "/" + path.Dir("/" + clean)[1:]
@@ -286,17 +283,18 @@ func searchSpaces(d graphDrives, cfg Config) ([]searchSpace, string) {
 	return out, personal
 }
 
-// searchLocal is the local copy of rel in kept folder f, if it is there.
-func searchLocal(cfg Config) func(KeptFolder, string) (string, bool) {
+// searchLocal is the local copy of rel in kept folder f, if it is there. The path is checked
+// by itemLocal (the "item" action's check), so "Show on this computer" is never offered for a
+// path that "item" would refuse.
+func (e *Engine) searchLocal() func(KeptFolder, string) (string, bool) {
 	return func(f KeptFolder, rel string) (string, bool) {
 		for _, s := range strings.Split(rel, "/") {
 			if isBackupFolder(s) {
 				return "", false
 			}
 		}
-		root := cfg.Local(f)
-		p := filepath.Join(root, filepath.FromSlash(rel))
-		if r, err := filepath.Rel(root, p); err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+		p, err := e.itemLocal(f.Key(), rel)
+		if err != nil {
 			return "", false
 		}
 		if _, err := os.Lstat(p); err != nil {
@@ -314,7 +312,7 @@ func (e *Engine) Search(term string) (SearchResults, error) {
 	}
 	cfg := e.config()
 	if !cfg.OIDC() || !cfg.Configured() {
-		return SearchResults{}, errors.New("search needs the browser sign-in")
+		return SearchResults{}, errors.New("Search needs the browser sign-in.")
 	}
 	base, err := normalizeServerURL(cfg.ServerURL)
 	if err != nil {
@@ -322,17 +320,20 @@ func (e *Engine) Search(term string) (SearchResults, error) {
 	}
 	tok, err := accessToken(cfg.ServerURL)
 	if err != nil {
-		return SearchResults{}, fmt.Errorf("signed out: %w", err)
+		if errors.Is(err, errSignedOut) {
+			return SearchResults{}, errors.New(signInAgainText)
+		}
+		return SearchResults{}, fmt.Errorf("Couldn't get your sign-in: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	var d graphDrives
 	if err := ocGet(ctx, base, "/graph/v1.0/me/drives", nil, tok, &d); err != nil {
-		return SearchResults{}, fmt.Errorf("couldn't list the spaces: %w", err)
+		return SearchResults{}, fmt.Errorf("Couldn't list the spaces: %w", err)
 	}
 	spaces, personal := searchSpaces(d, cfg)
 	if personal == "" {
-		return SearchResults{}, errors.New("the server didn't say where your personal space is")
+		return SearchResults{}, errors.New("The server didn't say where your personal space is.")
 	}
 	u, err := spacesRootURL(urlOrigin(base), personal)
 	if err != nil {
@@ -348,13 +349,13 @@ func (e *Engine) Search(term string) (SearchResults, error) {
 	case 401:
 		return SearchResults{}, errors.New(signInAgainText)
 	case 400:
-		return SearchResults{}, errors.New("OpenCloud couldn't search for that; try other words")
+		return SearchResults{}, errors.New("OpenCloud couldn't search for that. Try other words.")
 	case 501, 404, 405:
-		return SearchResults{}, errors.New("this OpenCloud server doesn't offer search")
+		return SearchResults{}, errors.New("This OpenCloud server doesn't offer search.")
 	default:
-		return SearchResults{}, fmt.Errorf("OpenCloud didn't search (it answered %d)", resp.StatusCode)
+		return SearchResults{}, fmt.Errorf("OpenCloud didn't search (it answered %d).", resp.StatusCode)
 	}
-	rs, err := parseSearch(resp.Body, spaces, searchLocal(cfg))
+	rs, err := parseSearch(resp.Body, spaces, e.searchLocal())
 	if err != nil {
 		return SearchResults{}, err
 	}
@@ -368,14 +369,14 @@ func (e *Engine) Search(term string) (SearchResults, error) {
 	return SearchResults{Results: rs, Total: total}, nil
 }
 
-// searchWebURL is the web UI's link for id (a match's folder): <server>/f/<id>.
+// searchWebURL is the web UI's link for id (a match's own file id): <server>/f/<id>.
 func searchWebURL(cfg Config, id string) (string, error) {
 	if !validWebID(id) {
-		return "", errors.New("that isn't an item OpenCloud can show")
+		return "", errors.New("That isn't an item OpenCloud can show.")
 	}
 	base, err := normalizeServerURL(cfg.ServerURL)
 	if err != nil {
-		return "", errors.New("no server address is set up yet")
+		return "", errors.New("No server address is set up yet.")
 	}
 	if _, err := url.Parse(base); err != nil {
 		return "", err
