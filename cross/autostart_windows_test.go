@@ -35,7 +35,7 @@ func TestAutostartRegistryRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v, _, err := k.GetStringValue("OpenCloud Bar") // the name the installer writes
+	v, _, err := k.GetStringValue(installerRunValueName(t)) // the name the installer writes, from its script
 	k.Close()
 	if err != nil {
 		t.Fatal(err)

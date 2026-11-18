@@ -640,6 +640,7 @@ func (e *Engine) uiState() map[string]any {
 			"openAtLogin":           login.Enabled,
 			"openAtLoginAvailable":  login.Supported,
 			"openAtLoginNote":       login.Note,
+			"openAtLoginLocked":     login.Locked,
 		},
 		"defaults": map[string]any{
 			"syncIntervalSeconds": def.SyncIntervalSeconds,

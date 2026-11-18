@@ -58,8 +58,10 @@ func osSetAutostart(on bool) error {
 func unixAutostart() autostartInfo {
 	if systemdEnabled() {
 		// The service starts the app at login. A second start from the autostart entry would
-		// run the app twice, so the entry is never written, and the toggle is off limits.
-		return autostartInfo{Supported: true, Enabled: true, Note: systemdNote}
+		// run the app twice, so the entry is never written. One that is already there (from
+		// before the service was enabled) can still be removed: the box stays usable then.
+		_, err := os.Stat(filepath.Join(autostartDir(), autostartDesktopName))
+		return autostartInfo{Supported: true, Enabled: true, Note: systemdNote, Locked: err != nil}
 	}
 	b, err := os.ReadFile(filepath.Join(autostartDir(), autostartDesktopName))
 	if err != nil {
@@ -90,9 +92,8 @@ func unixSetAutostart(on bool) error {
 	if err != nil {
 		return err
 	}
-	if real, err := filepath.EvalSymlinks(exe); err == nil {
-		exe = real
-	}
+	// Not resolved through symlinks (where the system gives the link's path): a ~/bin link to
+	// a versioned folder keeps working after an upgrade.
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}

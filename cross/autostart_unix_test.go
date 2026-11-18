@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func stubSystemd(t *testing.T, enabled bool) {
@@ -88,6 +87,97 @@ func TestAutostartRefusedWhenSystemdStartsTheApp(t *testing.T) {
 	}
 }
 
+// Turning it off is allowed while the systemd service starts the app, and removes the file;
+// turning it on is refused and writes nothing.
+func TestAutostartOffAllowedWithSystemd(t *testing.T) {
+	testEnv(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	file := filepath.Join(autostartDir(), "opencloud-bar.desktop")
+	stubSystemd(t, false)
+	if err := unixSetAutostart(true); err != nil {
+		t.Fatal(err)
+	}
+	stubSystemd(t, true)
+	if st := unixAutostart(); !st.Enabled || st.Note == "" || st.Locked {
+		t.Errorf("service and file: %+v", st)
+	}
+	if err := unixSetAutostart(true); err == nil {
+		t.Error("turning on next to the service wasn't refused")
+	}
+	if err := unixSetAutostart(false); err != nil {
+		t.Fatalf("turning off next to the service: %v", err)
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Errorf("file still there: %v", err)
+	}
+	if st := unixAutostart(); !st.Enabled || st.Note == "" || !st.Locked {
+		t.Errorf("service only: %+v", st)
+	}
+	if err := unixSetAutostart(true); err == nil {
+		t.Error("turning on next to the service wasn't refused")
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Errorf("file written: %v", err)
+	}
+}
+
+// After a set, the next read gives the new state, not one remembered from before it.
+func TestAutostartCacheForgetsAfterASet(t *testing.T) {
+	testEnv(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	stubSystemd(t, false)
+	old := autostartOS
+	autostartOS = "linux"
+	t.Cleanup(func() { autostartOS = old; resetAutostartCache() })
+	resetAutostartCache()
+	if autostartState().Enabled {
+		t.Fatal("on before anything was set")
+	}
+	if err := setAutostart(true); err != nil {
+		t.Fatal(err)
+	}
+	if !autostartState().Enabled {
+		t.Error("read after turning on still says off")
+	}
+	if err := setAutostart(false); err != nil {
+		t.Fatal(err)
+	}
+	if autostartState().Enabled {
+		t.Error("read after turning off still says on")
+	}
+	// A read that began before a set must not store its (old) answer over the new one.
+	autostartCache.mu.Lock()
+	gen := autostartCache.gen
+	autostartCache.mu.Unlock()
+	resetAutostartCache()
+	autostartCache.mu.Lock()
+	if autostartCache.gen == gen {
+		t.Error("a reset doesn't change the generation")
+	}
+	autostartCache.mu.Unlock()
+}
+
+// A symlink to the program is kept in the entry, not resolved to the folder it points into.
+func TestAutostartKeepsTheExecutablePath(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Skip(err)
+	}
+	testEnv(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	stubSystemd(t, false)
+	if err := unixSetAutostart(true); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(autostartDir(), "opencloud-bar.desktop"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "Exec="+desktopExec(exe)+" run\n") {
+		t.Errorf("Exec line isn't os.Executable %q:\n%s", exe, b)
+	}
+}
+
 func TestAutostartHiddenEntryIsOff(t *testing.T) {
 	testEnv(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -127,13 +217,9 @@ func TestAutostartThroughTheSettingsAPI(t *testing.T) {
 	autostartOS = "linux"
 	t.Cleanup(func() {
 		autostartOS = old
-		autostartCache.mu.Lock()
-		autostartCache.at = time.Time{}
-		autostartCache.mu.Unlock()
+		resetAutostartCache()
 	})
-	autostartCache.mu.Lock()
-	autostartCache.at = time.Time{}
-	autostartCache.mu.Unlock()
+	resetAutostartCache()
 	stubSystemd(t, false)
 	file := filepath.Join(autostartDir(), "opencloud-bar.desktop")
 
@@ -168,10 +254,8 @@ func TestAutostartThroughTheSettingsAPI(t *testing.T) {
 	}
 	// systemd starts the app: refused, and nothing is written.
 	stubSystemd(t, true)
-	autostartCache.mu.Lock()
-	autostartCache.at = time.Time{}
-	autostartCache.mu.Unlock()
-	if c := cfgOf(); c["openAtLoginNote"] != "Started by the systemd service" {
+	resetAutostartCache()
+	if c := cfgOf(); c["openAtLoginNote"] != "Started by the systemd service" || c["openAtLoginLocked"] != true {
 		t.Errorf("state with systemd: %v", c)
 	}
 	if resp, _ := r.post("/ui/api/config", `{"openAtLogin":true}`); resp.StatusCode != 400 {
@@ -179,5 +263,30 @@ func TestAutostartThroughTheSettingsAPI(t *testing.T) {
 	}
 	if _, err := os.Stat(file); !os.IsNotExist(err) {
 		t.Errorf("entry written next to systemd: %v", err)
+	}
+	// An entry left from before the service was enabled can still be switched off: the box
+	// stays usable, and turning it off is allowed and removes the file.
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("[Desktop Entry]\nExec=x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resetAutostartCache()
+	if c := cfgOf(); c["openAtLoginNote"] != "Started by the systemd service" || c["openAtLoginLocked"] != false {
+		t.Errorf("state with systemd and an entry: %v", c)
+	}
+	if resp, body := r.post("/ui/api/config", `{"openAtLogin":false}`); resp.StatusCode != 200 {
+		t.Fatalf("disable next to systemd: %d %s", resp.StatusCode, body)
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Errorf("entry still there: %v", err)
+	}
+	// Turning it on is refused, and so is a mixed patch, which then changes nothing.
+	if resp, _ := r.post("/ui/api/config", `{"openAtLogin":true,"syncIntervalSeconds":1234}`); resp.StatusCode != 400 {
+		t.Errorf("mixed patch next to systemd: %d", resp.StatusCode)
+	}
+	if b, err := os.ReadFile(configFile()); err == nil && strings.Contains(string(b), "1234") {
+		t.Errorf("a refused patch was saved:\n%s", b)
 	}
 }

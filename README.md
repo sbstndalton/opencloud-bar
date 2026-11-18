@@ -269,8 +269,8 @@ Only the refresh token is kept. The short-lived access token is cached next to t
 ## Start at sign-in (Windows and Linux)
 
 **Settings ▸ General ▸ Start at sign-in** opens OpenCloud Bar when you sign in to the computer. The setting is the system's own, read each time the page asks, and isn't stored in `config.json`:
-- **Windows:** the value `OpenCloud Bar` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, the same one the installer's "Start OpenCloud Bar when I sign in" option writes (and that uninstalling removes). It runs `OpenCloud Bar.exe`, the one with no console window.
-- **Linux:** the file `opencloud-bar.desktop` in `$XDG_CONFIG_HOME/autostart` (`~/.config/autostart` by default), running this program with `run`. If the systemd service is enabled (`systemctl --user is-enabled opencloud-bar`), the page says "Started by the systemd service" and the checkbox is off limits, and no file is written: the app would start twice. Disable the service first to use the checkbox.
+- **Windows:** the value `OpenCloud Bar` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, the same one the installer's "Start OpenCloud Bar when I sign in" option writes (and that uninstalling always removes, even if the option was off at install time). The installer offers the option on a first install only: an update doesn't show it and leaves the setting as you have it. It runs `OpenCloud Bar.exe`, the one with no console window.
+- **Linux:** the file `opencloud-bar.desktop` in `$XDG_CONFIG_HOME/autostart` (`~/.config/autostart` by default), running this program with `run`. If the systemd service is enabled (`systemctl --user is-enabled opencloud-bar`), the page says "Started by the systemd service". Turning the setting on is refused and no file is written: the app would start twice. Turning it off is allowed and removes the file, so the checkbox can be unticked while the file exists; with no file it is disabled. Disable the service first to use the checkbox to turn it on.
 
 ## Uninstall
 
@@ -278,7 +278,7 @@ Only the refresh token is kept. The short-lived access token is cached next to t
   1. Choose **Sign Out** in Settings ▸ Account if you want the sign-in removed.
   2. Quit OpenCloud Bar.
   3. Drag the app from Applications to the Trash.
-- **Windows:** use **Settings ▸ Apps ▸ Installed apps ▸ OpenCloud Bar ▸ Uninstall**. It stops the app, removes the stored sign-in and the start at sign-in entry. WinFsp is a separate app; uninstall it too if nothing else uses it.
+- **Windows:** use **Settings ▸ Apps ▸ Installed apps ▸ OpenCloud Bar ▸ Uninstall**. It stops the app, removes the stored sign-in and the start at sign-in entry (the `Run` value), whichever way it was turned on. WinFsp is a separate app; uninstall it too if nothing else uses it.
 - **Linux:**
   1. Run `opencloud-bar logout` and `opencloud-bar quit`.
   2. If you use the service, run `systemctl --user disable --now opencloud-bar`. If you turned on **Start at sign-in**, turn it off first (or delete `~/.config/autostart/opencloud-bar.desktop`).

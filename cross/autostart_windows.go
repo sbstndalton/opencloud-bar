@@ -5,22 +5,13 @@ package main
 import (
 	"errors"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"golang.org/x/sys/windows/registry"
 )
 
-// Windows: the per-user Run key, under the name the installer writes
-// (packaging/windows/opencloud-bar.iss, [Registry]; it removes the value when uninstalling).
+// Windows: the per-user Run key, under the name the installer writes (see autostart.go).
 // The installer's value is the quoted path of "OpenCloud Bar.exe" and nothing else.
-var (
-	autostartRunKey  = `Software\Microsoft\Windows\CurrentVersion\Run`
-	autostartValue   = "OpenCloud Bar"
-	autostartExeFile = "OpenCloud Bar.exe" // the program without a console window
-	autostartCLIFile = "opencloud-bar.exe"
-)
-
 func osAutostart() autostartInfo {
 	k, err := registry.OpenKey(registry.CURRENT_USER, autostartRunKey, registry.QUERY_VALUE)
 	if err != nil {
@@ -65,11 +56,5 @@ func autostartExe() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if strings.EqualFold(filepath.Base(exe), autostartCLIFile) {
-		gui := filepath.Join(filepath.Dir(exe), autostartExeFile)
-		if _, err := os.Stat(gui); err == nil {
-			return gui, nil
-		}
-	}
-	return exe, nil
+	return guiExeNextTo(exe), nil
 }

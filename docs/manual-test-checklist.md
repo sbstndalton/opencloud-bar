@@ -49,7 +49,9 @@ Run this on a clean Windows 11 machine and a clean Ubuntu (desktop, with a tray 
 - [ ] Sign out of the computer and back in. The app is running once.
 - [ ] Turn it off. The registry value or the file is gone; after the next sign-in the app doesn't start.
 - [ ] **Windows:** the installer's start-at-sign-in option and this checkbox are the same setting (install with the option on: the checkbox is on).
-- [ ] **Ubuntu, with the service:** `systemctl --user enable opencloud-bar`. The page says "Started by the systemd service" and the checkbox is disabled. `systemctl --user disable opencloud-bar` makes it usable again.
+- [ ] **Ubuntu, with the service:** `systemctl --user enable opencloud-bar`. The page says "Started by the systemd service". With no `~/.config/autostart/opencloud-bar.desktop` the checkbox is disabled; with the file there (create it first with the service off) it can be unticked, which removes the file, and ticking it is refused. `systemctl --user disable opencloud-bar` makes the checkbox usable again.
+- [ ] **Windows update:** install over an existing install with the option off in Settings. The installer doesn't show the start option, and the `Run` value isn't written. With it on in Settings, it stays on.
+- [ ] **Windows uninstall:** turn it on in Settings (not in the installer), then uninstall: the `Run` value is gone.
 
 ## Uninstall
 - [ ] Choose **Sign Out**, then uninstall: **Windows:** Settings ▸ Apps ▸ OpenCloud Bar ▸ Uninstall. **Ubuntu:** `sudo apt remove opencloud-bar`.

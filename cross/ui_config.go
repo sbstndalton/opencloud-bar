@@ -387,21 +387,16 @@ func (e *Engine) serveConfigPost(w http.ResponseWriter, r *http.Request) {
 	}
 	openAtLogin := p.OpenAtLogin
 	p.OpenAtLogin = nil
-	restart := false
-	if !p.isEmpty() {
-		var err error
-		if restart, err = applyConfigPatch(p); err != nil {
-			jsonErr(w, http.StatusBadRequest, err)
+	// Start at sign-in first: it is the part that can be refused for reasons the settings
+	// check can't see, and a refusal then leaves the settings file untouched.
+	if openAtLogin != nil {
+		st := autostartState()
+		if !st.Supported {
+			jsonErr(w, http.StatusBadRequest, errors.New("Start at sign-in isn't available on this system"))
 			return
 		}
-	}
-	if openAtLogin != nil {
-		if st := autostartState(); !st.Supported || st.Note != "" {
-			msg := st.Note
-			if !st.Supported {
-				msg = "Start at sign-in isn't available on this system"
-			}
-			jsonErr(w, http.StatusBadRequest, errors.New(msg))
+		if *openAtLogin && st.Note != "" { // turning it off is always allowed
+			jsonErr(w, http.StatusBadRequest, errors.New(st.Note))
 			return
 		}
 		if err := setAutostart(*openAtLogin); err != nil {
@@ -412,6 +407,11 @@ func (e *Engine) serveConfigPost(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 200, map[string]any{"saved": true})
 			return
 		}
+	}
+	restart, err := applyConfigPatch(p)
+	if err != nil {
+		jsonErr(w, http.StatusBadRequest, err)
+		return
 	}
 	resp := map[string]any{"saved": true, "restartRequired": restart}
 	if err := e.Reload(); err != nil {
