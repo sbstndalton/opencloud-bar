@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -214,11 +215,15 @@ func TestLocalClashAnyOrder(t *testing.T) {
 	shared := filepath.Join(t.TempDir(), "Shared")
 	cases := [][2]KeptFolder{
 		// A space folder's default local copy vs a personal folder's localPath pointing there.
-		{{Path: "Docs", StateName: "a", Space: marketing}, {Path: "Other", StateName: "b", LocalPath: filepath.Join(expand(c.LocalRoot), "Marketing", "docs")}},
+		{{Path: "Docs", StateName: "a", Space: marketing}, {Path: "Other", StateName: "b", LocalPath: filepath.Join(expand(c.LocalRoot), "Marketing", "Docs")}},
 		// Two localPaths, one inside the other, different spaces.
 		{{Path: "A", StateName: "a", LocalPath: shared}, {Path: "B", StateName: "b", Space: marketing, LocalPath: filepath.Join(shared, "sub")}},
 		// Personal folder nested inside a space folder's default copy.
 		{{Path: "Marketing/Docs/x", StateName: "a"}, {Path: "Docs", StateName: "b", Space: marketing}},
+	}
+	if runtime.GOOS != "linux" {
+		// Disks on Windows and macOS ignore case, so "docs" is the same folder as "Docs" there.
+		cases = append(cases, [2]KeptFolder{{Path: "Docs", StateName: "a", Space: marketing}, {Path: "Other", StateName: "b", LocalPath: filepath.Join(expand(c.LocalRoot), "Marketing", "docs")}})
 	}
 	for i, pair := range cases {
 		for _, order := range [][2]int{{0, 1}, {1, 0}} {
