@@ -4,20 +4,6 @@ All notable changes to OpenCloud Bar. The format follows [Keep a Changelog](http
 
 The release workflow copies the section for a tag into that tag's GitHub release, so every version heading must stay in the form `## [X.Y.Z] - date`.
 
-## [Unreleased]
-
-### Fixed
-- **Servers that enforce a password on public links.** A `createLink` refused with 400 "password protection is enforced" is now recognised (`errPasswordRequired` in Go) and shown as "This server requires a password for public links." The Mac reopens the options dialog with the password required and the other choices kept; the Windows and Linux page marks the password field required, focuses it, explains it and keeps the expiry (`POST /ui/api/share` answers `{"error": …, "code": "password_required"}`). Capabilities aren't fetched beforehand.
-- **Windows and Linux: a date is judged in your time zone.** "That date has passed" and the 10-year limit compared with today in UTC; they now use local time.
-- **A date means the end of that day in your time zone** (23:59:59 local, sent as UTC), not midnight UTC. Source read: `parseAndFillUpTime` (opencloud-eu/opencloud, `services/graph/pkg/service/v0/api_driveitem_permissions_links.go`) rounds the time it is sent up to 23:59:59 of that time's own day, which for our UTC time is the UTC day. So the link can stay active some hours after the day ends locally; the Mac dialog and the README say so instead of promising your time zone.
-- **Change Expiry is read back.** After the PATCH the link is fetched again; if its expiry isn't absent (when removed) or on the day that was sent, the app says "OpenCloud didn't change the expiry" instead of reporting success.
-- **An expiry that can't be read.** Such a link is no longer offered for reuse, and Shared Links shows "Expiry unknown" instead of "Never expires".
-- Copy Existing Link says "It has a password — you'll need the one you set when you made it." for a link with a password; Windows and Linux also say an expiry or password already chosen wasn't applied to the existing link. The Windows and Linux hint now says links can be removed in Shared Links, like the Mac.
-
-### Tests
-- Go: a fake that answers 307 only on PATCH and DELETE (the list and GETs work): neither follows it, each is sent once, nothing reaches the other host; the enforced-password 400; date checks with an injected clock and zone; the expiry read-back mismatch; an unreadable expiry skipped for reuse. The fake's PATCH now stores the expiry, rounded like the server.
-- The Mac's DEBUG self-check (`--self-check`) covers parsing and helpers (not network calls or dialogs): it now also checks the end-of-day computation in New York and Auckland, local-day validation, the expiry read-back match, unreadable expiries and the enforced-password recognition.
-
 ## [2.7.0] - 2026-11-18
 
 ### Added
@@ -34,6 +20,18 @@ The release workflow copies the section for a tag into that tag's GitHub release
 - The Mac's DEBUG self-check (`--self-check`) now also covers the size thresholds and `oc:size` parsing, the drive path mapping, and the notification parser, seen-id planning, cap, backoff and toasts.
 
 ## [2.6.0] - 2026-11-18
+
+### Fixed
+- **Servers that enforce a password on public links.** A `createLink` refused with 400 "password protection is enforced" is now recognised (`errPasswordRequired` in Go) and shown as "This server requires a password for public links." The Mac reopens the options dialog with the password required and the other choices kept; the Windows and Linux page marks the password field required, focuses it, explains it and keeps the expiry (`POST /ui/api/share` answers `{"error": …, "code": "password_required"}`). Capabilities aren't fetched beforehand.
+- **Windows and Linux: a date is judged in your time zone.** "That date has passed" and the 10-year limit compared with today in UTC; they now use local time.
+- **A date means the end of that day in your time zone** (23:59:59 local, sent as UTC), not midnight UTC. Source read: `parseAndFillUpTime` (opencloud-eu/opencloud, `services/graph/pkg/service/v0/api_driveitem_permissions_links.go`) rounds the time it is sent up to 23:59:59 of that time's own day, which for our UTC time is the UTC day. So the link can stay active some hours after the day ends locally; the Mac dialog and the README say so instead of promising your time zone.
+- **Change Expiry is read back.** After the PATCH the link is fetched again; if its expiry isn't absent (when removed) or on the day that was sent, the app says "OpenCloud didn't change the expiry" instead of reporting success.
+- **An expiry that can't be read.** Such a link is no longer offered for reuse, and Shared Links shows "Expiry unknown" instead of "Never expires".
+- Copy Existing Link says "It has a password — you'll need the one you set when you made it." for a link with a password; Windows and Linux also say an expiry or password already chosen wasn't applied to the existing link. The Windows and Linux hint now says links can be removed in Shared Links, like the Mac.
+
+### Tests
+- Go: a fake that answers 307 only on PATCH and DELETE (the list and GETs work): neither follows it, each is sent once, nothing reaches the other host; the enforced-password 400; date checks with an injected clock and zone; the expiry read-back mismatch; an unreadable expiry skipped for reuse. The fake's PATCH now stores the expiry, rounded like the server.
+- The Mac's DEBUG self-check (`--self-check`) covers parsing and helpers (not network calls or dialogs): it now also checks the end-of-day computation in New York and Auckland, local-day validation, the expiry read-back match, unreadable expiries and the enforced-password recognition.
 
 ### Added
 - **Reuse an existing link.** Copy Public Link (all platforms) first lists the item's permissions (`GET /graph/v1beta1/drives/{drive}/items/{id}/permissions`). If it already has a `view` link that hasn't expired, you can **Copy Existing Link** (the default) or **Make New Link**, so public links stop piling up. A link without a password comes first, then the newest. If the permissions can't be read, the link is made as before. Windows and Linux: `POST /ui/api/share` answers `{"existing": true, "url": …}` and makes nothing unless the request has `"newLink": true`.
