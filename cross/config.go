@@ -152,6 +152,9 @@ type Config struct {
 	CheckForUpdates *bool `json:"checkForUpdates,omitempty"`
 	// Notifications: desktop notifications for problems, automatic merges and updates (default on).
 	Notifications *bool `json:"notifications,omitempty"`
+	// ServerNotifications: show OpenCloud's own notifications (shares, mentions…) as desktop
+	// notifications (default on; same key as the macOS app).
+	ServerNotifications *bool `json:"serverNotifications,omitempty"`
 	// LiveSync: watch kept folders and sync a folder soon after a change here or in
 	// OpenCloud. Absent (nil): on, since 2.0; false: off.
 	LiveSync *bool `json:"liveSync,omitempty"`
@@ -209,6 +212,7 @@ func (c Config) pauseEnd() time.Time {
 
 func (c Config) UpdateChecks() bool    { return c.CheckForUpdates == nil || *c.CheckForUpdates }
 func (c Config) NotificationsOn() bool { return c.Notifications == nil || *c.Notifications }
+func (c Config) ServerNotesOn() bool   { return c.ServerNotifications == nil || *c.ServerNotifications }
 
 func (c Config) Vendor() string {
 	if c.WebdavVendor != "" {

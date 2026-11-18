@@ -37,6 +37,7 @@ type configPatch struct {
 	RclonePath            *string             `json:"rclonePath"`
 	CheckForUpdates       *bool               `json:"checkForUpdates"`
 	Notifications         *bool               `json:"notifications"`
+	ServerNotifications   *bool               `json:"serverNotifications"`
 	LiveSync              *bool               `json:"liveSync"`
 	SyncParallel          *int                `json:"syncParallel"`
 	KeptFilters           map[string][]string `json:"keptFilters"` // kept folder key -> its own excludes
@@ -257,6 +258,9 @@ func applyConfigPatch(p configPatch) (restartPort bool, err error) {
 	}
 	if p.Notifications != nil {
 		set("notifications", *p.Notifications)
+	}
+	if p.ServerNotifications != nil {
+		set("serverNotifications", *p.ServerNotifications)
 	}
 	if p.SyncParallel != nil {
 		if *p.SyncParallel == defaultParallel {

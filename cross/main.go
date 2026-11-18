@@ -11,7 +11,8 @@
 //	opencloud-bar pause | resume      stop or restart syncing kept folders (the drive keeps working)
 //	opencloud-bar check-updates       look for a newer release
 //	opencloud-bar version             print the version
-//	opencloud-bar keep PATH [--local DIR]
+//	opencloud-bar keep PATH [--local DIR] [--yes]
+//	opencloud-bar keep-drive PATH [--yes] [--dialogs]   PATH is inside the OpenCloud drive (the Explorer menu item runs this)
 //	opencloud-bar unkeep PATH         final sync, then move the local copy out of the way
 //	opencloud-bar repair PATH         merge both sides after "needs repair"
 //	opencloud-bar allow-delete PATH   apply a blocked large deletion
@@ -57,7 +58,7 @@ func parsePauseArgs(args []string) (time.Duration, error) {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage: opencloud-bar setup [URL] | logout [--force] | token | run [--no-tray] | status | sync [PATH] | pause [--for 1h] | resume |
-       keep PATH [--local DIR] | unkeep PATH | repair PATH | allow-delete PATH | connect | eject | settings |
+       keep PATH [--local DIR] [--yes] | keep-drive PATH [--yes] [--dialogs] | unkeep PATH | repair PATH | allow-delete PATH | connect | eject | settings |
        check-updates | version | reload | quit [--force]`)
 	os.Exit(2)
 }
@@ -164,12 +165,34 @@ func main() {
 	case "keep":
 		fs := flag.NewFlagSet("keep", flag.ExitOnError)
 		local := fs.String("local", "", "absolute local folder (default: localRoot/PATH)")
+		yes := fs.Bool("yes", false, "keep it even if it is big or may not fit on this computer")
 		path := firstArg(fs, os.Args[2:])
-		q := url.Values{"path": {path}, "local": {*local}}
-		if err := call("POST", "/keep", q, nil); err != nil {
+		sc, err := daemonKeep(path, *local, *yes)
+		if err != nil {
 			fail(err)
 		}
+		if sc.NeedsConfirm {
+			fmt.Fprintln(os.Stderr, "opencloud-bar: "+sc.Message)
+			fmt.Fprintln(os.Stderr, "Nothing was kept. Run the command again with --yes to keep it anyway.")
+			os.Exit(1)
+		}
 		fmt.Println("kept; the first sync starts shortly")
+	case "keep-drive":
+		// The file manager's "Keep on this PC with OpenCloud Bar" (Windows installer), or a
+		// script: PATH must be inside the OpenCloud drive. The Explorer verb runs the windowed
+		// "OpenCloud Bar.exe" (same main, so it takes subcommands; no console flash) with
+		// --dialogs; without it, dialogs are used only where there's no terminal (autoDialogs).
+		cfg, _ := loadConfig()
+		env := keepDriveEnv{mount: expand(cfg.MountPoint), out: os.Stdout, errw: os.Stderr,
+			dialogs: autoDialogs(),
+			alert: func(title, text string) {
+				if hasDialogs() {
+					dialogAlert(title, text)
+				}
+			},
+			confirm: func(title, text, button string) bool { return hasDialogs() && dialogConfirm(title, text, button) },
+			keep:    func(rel string, confirm bool) (SizeCheck, error) { return daemonKeep(rel, "", confirm) }}
+		os.Exit(env.run(os.Args[2:]))
 	case "unkeep":
 		path := needPath()
 		var n struct{ Unsynced int }
@@ -235,6 +258,31 @@ func askYes() bool {
 	_, _ = fmt.Scanln(&a)
 	return strings.EqualFold(a, "y") || strings.EqualFold(a, "yes")
 }
+
+// daemonKeep asks the running app to keep path (relative to the drive). Without confirm a big
+// folder isn't kept: the answer has NeedsConfirm set.
+func daemonKeep(path, local string, confirm bool) (SizeCheck, error) {
+	q := url.Values{"path": {path}, "local": {local}}
+	if confirm {
+		q.Set("confirm", "1")
+	}
+	status, body, err := callRaw("POST", "/keep", q, keepCallTimeout)
+	if err != nil {
+		return SizeCheck{}, err
+	}
+	var sc SizeCheck
+	switch {
+	case status == http.StatusOK:
+		err = json.Unmarshal(body, &sc)
+		return sc, err
+	case status == http.StatusConflict && json.Unmarshal(body, &sc) == nil && sc.NeedsConfirm:
+		return sc, nil // 409 with {needsConfirm, size, free, message}: not kept yet
+	}
+	return SizeCheck{}, errors.New(strings.TrimSpace(string(body)))
+}
+
+// keepCallTimeout: the app's size check can take 10 s, and keeping a folder does a little more.
+const keepCallTimeout = 45 * time.Second
 
 func fail(err error) { fmt.Fprintln(os.Stderr, "opencloud-bar:", err); os.Exit(1) }
 
@@ -304,10 +352,25 @@ func apiToken(create bool) (string, error) {
 var errNotRunning = errors.New("opencloud-bar isn't running (start it with `opencloud-bar run`)")
 
 func call(method, path string, q url.Values, out any) error {
+	status, body, err := callRaw(method, path, q, 30*time.Second)
+	if err != nil {
+		return err
+	}
+	if status != 200 {
+		return errors.New(strings.TrimSpace(string(body)))
+	}
+	if out != nil {
+		return json.Unmarshal(body, out)
+	}
+	return nil
+}
+
+// callRaw sends a request to the running app and returns the status and body.
+func callRaw(method, path string, q url.Values, timeout time.Duration) (int, []byte, error) {
 	cfg, _ := loadConfig()
 	tok, err := apiToken(false)
 	if err != nil {
-		return errNotRunning
+		return 0, nil, errNotRunning
 	}
 	u := fmt.Sprintf("http://127.0.0.1:%d%s", cfg.APIPort(), path)
 	if q != nil {
@@ -315,19 +378,13 @@ func call(method, path string, q url.Values, out any) error {
 	}
 	req, _ := http.NewRequest(method, u, nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
 	if err != nil {
-		return errNotRunning
+		return 0, nil, errNotRunning
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		return errors.New(strings.TrimSpace(string(body)))
-	}
-	if out != nil {
-		return json.Unmarshal(body, out)
-	}
-	return nil
+	return resp.StatusCode, body, nil
 }
 
 // serveAPI starts the control API. It fails if the port is taken, which means another
@@ -373,7 +430,20 @@ func apiHandler(e *Engine, stop func(), tok string, ui *webUI) http.Handler {
 	mux.HandleFunc("POST /eject", func(w http.ResponseWriter, r *http.Request) { reply(w, e.Eject()) })
 	mux.HandleFunc("POST /reload", func(w http.ResponseWriter, r *http.Request) { reply(w, e.Reload()) })
 	mux.HandleFunc("POST /keep", func(w http.ResponseWriter, r *http.Request) {
-		reply(w, e.Keep(r.URL.Query().Get("path"), r.URL.Query().Get("local")))
+		// Without confirm=1 a folder that is big (or bigger than the free space) isn't kept: the
+		// answer is 409 with {"needsConfirm": true, "size": …, "free": …, "message": …}
+		// (keepcheck.go), never a 200 that could be taken for "kept".
+		q := r.URL.Query()
+		sc, err := e.KeepChecked("", q.Get("path"), q.Get("local"), q.Get("confirm") == "1")
+		if err != nil {
+			http.Error(w, err.Error(), 409)
+			return
+		}
+		if sc.NeedsConfirm {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+		}
+		_ = json.NewEncoder(w).Encode(sc)
 	})
 	mux.HandleFunc("POST /unkeep", func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Query().Get("path")

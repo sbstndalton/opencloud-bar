@@ -131,6 +131,7 @@ extension AppModel {
         quotaCheckedAt = .distantPast
         quotaGeneration += 1
         for u in Set(stateFolders) { try? FileManager.default.removeItem(at: u.appendingPathComponent("quota-warned")) }
+        resetServerNotes(stateFolders: stateFolders)   // the notifications seen belong to the same sign-in
     }
 
     /// Shows the quota in the menu and warns when it crossed a level.

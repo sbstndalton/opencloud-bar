@@ -8,10 +8,22 @@
     <key>CFBundleExecutable</key><string>OpenCloudBar</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>2.6.0</string>
+    <key>CFBundleShortVersionString</key><string>2.7.0</string>
     <key>CFBundleVersion</key><string>1</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSUIElement</key><true/>
     <key>NSHumanReadableCopyright</key><string>MIT License</string>
+    <!-- Finder ▸ right-click ▸ Services ▸ "Keep on This Mac with OpenCloud Bar" (AppDelegate.keepFolderService). -->
+    <key>NSServices</key>
+    <array>
+        <dict>
+            <key>NSMenuItem</key>
+            <dict><key>default</key><string>Keep on This Mac with OpenCloud Bar</string></dict>
+            <key>NSMessage</key><string>keepFolderService</string>
+            <key>NSPortName</key><string>OpenCloud Bar</string>
+            <key>NSSendFileTypes</key>
+            <array><string>public.item</string></array>
+        </dict>
+    </array>
 </dict>
 </plist>

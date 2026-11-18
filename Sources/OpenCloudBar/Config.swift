@@ -150,6 +150,8 @@ struct Config: Codable {
     var checkForUpdates = true
     /// Notifications for problems, automatic merges and updates.
     var notifications = true
+    /// OpenCloud's own notifications (a share, a mention…) as desktop notifications. Same key as the Go app.
+    var serverNotifications = true
     /// Upload / download limits for syncs and the drive, in rclone's units ("512K" = 512 KiB/s,
     /// "2M" = 2 MiB/s, a bare number is KiB/s). nil: no limit. Same keys as the Go app.
     var bwLimitUp: String?
@@ -198,6 +200,7 @@ struct Config: Codable {
         pausedUntil = (try? c.decodeIfPresent(String.self, forKey: .pausedUntil)) ?? nil
         checkForUpdates = try c.decodeIfPresent(Bool.self, forKey: .checkForUpdates) ?? def.checkForUpdates
         notifications = try c.decodeIfPresent(Bool.self, forKey: .notifications) ?? def.notifications
+        serverNotifications = try c.decodeIfPresent(Bool.self, forKey: .serverNotifications) ?? def.serverNotifications
         // Either case, as rclone takes it ("512k" is "512K").
         bwLimitUp = try c.decodeIfPresent(String.self, forKey: .bwLimitUp)?.trimmingCharacters(in: .whitespaces).uppercased()
         bwLimitDown = try c.decodeIfPresent(String.self, forKey: .bwLimitDown)?.trimmingCharacters(in: .whitespaces).uppercased()

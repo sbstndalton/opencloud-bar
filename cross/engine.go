@@ -120,6 +120,16 @@ type Engine struct {
 	quotaGen   uint64 // bumped when the quota state is reset (sign-out, sign-in, other server)
 	quotaID    string // server|account the quota on hand is from
 
+	// OpenCloud notifications (servernotes.go).
+	snAt     time.Time // no poll before this
+	snBusy   bool
+	snFails  int  // errors in a row
+	snOff    bool // the server has no notifications service: no polling this session
+	snGen    uint64
+	snID     string // server|account the seen ids are from
+	snSeen   srvSeen
+	snLoaded bool // snSeen was read from the file
+
 	notes      notifyState // what has been announced (notify.go)
 	autoMerged []string    // folders merged automatically since the last notification check
 	// conflict copies found since the last notification check
@@ -155,6 +165,7 @@ func NewEngine() *Engine {
 		cmds: map[*exec.Cmd]bool{}, running: map[string]workItem{}, runTimes: map[string]runTimes{}, active: map[string]*activeRun{}}
 	e.signedOut = cfg.OIDC() && cfg.Configured() && !haveCredentials(cfg)
 	e.quotaID = quotaIdentity(cfg)
+	e.snID = e.quotaID
 	e.refreshStatusLocked()
 	return e
 }
@@ -332,6 +343,7 @@ func (e *Engine) tick() {
 		return
 	}
 	e.quotaDueLocked()
+	e.srvNotesDueLocked()
 	up := true // without a tunnel the server is reached directly
 	if e.cfg.Tunnel() {
 		open := portOpen(e.cfg.LocalPort)
@@ -1803,6 +1815,11 @@ func (e *Engine) Reload() error {
 		// about) isn't this one's.
 		e.quotaID = id
 		e.resetQuotaLocked(e.cfg, cfg)
+	}
+	if e.cfgErr == nil && !e.cfg.ServerNotesOn() && cfg.ServerNotesOn() {
+		// "Show OpenCloud notifications" turned on: nothing was polled while it was off, so
+		// what piled up isn't news. The next fetch only records (no flood).
+		e.resetSrvNotesLocked(e.cfg, cfg)
 	}
 	e.cfg, e.cfgErr = cfg, nil
 	e.signedOut = out
