@@ -58,7 +58,8 @@ type Status struct {
 	SignedOut    bool           `json:"signedOut,omitempty"` // browser sign-in is missing or was revoked
 	Folders      []FolderStatus `json:"folders"`
 	ConfigError  string         `json:"configError,omitempty"`
-	Paused       bool           `json:"paused,omitempty"` // kept folders don't sync until resumed
+	Paused       bool           `json:"paused,omitempty"`      // kept folders don't sync until resumed
+	PausedUntil  string         `json:"pausedUntil,omitempty"` // RFC 3339: the pause ends by itself then
 	Update       UpdateState    `json:"update"`
 	Conflicts    int            `json:"conflicts,omitempty"` // conflict copies over all kept folders
 	Storage      *quotaInfo     `json:"storage,omitempty"`   // the personal space's quota, last checked
@@ -309,6 +310,9 @@ func (e *Engine) tick() {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if !e.quitting && e.cfgErr == nil {
+		e.resumeIfDueLocked(time.Now())
+	}
 	if !e.quitting && e.cfgErr == nil && e.cfg.UpdateChecks() && e.updates.due() {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -819,6 +823,20 @@ func (e *Engine) SyncNow() {
 	if !e.timerOn && !e.exclOn && len(e.exclQ) == 0 && e.cfgErr == nil && e.cfg.Configured() && !e.signedOut && !e.cfg.Paused {
 		e.startSyncAllLocked(true)
 	}
+}
+
+// SyncFolder syncs one kept folder now, with the guards of SyncNow. An unknown path is an error.
+func (e *Engine) SyncFolder(path string) error {
+	f, ok := e.find(path)
+	if !ok {
+		return fmt.Errorf("%q isn't a kept folder", path)
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.timerOn && !e.exclOn && len(e.exclQ) == 0 && e.cfgErr == nil && e.cfg.Configured() && !e.signedOut && !e.cfg.Paused {
+		e.startRunLocked(true, map[string]bool{f.Key(): true})
+	}
+	return nil
 }
 
 func (e *Engine) startSyncAllLocked(manual bool) { e.startRunLocked(manual, nil) }
@@ -1407,34 +1425,101 @@ func (e *Engine) AllowBigDeletion(path string) error {
 
 // SetPaused pauses or resumes syncing of kept folders and remembers it in the settings.
 // The drive keeps working. A sync that is already running finishes first.
-func (e *Engine) SetPaused(paused bool) error {
+func (e *Engine) SetPaused(paused bool) error { return e.pause(paused, time.Time{}) }
+
+// PauseUntil pauses syncing until t, then it resumes by itself (the next tick after t).
+func (e *Engine) PauseUntil(t time.Time) error { return e.pause(true, t) }
+
+func (e *Engine) pause(paused bool, until time.Time) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	return e.setPauseLocked(paused, until)
+}
+
+// setPauseLocked is SetPaused with e.mu held. A zero until pauses until the user resumes.
+func (e *Engine) setPauseLocked(paused bool, until time.Time) error {
 	if e.cfgErr != nil {
 		return settingsBroken(e.cfgErr)
 	}
-	if e.cfg.Paused == paused {
+	want := ""
+	if paused && !until.IsZero() {
+		want = until.Format(time.RFC3339)
+	}
+	if e.cfg.Paused == paused && e.cfg.PausedUntil == want {
 		return nil
 	}
-	// Only "paused" changes in the file; everything else stays as it is there.
+	// Only "paused" and "pausedUntil" change in the file; everything else stays as it is there.
 	if _, err := editConfig(func(raw map[string]json.RawMessage) error {
 		if paused {
 			raw["paused"] = mustJSON(true)
 		} else {
 			delete(raw, "paused") // the default, as the macOS app writes it
 		}
+		if want != "" {
+			raw["pausedUntil"] = mustJSON(want)
+		} else {
+			delete(raw, "pausedUntil")
+		}
 		return nil
 	}); err != nil {
 		return err
 	}
 	cfg := e.cfg
-	cfg.Paused = paused
+	cfg.Paused, cfg.PausedUntil = paused, want
 	e.cfg = cfg
 	if !paused {
 		e.nextSyncAt = time.Time{} // sync right away
 	}
 	go e.notify()
 	return nil
+}
+
+// resumeIfDueLocked ends a timed pause whose time has come. A clock set back only keeps the
+// pause longer; set forward, it ends early, which is harmless.
+func (e *Engine) resumeIfDueLocked(now time.Time) {
+	if !e.cfg.Paused || e.cfg.PausedUntil == "" {
+		return
+	}
+	end := e.cfg.pauseEnd()
+	if end.IsZero() || now.Before(end) {
+		return // not due (an unreadable time never resumes by itself: Resume does)
+	}
+	if err := e.setPauseLocked(false, time.Time{}); err == nil {
+		e.logLine("the pause ended; syncing resumed")
+	}
+}
+
+// nextMorning is the next 08:00 local time after now (the "until tomorrow" pause).
+func nextMorning(now time.Time) time.Time {
+	t := time.Date(now.Year(), now.Month(), now.Day(), 8, 0, 0, 0, now.Location())
+	if !t.After(now) {
+		t = time.Date(now.Year(), now.Month(), now.Day()+1, 8, 0, 0, 0, now.Location())
+	}
+	return t
+}
+
+// pauseClock shows when a pause ends: "14:30" today, "Wed 08:00" on another day (local time).
+func pauseClock(t, now time.Time) string {
+	t, now = t.Local(), now.Local()
+	if t.Year() == now.Year() && t.YearDay() == now.YearDay() {
+		return t.Format("15:04")
+	}
+	return t.Format("Mon 15:04")
+}
+
+// pauseFor reads the CLI's --for value: a Go duration like 1h or 90m, positive, at most 30 days.
+func pauseFor(s string) (time.Duration, error) {
+	d, err := time.ParseDuration(strings.TrimSpace(s))
+	if err != nil {
+		return 0, fmt.Errorf("%q isn't a length of time (examples: 30m, 1h, 8h)", s)
+	}
+	if d < time.Minute {
+		return 0, fmt.Errorf("pause for at least a minute")
+	}
+	if d > 30*24*time.Hour {
+		return 0, fmt.Errorf("pause for at most 30 days (720h); use pause without --for to wait until you resume")
+	}
+	return d, nil
 }
 
 // CheckForUpdates asks GitHub now (the menu's Check for Updates…).
@@ -1719,6 +1804,9 @@ func (e *Engine) Status() Status {
 	st.TunnelUp = !e.cfg.Tunnel() || (e.tunnelOurs() && portOpen(e.cfg.LocalPort))
 	st.DriveMounted = e.cfg.Mounting() && isMounted(e.mountTargetLocked())
 	st.Paused = e.cfg.Paused
+	if st.Paused && !e.cfg.pauseEnd().IsZero() {
+		st.PausedUntil = e.cfg.PausedUntil
+	}
 	st.Update = e.updates.State()
 	if e.quotaShown != nil && e.cfg.OIDC() && !e.signedOut {
 		q := *e.quotaShown

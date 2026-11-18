@@ -4,6 +4,22 @@ All notable changes to OpenCloud Bar. The format follows [Keep a Changelog](http
 
 The release workflow copies the section for a tag into that tag's GitHub release, so every version heading must stay in the form `## [X.Y.Z] - date`.
 
+## [2.3.0] - 2026-11-17
+
+### Added
+- **Pause for a set time.** Pause Syncing is now a choice: **For 1 Hour**, **Until Tomorrow** (the next 08:00, local time) or **Until I Resume**. Mac: the menu's **Pause Syncing** submenu (also in Settings ▸ Kept Folders). Windows and Linux: the tray's **Pause Syncing** submenu and the command line, `opencloud-bar pause --for 1h` (a length like `30m` or `8h`, from a minute to 30 days; `pause` alone lasts until `resume`). A timed pause is saved as `pausedUntil` (RFC 3339) next to `paused` in `config.json`, the same key in both apps; syncing resumes by itself at that time (checked every few seconds while the app runs, and right at the next start), and the status says "Paused until 14:30". Resuming, or pausing without a time, removes it. A clock set forward only ends the pause early.
+- **Windows and Linux: Sync Now for one folder.** A **Sync Now** button in a folder's details (disabled only while that folder syncs or waits), `opencloud-bar sync PATH`, and `POST /ui/api/sync` with an optional `{"path": …}` (an unknown path is a 400). The folder goes first, like a newly kept one; the others are not synced.
+- **Mac: keep a folder without the drive.** The folder picker (Settings ▸ Kept Folders ▸ **Keep from a Space…**) has a **Personal** entry at the top, listing your own files from the server with rclone. **Keep a Folder…** in the menu opens this picker when the drive isn't connected, instead of asking you to connect it, and the first sign-in opens it too.
+
+### Changed
+- **Folder actions wait instead of greying out.** Repair, Allow Large Deletion, Stop Keeping and the conflict actions (Keep This Version, Discard) can be chosen while a sync runs. They wait for the running sync, as Repair already did on the Mac, and say so ("Waits for the running sync"). A conflict copy that was synced or removed in the meantime is looked up again when the action runs, and the action fails saying it's gone. On Windows and Linux the conflict actions now queue like the others instead of being refused during a sync; **Show in Folder** never waits.
+- **Mac:** a message in the menu (for example "Link copied") disappears after about 2 minutes. The signed-out message stays until you sign in.
+- **Mac:** **Show in Settings…** for a folder in the menu now selects that folder in Settings ▸ Kept Folders.
+
+### Fixed
+- **Mac:** after the first sign-in the message told you to choose "Keep a Folder on This Mac…", a menu item that doesn't exist. It now opens the folder picker.
+- **Windows/Linux:** the Folders page failed to draw its folder list (a variable in the page's script hid the function that keeps focus while the list is redrawn).
+
 ## [2.2.0] - 2026-11-17
 
 ### Added

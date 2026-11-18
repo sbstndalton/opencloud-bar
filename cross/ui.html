@@ -260,7 +260,9 @@ function drawNotices() {
   if (!box || !S) return;
   const out = [];
   if (S.status.paused) out.push(h("div", { class: "notice paused" },
-    h("span", { text: "Syncing is paused. Kept folders don't sync until you resume; the drive keeps working." }),
+    h("span", { text: S.status.pausedUntil && pauseClock(S.status.pausedUntil)
+      ? "Paused until " + pauseClock(S.status.pausedUntil) + ". Kept folders don't sync until then or until you resume; the drive keeps working."
+      : "Syncing is paused. Kept folders don't sync until you resume; the drive keeps working." }),
     h("button", { class: "btn primary", onclick: () => setPaused(false) }, "Resume Syncing")));
   const u = S.status.update;
   if (u && u.available) out.push(h("div", { class: "notice" },
@@ -274,6 +276,15 @@ function drawNotices() {
 }
 function setPaused(p) {
   return act(() => post("pause", { paused: p }), p ? "Syncing paused" : "Syncing resumed");
+}
+// When a sync runs, an action that needs the folders to itself waits for it.
+const waits = (msg) => (S && S.status.syncing ? "Waits for the running sync" : msg);
+// "14:30" for today, "Wed 08:00" for another day: when a timed pause ends.
+function pauseClock(iso) {
+  const t = new Date(iso), now = new Date();
+  if (isNaN(t)) return "";
+  const hm = t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  return t.toDateString() === now.toDateString() ? hm : t.toLocaleDateString([], { weekday: "short" }) + " " + hm;
 }
 
 // ---- Folders
@@ -308,34 +319,36 @@ function drawFolders() {
   const parts = [bar];
   parts.push(list.length ? tbl : h("div", { class: "card" }, "Nothing is kept on this computer yet. Choose Keep a Folder… to start."));
   const f = list.find(x => x.path === selected);
-  if (f) parts.push(folderDetail(f, busy));
+  if (f) parts.push(folderDetail(f));
   parts.push(keepBox(busy));
   const old = body.querySelector("textarea"); // don't wipe unsaved exclude edits on the 3 s refresh
   const keepText = old && old.dataset.path === selected ? old.value : null;
-  const keepFocus = old && document.activeElement === old;
+  const taFocus = old && document.activeElement === old;
   const typed = body.querySelector("#keep-path"), typedVal = typed ? typed.value : "";
   const wasOpen = !!(body.querySelector("details.keep") || {}).open;
   keepFocus(body, () => body.replaceChildren(...parts));
   const ta = body.querySelector("textarea");
-  if (ta && keepText != null) { ta.value = keepText; if (keepFocus) ta.focus(); }
+  if (ta && keepText != null) { ta.value = keepText; if (taFocus) ta.focus(); }
   if (typedVal) body.querySelector("#keep-path").value = typedVal;
   if (wasOpen) body.querySelector("details.keep").open = true;
 }
 function keepFolder() {
   act(() => post("keep", {}), "Choose the folder in the dialog on your desktop");
 }
-function folderDetail(f, busy) {
+function folderDetail(f) {
   const ta = h("textarea", { "data-path": f.path, spellcheck: "false", "aria-label": "Excludes for " + f.name });
   ta.value = f.extraFilters.join("\n");
   const acts = [
-    h("button", { class: "btn", onclick: () => act(() => post("open", { kind: "folder", path: f.path })) }, "Open Folder")];
-  if (f.state === "needs-repair") acts.push(h("button", { class: "btn", disabled: busy, onclick: () => {
-    if (confirm("Repair " + f.name + "?\n\nThis merges this computer's copy with OpenCloud. For each file the newer copy wins; the older copies are kept in the backups (.opencloud-bar-backups in OpenCloud, and on this computer). Files deleted since the last good sync will come back.")) act(() => post("repair", { path: f.path }), "Repair started");
+    h("button", { class: "btn", onclick: () => act(() => post("open", { kind: "folder", path: f.path })) }, "Open Folder"),
+    h("button", { class: "btn", disabled: !S.config.configured || S.status.paused || f.state === "syncing" || !!f.queued,
+      onclick: () => act(() => post("sync", { path: f.path }), "Sync started") }, "Sync Now")];
+  if (f.state === "needs-repair") acts.push(h("button", { class: "btn", onclick: () => {
+    if (confirm("Repair " + f.name + "?\n\nThis merges this computer's copy with OpenCloud. For each file the newer copy wins; the older copies are kept in the backups (.opencloud-bar-backups in OpenCloud, and on this computer). Files deleted since the last good sync will come back.")) act(() => post("repair", { path: f.path }), waits("Repair started"));
   } }, "Repair (Merge Both Sides)…"));
-  if (f.state === "large-deletion") acts.push(h("button", { class: "btn", disabled: busy, onclick: () => {
-    if (confirm("Allow a large deletion in " + f.name + "?\n\n" + deletionPrompt(f.detail))) act(() => post("allow-delete", { path: f.path }), "Started");
+  if (f.state === "large-deletion") acts.push(h("button", { class: "btn", onclick: () => {
+    if (confirm("Allow a large deletion in " + f.name + "?\n\n" + deletionPrompt(f.detail))) act(() => post("allow-delete", { path: f.path }), waits("Started"));
   } }, "Allow Large Deletion…"));
-  acts.push(h("button", { class: "btn danger", disabled: busy, onclick: () => stopKeeping(f) }, "Stop Keeping Here…"));
+  acts.push(h("button", { class: "btn danger", onclick: () => stopKeeping(f) }, "Stop Keeping Here…"));
   return h("div", { class: "card" },
     h("h3", { text: f.name }),
     h("div", { class: "row" }, h("label", { text: "On this computer" }), h("span", { class: "path", text: f.local })),
@@ -414,7 +427,7 @@ async function stopKeeping(f) {
   if (f.state === "failed" && (f.detail || "").includes("is empty or missing")) text = "The copy on this computer is missing or empty, so there is nothing to sync or move to the trash. OpenCloud Bar just stops keeping it here. The folder stays in OpenCloud.";
   try { const u = await get("unsynced?path=" + encodeURIComponent(f.path)); if (u.unsynced > 0) text += "\n\n" + u.unsynced + " file(s) in it are never synced (build folders, excluded items) and exist only here. They move with it."; } catch (e) { /* ignore */ }
   if ((f.extraFilters || []).some(l => /^- \/.+\/\*\*$/.test(l))) text += "\n\nSubfolders you unchecked are in OpenCloud as they were; their old copy on this computer goes to the trash with the folder.";
-  if (confirm("Stop keeping " + f.name + " here?\n\n" + text)) act(() => post("unkeep", { path: f.path }), "Started; see the status above");
+  if (confirm("Stop keeping " + f.name + " here?\n\n" + text)) act(() => post("unkeep", { path: f.path }), waits("Started; see the status above"));
 }
 
 // Keep a folder by path, from the personal space or another space (project spaces, shares).
@@ -668,14 +681,14 @@ function drawConflicts() {
   for (const f of S.folders) for (const c of (f.conflicts || [])) rows.push([f, c]);
   if (!rows.length) { body.replaceChildren(h("div", { class: "card" }, "No conflicts. When a file changes on both sides between syncs, the copy that lost shows up here.")); return; }
   const busy = S.status.syncing;
-  const conflictAct = (f, c, action, msg) => act(() => post("conflict", { folder: f.path, file: c.file, action }), msg);
+  const conflictAct = (f, c, action, msg) => act(() => post("conflict", { folder: f.path, file: c.file, action }), msg && waits(msg));
   keepFocus(body, () => body.replaceChildren(h("table", { "aria-label": "Conflicts" }, h("thead", {}, h("tr", {}, h("th", { text: "File" }), h("th", { text: "Folder" }), h("th", { text: "Modified" }), h("th", { text: "" }))),
     h("tbody", {}, rows.map(([f, c]) => h("tr", {},
       h("td", { class: "path", text: c.file }), h("td", { text: f.name }), h("td", { text: new Date(c.modified).toLocaleString() }),
       h("td", {},
         h("button", { class: "btn", "aria-label": "Show " + c.file + " in its folder", onclick: () => conflictAct(f, c, "reveal") }, "Show in Folder"),
-        h("button", { class: "btn", "aria-label": "Keep this version: " + c.file, disabled: busy, onclick: () => { if (confirm("Keep this version of " + c.original + "?\n\nThe conflict copy replaces the current file. The current file is kept in the backups (in the app's sync state folder, for 30 days). The next sync sends the change to OpenCloud.")) conflictAct(f, c, "keep", "Kept; the next sync sends it to OpenCloud"); } }, "Keep This Version"),
-        h("button", { class: "btn danger", "aria-label": "Discard " + c.file, disabled: busy, onclick: () => { if (confirm("Discard " + c.file + "?\n\nIt moves to " + trashWhere() + ". The next sync removes it from OpenCloud too.")) conflictAct(f, c, "discard", "Discarded"); } }, "Discard")))))),
+        h("button", { class: "btn", "aria-label": "Keep this version: " + c.file, onclick: () => { if (confirm("Keep this version of " + c.original + "?\n\nThe conflict copy replaces the current file. The current file is kept in the backups (in the app's sync state folder, for 30 days). The next sync sends the change to OpenCloud.")) conflictAct(f, c, "keep", "Kept; the next sync sends it to OpenCloud"); } }, "Keep This Version"),
+        h("button", { class: "btn danger", "aria-label": "Discard " + c.file, onclick: () => { if (confirm("Discard " + c.file + "?\n\nIt moves to " + trashWhere() + ". The next sync removes it from OpenCloud too.")) conflictAct(f, c, "discard", "Discarded"); } }, "Discard")))))),
     busy ? h("p", { class: "hint", text: "A sync is running; the actions wait until it finishes." }) : null));
 }
 

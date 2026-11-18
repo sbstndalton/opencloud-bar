@@ -252,7 +252,24 @@ func (u *webUI) handler(e *Engine) http.Handler {
 
 	mux.HandleFunc("POST /ui/api/log/clear", func(w http.ResponseWriter, r *http.Request) { e.clearLog(w, r) })
 	mux.HandleFunc("POST /ui/api/config", func(w http.ResponseWriter, r *http.Request) { e.serveConfigPost(w, r) })
-	mux.HandleFunc("POST /ui/api/sync", func(w http.ResponseWriter, r *http.Request) { e.SyncNow(); jsonOK(w, nil) })
+	mux.HandleFunc("POST /ui/api/sync", func(w http.ResponseWriter, r *http.Request) {
+		var b struct {
+			Path string `json:"path"` // optional: one kept folder
+		}
+		if !readJSON(w, r, &b) {
+			return
+		}
+		if b.Path == "" {
+			e.SyncNow()
+			jsonOK(w, nil)
+			return
+		}
+		if err := e.SyncFolder(b.Path); err != nil {
+			jsonErr(w, http.StatusBadRequest, err)
+			return
+		}
+		jsonOK(w, nil)
+	})
 	mux.HandleFunc("POST /ui/api/connect", func(w http.ResponseWriter, r *http.Request) { e.Connect(); jsonOK(w, nil) })
 	mux.HandleFunc("POST /ui/api/eject", func(w http.ResponseWriter, r *http.Request) { jsonOK(w, e.Eject()) })
 	mux.HandleFunc("POST /ui/api/reload", func(w http.ResponseWriter, r *http.Request) { jsonOK(w, e.Reload()) })
@@ -289,13 +306,23 @@ func (u *webUI) handler(e *Engine) http.Handler {
 	})
 	mux.HandleFunc("POST /ui/api/pause", func(w http.ResponseWriter, r *http.Request) {
 		var b struct {
-			Paused *bool `json:"paused"`
+			Paused *bool  `json:"paused"`
+			Until  string `json:"until"` // optional with paused true: RFC 3339, the pause ends then
 		}
 		if !readJSON(w, r, &b) {
 			return
 		}
 		if b.Paused == nil {
 			jsonErr(w, http.StatusBadRequest, errors.New(`bad request: "paused" (true or false) is missing`))
+			return
+		}
+		if b.Until != "" {
+			t, err := time.Parse(time.RFC3339, b.Until)
+			if err != nil || !*b.Paused || !t.After(time.Now()) {
+				jsonErr(w, http.StatusBadRequest, errors.New(`bad request: "until" must be a future time (RFC 3339) with "paused": true`))
+				return
+			}
+			jsonOK(w, e.PauseUntil(t))
 			return
 		}
 		jsonOK(w, e.SetPaused(*b.Paused))
@@ -520,6 +547,7 @@ func (e *Engine) config() Config {
 
 type uiFolder struct {
 	FolderStatus
+	Queued       bool     `json:"queued"` // a sync of it waits to start
 	Remote       string   `json:"remote"`
 	ExtraFilters []string `json:"extraFilters"`
 }
@@ -530,6 +558,9 @@ func (e *Engine) uiState() map[string]any {
 	folders := make([]uiFolder, 0, len(st.Folders))
 	for _, f := range st.Folders {
 		uf := uiFolder{FolderStatus: f, Remote: f.Path, ExtraFilters: []string{}}
+		e.mu.Lock()
+		uf.Queued = e.waitingLocked(f.Path)
+		e.mu.Unlock()
 		for _, k := range cfg.Kept {
 			if k.Key() == f.Path {
 				uf.Remote = k.Path

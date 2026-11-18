@@ -124,8 +124,17 @@ struct MenuContent: View {
         Button("Sync Now") { model.syncNow() }
             .disabled(model.needsSignIn || model.config.paused)
             .keyboardShortcut("s")
-        Button(model.config.paused ? "Resume Syncing" : "Pause Syncing") { model.setPaused(!model.config.paused) }
+        if model.config.paused {
+            Button("Resume Syncing") { model.setPaused(false) }
+                .disabled(!model.config.isConfigured || model.configError != nil)
+        } else {
+            Menu("Pause Syncing") {
+                Button("For 1 Hour") { model.setPaused(true, until: Date().addingTimeInterval(3600)) }
+                Button("Until Tomorrow") { model.setPaused(true, until: AppModel.nextMorning(after: Date())) }
+                Button("Until I Resume") { model.setPaused(true) }
+            }
             .disabled(!model.config.isConfigured || model.configError != nil)
+        }
         Button("Settings…") { model.openSettings() }
             .keyboardShortcut(",")
         Button("Check for Updates…") { Task { await model.checkForUpdates(manual: true) } }
@@ -182,7 +191,7 @@ struct MenuContent: View {
                             Button("Sync Now") { model.syncNow(f) }.disabled(model.folderBusy(f) || model.needsSignIn || model.config.paused)
                         }
                         Button("Open in Finder") { model.openLocal(f) }
-                        Button("Show in Settings…") { model.openSettings(.folders) }
+                        Button("Show in Settings…") { model.selectFolder = f.key; model.openSettings(.folders) }
                     } label: {
                         Label("\(name) — \(model.menuDetail(f))", systemImage: symbol)
                     }

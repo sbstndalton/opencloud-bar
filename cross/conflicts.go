@@ -226,51 +226,62 @@ func moveFile(from, to string) error {
 }
 
 // ConflictAction is the settings page's Keep This Version / Discard / Reveal for one copy.
-// It runs only while no sync does (and holds syncs off while it works).
+// Keep and Discard run as the only sync activity: at once when no sync runs, else when the
+// running syncs end (the copy is looked up again then; if it is gone the action fails and says
+// so in the log). Reveal changes nothing, so it runs at once.
 func (e *Engine) ConflictAction(folder, file, action string) error {
 	f, ok := e.find(folder)
 	if !ok {
 		return fmt.Errorf("%q isn't a kept folder", folder)
 	}
-	e.mu.Lock()
-	if e.syncing {
-		e.mu.Unlock()
-		return fmt.Errorf("a sync is running; try again when it finishes")
-	}
-	var list []Conflict
-	if s := e.status[f.Key()]; s != nil {
-		list = s.Conflicts
-	}
-	cfg := e.cfg
-	e.exclOn = true
-	e.busyLocked()
-	e.mu.Unlock()
-	defer e.exclEnd()
-
-	local := cfg.Local(f)
-	var err error
 	switch action {
-	case "keep":
-		err = keepConflictVersion(local, cfg.StateDir, f.StateName, file, list, time.Now())
-	case "discard":
-		var loser string
-		if loser, _, _, err = conflictTarget(local, file, list); err == nil {
-			err = moveToTrash(loser)
-		}
-	case "reveal":
-		var loser string
-		if loser, _, _, err = conflictTarget(local, file, list); err == nil {
-			openPath(filepath.Dir(loser))
-		}
-		return err
+	case "keep", "discard", "reveal":
 	default:
 		return fmt.Errorf("unknown action %q", action)
 	}
-	if err == nil {
-		e.logLine("%s: conflict %s: %s", f.Path, action, file)
+	// The conflict list and settings as they are when the action runs.
+	current := func() (Config, []Conflict) {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		var list []Conflict
+		if s := e.status[f.Key()]; s != nil {
+			list = s.Conflicts
+		}
+		return e.cfg, list
 	}
-	e.updateConflicts(cfg, f)
-	return err
+	if action == "reveal" {
+		cfg, list := current()
+		loser, _, _, err := conflictTarget(cfg.Local(f), file, list)
+		if err == nil {
+			openPath(filepath.Dir(loser))
+		}
+		return err
+	}
+	done := make(chan error, 1)
+	queued, err := e.exclusiveQ(func() {
+		cfg, list := current()
+		local := cfg.Local(f)
+		var err error
+		if action == "keep" {
+			err = keepConflictVersion(local, cfg.StateDir, f.StateName, file, list, time.Now())
+		} else {
+			var loser string
+			if loser, _, _, err = conflictTarget(local, file, list); err == nil {
+				err = moveToTrash(loser)
+			}
+		}
+		if err == nil {
+			e.logLine("%s: conflict %s: %s", f.Path, action, file)
+		} else {
+			e.logLine("%s: conflict %s of %s failed: %v", f.Path, action, file, err)
+		}
+		e.updateConflicts(cfg, f)
+		done <- err
+	})
+	if err != nil || queued {
+		return err // queued: it runs after the sync; a failure then is in the log
+	}
+	return <-done
 }
 
 // conflictCount is the number of conflict copies over all kept folders.

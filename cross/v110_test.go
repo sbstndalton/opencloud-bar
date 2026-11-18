@@ -81,17 +81,6 @@ func TestConflictKeepAndDiscard(t *testing.T) {
 			t.Errorf("accepted %q", bad)
 		}
 	}
-	// Refused while a sync runs.
-	e.mu.Lock()
-	e.syncing = true
-	e.mu.Unlock()
-	if err := e.ConflictAction("Docs", "n/todo.txt.conflict1", "keep"); err == nil {
-		t.Error("acted during a sync")
-	}
-	e.mu.Lock()
-	e.syncing = false
-	e.mu.Unlock()
-
 	if err := e.ConflictAction("Docs", "n/todo.txt.conflict1", "keep"); err != nil {
 		t.Fatal(err)
 	}

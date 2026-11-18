@@ -33,7 +33,17 @@ final class AppModel: ObservableObject {
     @Published private(set) var driveWanted = true
     @Published private(set) var syncing = false
     @Published private(set) var status: [String: FolderStatus] = [:]   // keyed by KeptFolder.path
-    @Published private(set) var lastMessage: String?
+    @Published private(set) var lastMessage: String? {
+        didSet { if lastMessage != oldValue { lastMessageAt = Date() } }
+    }
+    private var lastMessageAt = Date()
+    private var resumingPause = false
+    /// A one-off message ("Link copied") leaves the menu after this long.
+    private static let messageLifetime: TimeInterval = 120
+    /// Settings ▸ Kept Folders: select this folder (its key) when the page shows; the page clears it.
+    @Published var selectFolder: String?
+    /// Settings ▸ Kept Folders: open the folder picker (Personal and spaces) when the page shows; the page clears it.
+    @Published var showKeepPicker = false
     @Published private(set) var configError: String?
     /// OIDC only: no usable sign-in; nothing runs until the user signs in.
     @Published private(set) var signedOut = false
@@ -276,6 +286,15 @@ final class AppModel: ObservableObject {
     // MARK: - Supervisor
 
     private func tick() {
+        // A message about one event doesn't stay for hours. The signed-out text is a state, not an event.
+        if lastMessage != nil, lastMessage != Self.signedOutText, Date().timeIntervalSince(lastMessageAt) > Self.messageLifetime {
+            lastMessage = nil
+        }
+        // A timed pause ends by itself. A clock set back only keeps it longer; forward, it ends early.
+        if config.paused, let end = config.pauseEnd, Date() >= end, configError == nil, !resumingPause {
+            resumingPause = true
+            setPaused(false)
+        }
         checkNotifications()
         if !quitting, configError == nil, config.checkForUpdates, Updates.due(updateState), Date() >= updateRetryAt {
             Task { await self.checkForUpdates(manual: false) }
@@ -1140,18 +1159,19 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func conflictActionAllowed() -> Bool {
-        guard !syncing else { alert("A sync is running", "Try again when it finishes."); return false }
-        return true
-    }
-
-    /// Runs a conflict action as the only sync activity (like Stop Keeping), checked again after
-    /// the confirmation: the dialog's run loop can start a scheduled sync, and moving files
-    /// under a running bisync could reach OpenCloud as a deletion. Syncs wait until it is done.
-    private func conflictAction(_ f: KeptFolder, failure: String,
+    /// Runs a conflict action as the only sync activity (like Stop Keeping): now, or when the
+    /// running syncs end (the menu says so). The copy is looked up again then, because a sync
+    /// can have moved or removed it meanwhile; moving files under a running bisync could reach
+    /// OpenCloud as a deletion. Syncs wait until it is done.
+    private func conflictAction(_ f: KeptFolder, _ item: ConflictItem, failure: String,
                                 _ work: @escaping @Sendable () throws -> Void, done: @escaping @MainActor () -> Void) {
         _ = exclusive { [self] in
             do {
+                // It may have waited for a sync: is the copy still there?
+                guard let (loser, _) = Conflicts.target(self.config.localURL(f), item),
+                      FileManager.default.fileExists(atPath: loser.path) else {
+                    throw AuthError.message("The conflict copy is gone (synced or removed meanwhile).")
+                }
                 // Off the main thread: a move to another disk copies the whole file.
                 try await Task.detached { try work() }.value
                 done()
@@ -1164,23 +1184,21 @@ final class AppModel: ObservableObject {
 
     /// Keep This Version: the conflict copy becomes the file; the current file goes to the backups.
     func keepConflict(_ f: KeptFolder, _ c: ConflictItem) {
-        guard conflictActionAllowed(),
-              confirm("Keep this version of “\(c.original)”?",
+        guard confirm("Keep this version of “\(c.original)”?",
                       "The conflict copy replaces the current file. The current file is kept in the backups (in the app's state folder, for 30 days). The next sync sends the change to OpenCloud.",
                       button: "Keep This Version") else { return }
         let local = config.localURL(f)
         let backupDir = Backups.localDir(config.stateURL, f.stateName, Backups.stamp())
-        conflictAction(f, failure: "Couldn't keep that version", {
+        conflictAction(f, c, failure: "Couldn't keep that version", {
             try Conflicts.keep(c, local: local, backupDir: backupDir)
         }, done: { Log.line("\(f.path): conflict kept: \(c.file)") })
     }
 
     /// Discard: the conflict copy goes to the Trash.
     func discardConflict(_ f: KeptFolder, _ c: ConflictItem) {
-        guard conflictActionAllowed(),
-              let (loser, _) = Conflicts.target(config.localURL(f), c),
+        guard let (loser, _) = Conflicts.target(config.localURL(f), c),
               confirm("Discard “\(c.file)”?", "It moves to the Trash. The next sync removes it from OpenCloud too.", button: "Discard") else { return }
-        conflictAction(f, failure: "Couldn't move it to the Trash", {
+        conflictAction(f, c, failure: "Couldn't move it to the Trash", {
             try FileManager.default.trashItem(at: loser, resultingItemURL: nil)
         }, done: { Log.line("\(f.path): conflict discarded: \(c.file)") })
     }
@@ -1402,13 +1420,17 @@ final class AppModel: ObservableObject {
         configError.map { "The settings file has a problem, so nothing is saved until it's fixed or removed (\(Config.fileURL.path)), then Reload Settings.\n\n\($0)" }
     }
 
+    /// Settings ▸ Kept Folders with the folder picker open (Personal, project spaces, shares).
+    func showFolderPicker() {
+        showKeepPicker = true
+        openSettings(.folders)
+    }
+
     func keepFolder() {
         if let m = settingsBrokenMessage { alert("Can't change the settings", m); return }
         guard !needsSignIn else { alert("Sign in first", "Choose Set Up / Sign In… in the menu."); return }
-        guard driveMounted else {
-            alert("Connect the OpenCloud drive first", "Folders are chosen from the drive. Choose Connect Drive, then try again.")
-            return
-        }
+        // The drive isn't up: choose from the server's folder list instead of the drive.
+        guard driveMounted else { showFolderPicker(); return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -1473,15 +1495,19 @@ final class AppModel: ObservableObject {
         return nil
     }
 
-    /// Keeps a folder from a project space or a share. Read-only folders are refused: a two-way
-    /// sync can't send changes back. Returns why it can't, or nil.
-    func keepFolder(in space: Space, path: String) async -> String? {
+    /// Keeps a folder from the personal space (`space` nil), a project space or a share.
+    /// Read-only folders are refused: a two-way sync can't send changes back. Returns why it
+    /// can't, or nil.
+    func keepFolder(in space: Space?, path: String) async -> String? {
         if let m = settingsBrokenMessage { return m }
         guard !needsSignIn else { return "Sign in first." }
         let rel = path.split(separator: "/").joined(separator: "/")
         if rel.isEmpty { return "Choose a folder in the space (the whole space can't be kept)." }
         if let p = KeptFolder.problem(newPath: rel) { return p.prefix(1).uppercased() + p.dropFirst() + "." }
         if rel.utf8.count > 90 { return "That path is too long (rclone's limit is about 90 characters)." }
+        guard let space else {
+            return addKept(KeptFolder(path: rel, stateName: KeptFolder.makeStateName(for: rel)))
+        }
         let server = config.serverURL ?? ""
         do {
             let token = try await Auth.accessToken(serverURL: server)
@@ -1495,9 +1521,9 @@ final class AppModel: ObservableObject {
         return addKept(KeptFolder(path: rel, stateName: KeptFolder.makeStateName(for: rel, spaceID: space.id), space: space.ref))
     }
 
-    /// The folders directly in `path` of a space, listed with rclone.
-    func browse(_ space: Space, path: String) async -> Result<[String], Error> {
-        let f = KeptFolder(path: path.split(separator: "/").joined(separator: "/"), stateName: "", space: space.ref)
+    /// The folders directly in `path` of a space (nil: the personal space), listed with rclone.
+    func browse(_ space: Space?, path: String) async -> Result<[String], Error> {
+        let f = KeptFolder(path: path.split(separator: "/").joined(separator: "/"), stateName: "", space: space?.ref)
         return await listDirs(in: f, path: f.path)
     }
 
@@ -1690,15 +1716,31 @@ final class AppModel: ObservableObject {
 
     /// Pauses or resumes syncing of kept folders (saved in the settings). The drive keeps
     /// working; a sync that is already running finishes first.
-    func setPaused(_ paused: Bool) {
+    /// `until` makes it a timed pause: syncing resumes by itself then (the supervisor's tick).
+    func setPaused(_ paused: Bool, until: Date? = nil) {
         Task {
-            if let e = await updateConfig({ $0.paused = paused }) {
+            defer { resumingPause = false }
+            let stamp = paused ? until.map { ISO8601DateFormatter().string(from: $0) } : nil
+            if let e = await updateConfig({ $0.paused = paused; $0.pausedUntil = stamp }) {
                 alert(paused ? "Couldn't pause syncing" : "Couldn't resume syncing", e)
                 return
             }
-            Log.line(paused ? "syncing paused" : "syncing resumed")
+            Log.line(paused ? "syncing paused" + (stamp.map { " until \($0)" } ?? "") : "syncing resumed")
             if !paused { nextSyncAt = Date(); tick() }
         }
+    }
+
+    /// The next 08:00 local time after `now` (the "until tomorrow" pause).
+    nonisolated static func nextMorning(after now: Date, calendar: Calendar = .current) -> Date {
+        calendar.nextDate(after: now, matching: DateComponents(hour: 8, minute: 0, second: 0), matchingPolicy: .nextTime) ?? now.addingTimeInterval(86_400)
+    }
+
+    /// "14:30" for a time today, "Wed 08:00" for another day: when a timed pause ends.
+    nonisolated static func pauseClock(_ end: Date, now: Date = Date(), calendar: Calendar = .current) -> String {
+        let f = DateFormatter()
+        f.calendar = calendar
+        f.setLocalizedDateFormatFromTemplate(calendar.isDate(end, inSameDayAs: now) ? "jjmm" : "EEEjjmm")
+        return f.string(from: end)
     }
 
     /// Asks GitHub for the latest release. The daily check is silent; the menu's
@@ -1895,7 +1937,9 @@ final class AppModel: ObservableObject {
     /// Called by the set-up window after a successful sign-in.
     func finishSetup(username: String) {
         setupWindow = nil
-        applyLoadedConfig(message: "Signed in as \(username). Choose Keep a Folder on This Mac… to start.")
+        applyLoadedConfig(message: "Signed in as \(username). Choose a folder to keep on this Mac.")
+        // Nothing is kept yet and the drive may not be up: open the picker, which doesn't need it.
+        if config.kept.isEmpty { showFolderPicker() }
     }
 
     func signOut() {
@@ -2080,7 +2124,8 @@ final class AppModel: ObservableObject {
         }
         let times = config.kept.compactMap { status[$0.key]?.lastSuccess }
         if config.paused {
-            return times.min().map { "Paused · synced \(agoText($0))" } ?? "Paused"
+            let paused = config.pauseEnd.map { "Paused until \(Self.pauseClock($0))" } ?? "Paused"
+            return times.min().map { "\(paused) · synced \(agoText($0))" } ?? paused
         }
         if let oldest = times.min(), times.count == config.kept.count {
             return "Up to date · synced \(agoText(oldest))"

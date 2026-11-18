@@ -416,16 +416,22 @@ func (e *Engine) runsIdle() {
 // exclusive runs body as the only sync activity: now, or when the running syncs end (no
 // new folder starts meanwhile).
 func (e *Engine) exclusive(body func()) error {
+	_, err := e.exclusiveQ(body)
+	return err
+}
+
+// exclusiveQ is exclusive that also says whether body had to wait (it runs later, on its own).
+func (e *Engine) exclusiveQ(body func()) (queued bool, err error) {
 	e.mu.Lock()
 	if e.exclOn || len(e.exclQ) > 0 {
 		e.mu.Unlock()
-		return fmt.Errorf("another action is waiting for the running sync; try again when it finishes")
+		return false, fmt.Errorf("another action is waiting for the running sync; try again when it finishes")
 	}
 	if !e.idleLocked() {
 		e.exclQ = append(e.exclQ, body)
 		e.mu.Unlock()
 		e.notify()
-		return nil
+		return true, nil
 	}
 	e.exclOn = true
 	e.busyLocked()
@@ -434,7 +440,7 @@ func (e *Engine) exclusive(body func()) error {
 		defer e.exclEnd()
 		body()
 	}()
-	return nil
+	return false, nil
 }
 
 func (e *Engine) exclEnd() {

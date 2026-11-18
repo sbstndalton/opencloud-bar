@@ -89,12 +89,13 @@ enum SpacesAPI {
     }
 }
 
-/// Kept Folders ▸ Keep from a Space…: choose a space, then a folder in it.
+/// Kept Folders ▸ Keep from a Space… (and Keep a Folder… while the drive is off): choose
+/// Personal or a space, then a folder in it.
 struct KeepFromSpaceSheet: View {
     @ObservedObject var model: AppModel
     var close: () -> Void
     @Local private var spaces: [Space]?
-    @Local private var spaceID = ""
+    @Local private var spaceID = ""     // "": the personal space
     @Local private var path = ""
     @Local private var folders: [String]?
     @Local private var error: String?
@@ -105,34 +106,32 @@ struct KeepFromSpaceSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Keep a Folder from a Space").font(.headline)
-            Text("Project spaces and folders shared with you. Kept folders from a space go to \(model.config.localRoot)/<space name>/…. Read-only folders can't be kept, and the OpenCloud drive shows the personal space only.")
+            Text("Keep a Folder on This Mac").font(.headline)
+            Text("Choose Personal for your own OpenCloud files, or a project space or folder shared with you. Kept folders from a space go to \(model.config.localRoot)/<space name>/…. Read-only folders can't be kept, and the OpenCloud drive shows the personal space only.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if loadFailed {
                 Button("Retry") { Task { await load() } }.accessibilityLabel("Retry loading spaces")
-            } else if let spaces {
-                if spaces.isEmpty {
-                    Text("No project spaces or shares are available to you.").foregroundStyle(.secondary)
-                } else {
-                    Picker("Space", selection: Binding(get: { spaceID }, set: { spaceID = $0; path = ""; folders = nil; browse() })) {
-                        ForEach(spaces) { Text($0.label).tag($0.id) }
+            }
+            if let spaces {
+                Picker("Space", selection: Binding(get: { spaceID }, set: { spaceID = $0; path = ""; folders = nil; browse() })) {
+                    Text("Personal").tag("")
+                    ForEach(spaces) { Text($0.label).tag($0.id) }
+                }
+                HStack {
+                    TextField("Folder", text: $path, prompt: Text("Projects/2026"))
+                        .accessibilityLabel("Folder to keep")
+                    Button("Up") { path = (path as NSString).deletingLastPathComponent; browse() }.disabled(path.isEmpty)
+                        .accessibilityLabel("Up one folder")
+                    Button("List") { browse() }.accessibilityLabel("List folders")
+                }
+                if let folders {
+                    List(folders, id: \.self) { d in
+                        Button(d + "/") { path = path.isEmpty ? d : path + "/" + d; browse() }.buttonStyle(.link)
+                            .accessibilityLabel("Open folder \(d)")
                     }
-                    HStack {
-                        TextField("Folder in the space", text: $path, prompt: Text("Projects/2026"))
-                            .accessibilityLabel("Folder in the space")
-                        Button("Up") { path = (path as NSString).deletingLastPathComponent; browse() }.disabled(path.isEmpty)
-                            .accessibilityLabel("Up one folder")
-                        Button("List") { browse() }.accessibilityLabel("List folders")
-                    }
-                    if let folders {
-                        List(folders, id: \.self) { d in
-                            Button(d + "/") { path = path.isEmpty ? d : path + "/" + d; browse() }.buttonStyle(.link)
-                                .accessibilityLabel("Open folder \(d)")
-                        }
-                        .frame(minHeight: 120)
-                        .accessibilityLabel("Folders in the space")
-                        .overlay { if folders.isEmpty { Text("No folders here.").foregroundStyle(.secondary) } }
-                    }
+                    .frame(minHeight: 120)
+                    .accessibilityLabel("Folders here")
+                    .overlay { if folders.isEmpty { Text("No folders here.").foregroundStyle(.secondary) } }
                 }
             } else {
                 ProgressView("Loading spaces…")
@@ -142,7 +141,6 @@ struct KeepFromSpaceSheet: View {
                 Spacer()
                 Button("Cancel") { close() }.keyboardShortcut(.cancelAction).accessibilityLabel("Cancel")
                 Button("Keep on This Mac") {
-                    guard let space else { return }
                     busy = true
                     Task {
                         error = await model.keepFolder(in: space, path: path)
@@ -152,7 +150,7 @@ struct KeepFromSpaceSheet: View {
                 }
                 .keyboardShortcut(.defaultAction)
                 .accessibilityLabel("Keep on This Mac")
-                .disabled(space == nil || path.trimmingCharacters(in: .whitespaces).isEmpty || busy)
+                .disabled(spaces == nil || path.trimmingCharacters(in: .whitespaces).isEmpty || busy)
             }
         }
         .padding(20)
@@ -160,25 +158,31 @@ struct KeepFromSpaceSheet: View {
         .task { await load() }
     }
 
+    /// Personal is always there; the project spaces and shares need the browser sign-in and the
+    /// server (if listing them fails, Personal still works and Retry tries again).
     private func load() async {
         loadFailed = false
         spaces = nil
         error = nil
-        do {
-            let s = try await SpacesAPI.list(serverURL: model.config.serverURL ?? "")
-            spaces = s
-            if spaceID.isEmpty, let first = s.first { spaceID = first.id; browse() }
-        } catch {
-            loadFailed = true
-            self.error = error.localizedDescription
+        if model.config.isOIDC {
+            do {
+                spaces = try await SpacesAPI.list(serverURL: model.config.serverURL ?? "")
+            } catch {
+                spaces = []
+                loadFailed = true
+                self.error = error.localizedDescription
+            }
+        } else {
+            spaces = []
         }
+        if folders == nil { browse() }
     }
 
     private func browse() {
-        guard let space else { return }
+        let wanted = space
         Task {
-            switch await model.browse(space, path: path) {
-            case .success(let d): folders = d; error = nil
+            switch await model.browse(wanted, path: path) {
+            case .success(let d): folders = d; if !loadFailed { error = nil }
             case .failure(let e): folders = nil; error = e.localizedDescription
             }
         }
