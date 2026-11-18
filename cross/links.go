@@ -29,8 +29,8 @@ import (
 //	PATCH  …/items/<item>/permissions/<perm>   {"expirationDateTime": "…Z" | null}
 //	       (UpdatePermission ▸ updatePublicLinkPermission in api_driveitem_permissions_links.go; null
 //	       removes the expiry: libre-graph-api-go model_permission.go has NullableTime, so an explicit null
-//	       is "set", and parseAndFillUpTime turns a zero time into no expiry. The server makes a date
-//	       valid until the end of that day. opencloud-eu/web, packages/web-pkg/src/composables/
+//	       is "set", and parseAndFillUpTime turns a zero time into no expiry. The server rounds the
+//	       time to 23:59:59 of the day it is sent (its UTC day, for a "…Z" time). opencloud-eu/web, packages/web-pkg/src/composables/
 //	       piniaStores/shares/shares.ts updateLink sends the same.)
 //	DELETE …/items/<item>/permissions/<perm>   (DeletePermission, 204)
 //
@@ -141,7 +141,8 @@ func httpsURL(s string) bool {
 	return err == nil && u.Scheme == "https" && u.Host != ""
 }
 
-// pickExistingView chooses the view link to offer again: not expired, https; one without a
+// pickExistingView chooses the view link to offer again: not expired (nor with an expiry that
+// can't be read), https; one without a
 // password first (it is the one a plain "Copy Public Link" would make), then the newest.
 func pickExistingView(perms []gPerm, now time.Time) *ExistingLink {
 	var best *gPerm
@@ -151,7 +152,9 @@ func pickExistingView(perms []gPerm, now time.Time) *ExistingLink {
 			continue
 		}
 		if p.Expiration != "" {
-			if t, err := time.Parse(time.RFC3339, p.Expiration); err == nil && !t.After(now) {
+			// An expiry that can't be read might be in the past: don't offer that link again.
+			t, err := time.Parse(time.RFC3339, p.Expiration)
+			if err != nil || !t.After(now) {
 				continue
 			}
 		}
@@ -343,7 +346,38 @@ func (g graphAPI) setLinkExpiry(ctx context.Context, item, perm string, exp *tim
 	if status != 200 && status != 204 {
 		return graphFail("OpenCloud didn't change the link's expiry", status, data)
 	}
+	// Read it back: a 200 isn't proof the expiry changed.
+	fresh, err := g.linkPermission(ctx, l.Item, l.Perm)
+	if err != nil {
+		return fmt.Errorf("OpenCloud didn't change the expiry (it can't be checked: %w)", err)
+	}
+	if !expiryMatches(fresh.Expiration, exp) {
+		return errors.New("OpenCloud didn't change the expiry")
+	}
 	return nil
+}
+
+// expiryMatches: after setting an expiry, the link has none (want nil) or an expiry on the day
+// that was sent. The server rounds a time up to the end of its UTC day, so days are compared.
+func expiryMatches(got string, want *time.Time) bool {
+	var t time.Time
+	has := false
+	if got != "" {
+		var err error
+		if t, err = time.Parse(time.RFC3339, got); err != nil {
+			return false
+		}
+		has = t.Year() > 1970 // the zero time means no expiry
+	}
+	if want == nil {
+		return !has
+	}
+	if !has {
+		return false
+	}
+	y1, m1, d1 := t.UTC().Date()
+	y2, m2, d2 := want.UTC().Date()
+	return y1 == y2 && m1 == m2 && d1 == d2
 }
 
 // removeLink deletes the link. wantURL is the address the user was shown when they confirmed;
@@ -368,22 +402,37 @@ func (g graphAPI) removeLink(ctx context.Context, item, perm, wantURL string) er
 }
 
 // expiryFor is the new expiry for a Change expiry choice: days 7 or 30 from now, or a date
-// (YYYY-MM-DD, not in the past, within 10 years); neither is "no expiry" (nil).
+// (YYYY-MM-DD, in this computer's time zone, not in the past, within 10 years); neither is "no
+// expiry" (nil). A date becomes the end of that day (23:59:59) in the local time zone; the caller
+// sends it as UTC.
+//
+// Source read (opencloud-eu/opencloud, main, services/graph/pkg/service/v0/
+// api_driveitem_permissions_links.go): parseAndFillUpTime takes the date parts of the time it is
+// sent, in the time's own location, and adds 23:59:59 to that day's midnight "so the link is valid
+// for the whole day". We send a UTC time ("…Z"), so the server's day is the UTC day of the instant
+// we send. That is not always the local day: the link can end some hours after the local day does
+// (see the wording in the pages and README).
 func expiryFor(days int, date string, now time.Time) (*time.Time, error) {
+	return expiryForIn(days, date, now, time.Local)
+}
+
+func expiryForIn(days int, date string, now time.Time, loc *time.Location) (*time.Time, error) {
 	switch {
 	case date != "":
-		d, err := time.Parse("2006-01-02", date)
+		d, err := time.ParseInLocation("2006-01-02", date, loc)
 		if err != nil {
 			return nil, errors.New("that isn't a date (use year-month-day)")
 		}
-		today := now.UTC().Truncate(24 * time.Hour)
+		y, m, dd := now.In(loc).Date()
+		today := time.Date(y, m, dd, 0, 0, 0, 0, loc)
 		if d.Before(today) {
 			return nil, errors.New("that date has passed")
 		}
 		if d.After(today.AddDate(10, 0, 0)) {
 			return nil, errors.New("that date is too far away (10 years at most)")
 		}
-		return &d, nil
+		end := time.Date(d.Year(), d.Month(), d.Day(), 23, 59, 59, 0, loc)
+		return &end, nil
 	case days == 0:
 		return nil, nil
 	case days == 7 || days == 30:

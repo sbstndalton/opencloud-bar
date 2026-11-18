@@ -1155,8 +1155,19 @@ final class AppModel: ObservableObject {
                     }
                 }
                 if link == nil {
-                    guard let o = SharesAPI.askOptions(for: name) else { return }
-                    link = try await SharesAPI.createLink(id: id, serverURL: server, token: token, o)
+                    // If the server insists on a password, the dialog opens again with the choices
+                    // kept and the password marked required.
+                    var preset: SharesAPI.Options?
+                    var needPassword = false
+                    while link == nil {
+                        guard let o = SharesAPI.askOptions(for: name, preset: preset, passwordRequired: needPassword) else { return }
+                        do {
+                            link = try await SharesAPI.createLink(id: id, serverURL: server, token: token, o)
+                        } catch is SharesAPI.PasswordRequired where !(needPassword && !o.password.isEmpty) {
+                            preset = o
+                            needPassword = true
+                        }
+                    }
                     Log.line("share link made for \(where_)")   // never the password
                 } else {
                     Log.line("share link for \(where_): an existing view link copied")

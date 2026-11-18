@@ -28,6 +28,7 @@ enum SharedLinksAPI {
         var expires: Date?
         var created: Date?
         var password: Bool
+        var expiryUnknown = false   // the server sent an expiry that couldn't be read
         var id: String { item + "\u{1}" + perm }
 
         var typeText: String {
@@ -142,9 +143,12 @@ enum SharedLinksAPI {
             let dir = it["folder"] is [String: Any]
             for p in (it["permissions"] as? [[String: Any]]) ?? [] {
                 guard let link = p["link"] as? [String: Any], let pid = p["id"] as? String, validID(pid) else { continue }
-                out.append(Link(item: id, perm: pid, name: name, dir: dir, type: clean((link["type"] as? String) ?? ""),
-                                url: (link["webUrl"] as? String) ?? "", expires: date(p["expirationDateTime"] as? String),
-                                created: date(p["createdDateTime"] as? String), password: (p["hasPassword"] as? Bool) ?? false))
+                let rawExp = p["expirationDateTime"] as? String
+                var l = Link(item: id, perm: pid, name: name, dir: dir, type: clean((link["type"] as? String) ?? ""),
+                             url: (link["webUrl"] as? String) ?? "", expires: date(rawExp),
+                             created: date(p["createdDateTime"] as? String), password: (p["hasPassword"] as? Bool) ?? false)
+                l.expiryUnknown = !(rawExp ?? "").isEmpty && l.expires == nil
+                out.append(l)
             }
         }
         return out.sorted {
@@ -160,7 +164,9 @@ enum SharedLinksAPI {
         for p in perms {
             guard let link = p["link"] as? [String: Any], (link["type"] as? String) == "view",
                   let url = link["webUrl"] as? String, isHTTPS(url) else { continue }
-            let exp = date(p["expirationDateTime"] as? String)
+            let rawExp = p["expirationDateTime"] as? String
+            let exp = date(rawExp)
+            if !(rawExp ?? "").isEmpty && exp == nil { continue }   // an expiry that can't be read might be in the past
             if let exp, exp <= now { continue }
             let c = Existing(url: url, expires: exp, created: date(p["createdDateTime"] as? String), password: (p["hasPassword"] as? Bool) ?? false)
             if let b = best {
@@ -223,7 +229,9 @@ enum SharedLinksAPI {
         let link = fresh["link"] as? [String: Any] ?? [:]
         l.url = (link["webUrl"] as? String) ?? ""
         l.type = clean((link["type"] as? String) ?? "")
-        l.expires = date(fresh["expirationDateTime"] as? String)
+        let rawExp = fresh["expirationDateTime"] as? String
+        l.expires = date(rawExp)
+        l.expiryUnknown = !(rawExp ?? "").isEmpty && l.expires == nil
         l.password = (fresh["hasPassword"] as? Bool) ?? false
         if let c = date(fresh["createdDateTime"] as? String) { l.created = c }
         return l
@@ -249,6 +257,28 @@ enum SharedLinksAPI {
         let body = try JSONSerialization.data(withJSONObject: ["expirationDateTime": v])
         let (code, data) = try await request("PATCH", server: server, path: p + "/permissions/" + esc(l.perm), token: token, body: body)
         guard code == 200 || code == 204 else { throw fail("OpenCloud didn't change the link's expiry", code, data) }
+        // Read it back: a 200 isn't proof the expiry changed.
+        let fresh: [String: Any]
+        do { fresh = try await linkPermission(server: server, token: token, item: l.item, perm: l.perm) }
+        catch { throw AuthError.message("OpenCloud didn't change the expiry (it can't be checked: \(error.localizedDescription))") }
+        guard expiryMatches(fresh["expirationDateTime"] as? String, want: exp) else {
+            throw AuthError.message("OpenCloud didn't change the expiry")
+        }
+    }
+
+    /// After setting an expiry, the link has none (`want` nil) or one on the day that was sent.
+    /// The server rounds a time up to the end of its UTC day, so UTC days are compared.
+    static func expiryMatches(_ raw: String?, want: Date?) -> Bool {
+        var got: Date?
+        if let raw, !raw.isEmpty {
+            guard let d = date(raw) else { return false }
+            if d.timeIntervalSince1970 > 86400 { got = d }   // the zero time means no expiry
+        }
+        guard let want else { return got == nil }
+        guard let got else { return false }
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        return utc.dateComponents([.year, .month, .day], from: got) == utc.dateComponents([.year, .month, .day], from: want)
     }
 
     /// Deletes the link. `wantURL` is the address shown when the user confirmed; if the link now
@@ -263,8 +293,15 @@ enum SharedLinksAPI {
         guard code == 200 || code == 204 else { throw fail("OpenCloud didn't remove the link", code, data) }
     }
 
-    /// The new expiry for a choice: `days` from now (7 or 30), or a calendar day (valid until the
-    /// end of that day on the server; not in the past, within 10 years). Neither: no expiry (nil).
+    /// The new expiry for a choice: `days` from now (7 or 30), or a calendar day in `calendar`'s
+    /// time zone (not in the past, within 10 years), as the instant of 23:59:59 that day there.
+    /// Neither: no expiry (nil).
+    ///
+    /// Source read (opencloud-eu/opencloud, main, services/graph/pkg/service/v0/
+    /// api_driveitem_permissions_links.go): `parseAndFillUpTime` takes the date parts of the time
+    /// it is sent and adds 23:59:59 to that day's midnight. We send a UTC time, so the server's day
+    /// is the UTC day of this instant, which isn't always the local day: the link can end some
+    /// hours after the local day does.
     static func expiry(days: Int?, day: Date?, now: Date = Date(), calendar: Calendar = .current) throws -> Date? {
         if let day {
             var utc = Calendar(identifier: .gregorian)
@@ -274,7 +311,10 @@ enum SharedLinksAPI {
             guard let d = utc.date(from: c), let today = utc.date(from: t) else { throw AuthError.message("That isn't a date.") }
             if d < today { throw AuthError.message("That date has passed.") }
             if d > utc.date(byAdding: .year, value: 10, to: today)! { throw AuthError.message("That date is too far away (10 years at most).") }
-            return d
+            var end = c
+            end.hour = 23; end.minute = 59; end.second = 59
+            guard let e = calendar.date(from: end) else { throw AuthError.message("That isn't a date.") }
+            return e
         }
         switch days {
         case nil, 0: return nil
@@ -346,7 +386,37 @@ extension SharedLinksAPI {
         precondition(run(0, nil).ok && run(0, nil).d == nil, "SharedLinks self-check: no expiry")
         precondition(run(7, nil).d == date("2026-11-25T15:30:00Z"), "SharedLinks self-check: 7 days")
         precondition(run(30, nil).d == date("2026-12-18T15:30:00Z"), "SharedLinks self-check: 30 days")
-        precondition(run(nil, date("2027-01-31T00:00:00Z")).d == date("2027-01-31T00:00:00Z"), "SharedLinks self-check: date")
+        precondition(run(nil, date("2027-01-31T00:00:00Z")).d == date("2027-01-31T23:59:59Z"), "SharedLinks self-check: date")
+        // End of the chosen day in the user's zone, as the UTC instant: New York (UTC-5) and Auckland (UTC+13).
+        for (zone, picked, want) in [("America/New_York", "2027-01-31T05:00:00Z", "2027-02-01T04:59:59Z"),
+                                     ("Pacific/Auckland", "2027-01-30T11:00:00Z", "2027-01-31T10:59:59Z")] {
+            var z = Calendar(identifier: .gregorian)
+            z.timeZone = TimeZone(identifier: zone)!
+            let got = try? expiry(days: nil, day: date(picked), now: n, calendar: z)
+            precondition(got == date(want), "SharedLinks self-check: end of day in \(zone): \(String(describing: got))")
+        }
+        // Today and yesterday are judged in the user's zone, not UTC: 2026-11-18T20:00Z is already the 19th in Auckland.
+        var auck = Calendar(identifier: .gregorian)
+        auck.timeZone = TimeZone(identifier: "Pacific/Auckland")!
+        let late = date("2026-11-18T20:00:00Z")!
+        precondition((try? expiry(days: nil, day: date("2026-11-18T00:00:00Z"), now: late, calendar: auck)) == nil, "SharedLinks self-check: Auckland 18th accepted")
+        precondition((try? expiry(days: nil, day: date("2026-11-19T00:00:00Z"), now: late, calendar: auck)) != nil, "SharedLinks self-check: Auckland 19th refused")
+        // Read-back of an expiry, and an expiry that can't be read.
+        let want = date("2026-12-25T12:00:00Z")
+        precondition(expiryMatches(nil, want: nil) && expiryMatches("", want: nil) && expiryMatches("0001-01-01T00:00:00Z", want: nil), "SharedLinks self-check: none matches")
+        precondition(!expiryMatches("2026-12-25T23:59:59Z", want: nil) && !expiryMatches("soon", want: nil), "SharedLinks self-check: none mismatch")
+        precondition(expiryMatches("2026-12-25T23:59:59Z", want: want) && !expiryMatches("2026-12-26T23:59:59Z", want: want)
+                     && !expiryMatches(nil, want: want) && !expiryMatches("soon", want: want), "SharedLinks self-check: day match")
+        let odd = parse(Data(#"{"value":[{"id":"st$sp!a","name":"n","permissions":[{"id":"p","expirationDateTime":"next tuesday","link":{"type":"view","webUrl":"https://cloud.example.org/s/Z"}}]}]}"#.utf8))
+        precondition(odd?.first?.expires == nil && odd?.first?.expiryUnknown == true, "SharedLinks self-check: unknown expiry")
+        precondition(l[0].expiryUnknown == false && l[1].expiryUnknown == false, "SharedLinks self-check: known expiry")
+        precondition(pickExisting([["id": "odd", "expirationDateTime": "next tuesday", "link": ["type": "view", "webUrl": "https://cloud.example.org/s/Z"]]], now: now) == nil,
+                     "SharedLinks self-check: unreadable expiry reused")
+        // The enforced-password 400.
+        let enforced = Data(#"{"error":{"code":"invalidRequest","message":"Password Protection is enforced"}}"#.utf8)
+        precondition(SharesAPI.isPasswordEnforced(code: 400, data: enforced), "SharedLinks self-check: enforced password not recognised")
+        precondition(!SharesAPI.isPasswordEnforced(code: 403, data: enforced) && !SharesAPI.isPasswordEnforced(code: 400, data: Data("<html>".utf8))
+                     && !SharesAPI.isPasswordEnforced(code: 400, data: Data(#"{"error":{"message":"bad expiry"}}"#.utf8)), "SharedLinks self-check: enforced password mis-recognised")
         precondition(run(nil, date("2026-11-18T00:00:00Z")).ok, "SharedLinks self-check: today")
         for bad in [(3, nil as Date?), (-1, nil), (0, date("2026-11-17T00:00:00Z")), (0, date("2040-01-01T00:00:00Z"))] {
             precondition(!run(bad.0, bad.1).ok, "SharedLinks self-check: \(bad) accepted")
@@ -399,7 +469,7 @@ struct SharedLinksPage: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(name(l)).textSelection(.enabled)
                 Text([l.typeText,
-                      l.expires.map { (expired ? "Expired " : "Expires ") + $0.formatted(date: .abbreviated, time: .omitted) } ?? "Never expires",
+                      l.expires.map { (expired ? "Expired " : "Expires ") + $0.formatted(date: .abbreviated, time: .omitted) } ?? (l.expiryUnknown ? "Expiry unknown" : "Never expires"),
                       l.created.map { "Created " + $0.formatted(date: .abbreviated, time: .shortened) }]
                         .compactMap { $0 }.joined(separator: " · "))
                     .font(.caption).foregroundStyle(.secondary)
@@ -509,7 +579,7 @@ extension AppModel {
     func askExpiryDate(for name: String, current: Date?) -> Date? {
         let a = NSAlert()
         a.messageText = "Expire the link to “\(name)” on…"
-        a.informativeText = "The link works until the end of that day."
+        a.informativeText = "OpenCloud ends the link at the end of that day in UTC, so it may stay active some hours after that day ends in your time zone."
         a.addButton(withTitle: "Set Expiry")
         a.addButton(withTitle: "Cancel")
         let p = NSDatePicker(frame: NSRect(x: 0, y: 0, width: 180, height: 24))

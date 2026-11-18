@@ -27,6 +27,23 @@ import (
 // The drive id is the file id up to its "!". The password is typed for this one link and
 // never stored or logged. The macOS app does the same (Shares.swift).
 
+// errPasswordRequired: the server enforces a password on public links (a createLink without one
+// answers 400 "password protection is enforced"). The pages then ask for one and try again.
+var errPasswordRequired = errors.New("This server requires a password for public links.")
+
+// passwordEnforced reports whether a createLink answer is that 400.
+func passwordEnforced(status int, data []byte) bool {
+	if status != http.StatusBadRequest {
+		return false
+	}
+	var ge struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	return json.Unmarshal(data, &ge) == nil && strings.Contains(strings.ToLower(ge.Error.Message), "password protection is enforced")
+}
+
 // ShareOptions: Days 0 means no expiry; Password "" means none.
 type ShareOptions struct {
 	Days     int
@@ -123,6 +140,9 @@ func createShareLinkFor(ctx context.Context, id, graphBase, tok string, o ShareO
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != 200 && resp.StatusCode != 201 {
+		if passwordEnforced(resp.StatusCode, data) {
+			return "", errPasswordRequired
+		}
 		var ge struct {
 			Error struct {
 				Message string `json:"message"`

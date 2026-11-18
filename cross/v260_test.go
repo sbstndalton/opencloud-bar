@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -44,6 +46,11 @@ type fakeGraph struct {
 	// when set, GET …/permissions (the list) answers 404; fileID is what PROPFIND says
 	noList bool
 	fileID string
+	// PATCH: when noApply is set the server answers 200 but changes nothing; otherwise it stores
+	// the new expiry, rounded up to 23:59:59 of its UTC day as parseAndFillUpTime does.
+	noApply bool
+	// when set, createLink answers 400 with this body
+	createErr string
 }
 
 // The setters change the fake's answers between requests (under the lock the handler takes).
@@ -52,6 +59,37 @@ func (f *fakeGraph) setShared(v string)  { f.mu.Lock(); f.shared = v; f.mu.Unloc
 func (f *fakeGraph) setPerm(k, v string) { f.mu.Lock(); f.perms[k] = v; f.mu.Unlock() }
 func (f *fakeGraph) setNoList(v bool)    { f.mu.Lock(); f.noList = v; f.mu.Unlock() }
 func (f *fakeGraph) setFileID(v string)  { f.mu.Lock(); f.fileID = v; f.mu.Unlock() }
+func (f *fakeGraph) setNoApply(v bool)   { f.mu.Lock(); f.noApply = v; f.mu.Unlock() }
+func (f *fakeGraph) setCreateErr(v string) {
+	f.mu.Lock()
+	f.createErr = v
+	f.mu.Unlock()
+}
+
+// applyPatch stores a PATCH's expirationDateTime in the permission the fake serves.
+func (f *fakeGraph) applyPatch(key, body string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.noApply {
+		return
+	}
+	var in map[string]any
+	var perm map[string]any
+	if json.Unmarshal([]byte(body), &in) != nil || json.Unmarshal([]byte(f.perms[key]), &perm) != nil {
+		return
+	}
+	switch v := in["expirationDateTime"].(type) {
+	case nil:
+		delete(perm, "expirationDateTime")
+	case string:
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			y, m, d := t.UTC().Date()
+			perm["expirationDateTime"] = time.Date(y, m, d, 23, 59, 59, 0, time.UTC).Format("2006-01-02T15:04:05Z")
+		}
+	}
+	nb, _ := json.Marshal(perm)
+	f.perms[key] = string(nb)
+}
 
 func newFakeGraph(t *testing.T) *fakeGraph {
 	f := &fakeGraph{t: t, body: map[string]string{}, shared: sharedByMeJSON, fileID: "st$sp!aaa", perms: map[string]string{
@@ -73,7 +111,7 @@ func (f *fakeGraph) handle(w http.ResponseWriter, r *http.Request) {
 	key := r.Method + " " + r.URL.EscapedPath()
 	f.reqs = append(f.reqs, key)
 	f.body[key] = string(b)
-	list, shared, noList, fileID := f.list, f.shared, f.noList, f.fileID
+	list, shared, noList, fileID, createErr := f.list, f.shared, f.noList, f.fileID, f.createErr
 	perms := make(map[string]string, len(f.perms))
 	for k, v := range f.perms {
 		perms[k] = v
@@ -107,10 +145,14 @@ func (f *fakeGraph) handle(w http.ResponseWriter, r *http.Request) {
 			case r.Method == "GET":
 				http.NotFound(w, r)
 			case r.Method == "PATCH":
+				f.applyPatch(item+"/"+perm, string(b))
 				_, _ = io.WriteString(w, ans)
 			case r.Method == "DELETE":
 				w.WriteHeader(204)
 			}
+		case r.Method == "POST" && tail == "createLink" && createErr != "":
+			w.WriteHeader(400)
+			_, _ = io.WriteString(w, createErr)
 		case r.Method == "POST" && tail == "createLink":
 			w.WriteHeader(201)
 			_, _ = io.WriteString(w, `{"id":"new","link":{"type":"view","webUrl":"https://cloud.example.org/s/NEW"}}`)
@@ -274,7 +316,7 @@ func TestSetLinkExpiryPatch(t *testing.T) {
 			seq = append(seq, strings.SplitN(q, " ", 2)[0])
 		}
 	}
-	if strings.Join(seq, ",") != "GET,GET,PATCH,GET,GET,PATCH" {
+	if strings.Join(seq, ",") != "GET,GET,PATCH,GET,GET,GET,PATCH,GET" {
 		t.Errorf("sequence %v", log)
 	}
 	// A user share's id is never patched.
@@ -295,6 +337,9 @@ func TestSetLinkExpiryPatch(t *testing.T) {
 
 func TestExpiryFor(t *testing.T) {
 	now := time.Date(2026, 11, 18, 15, 30, 0, 0, time.UTC)
+	expiryFor := func(days int, date string, now time.Time) (*time.Time, error) {
+		return expiryForIn(days, date, now, time.UTC)
+	}
 	if e, err := expiryFor(0, "", now); e != nil || err != nil {
 		t.Errorf("none: %v %v", e, err)
 	}
@@ -304,7 +349,7 @@ func TestExpiryFor(t *testing.T) {
 	if e, err := expiryFor(30, "", now); err != nil || e == nil || e.Format("2006-01-02") != "2026-12-18" {
 		t.Errorf("30: %v %v", e, err)
 	}
-	if e, err := expiryFor(0, "2027-01-31", now); err != nil || e == nil || e.Format(time.RFC3339) != "2027-01-31T00:00:00Z" {
+	if e, err := expiryFor(0, "2027-01-31", now); err != nil || e == nil || e.UTC().Format(time.RFC3339) != "2027-01-31T23:59:59Z" {
 		t.Errorf("date: %v %v", e, err)
 	}
 	if e, err := expiryFor(0, "2026-11-18", now); err != nil || e == nil { // today is still valid today
@@ -571,5 +616,165 @@ func TestSharedLinksNeedSignIn(t *testing.T) {
 	// A date that has passed is refused before the server is asked.
 	if err := e.SharedLinkExpiry("st$sp!aaa", "p", 0, "2001-01-01"); err == nil || !strings.Contains(err.Error(), "passed") {
 		t.Errorf("expiry: %v", err)
+	}
+}
+
+// A server that answers only PATCH and DELETE with a 307 (the list and the GETs work): neither
+// call follows it, each is sent once, and nothing reaches the other host.
+func TestPatchAndDeleteRedirectsNotFollowed(t *testing.T) {
+	var mu sync.Mutex
+	evilHits := 0
+	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		evilHits++
+		mu.Unlock()
+	}))
+	defer evil.Close()
+	counts := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		counts[r.Method]++
+		mu.Unlock()
+		switch {
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/sharedByMe"):
+			_, _ = io.WriteString(w, sharedByMeJSON)
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/permissions/link-view"):
+			_, _ = io.WriteString(w, `{"id":"link-view","expirationDateTime":"2026-12-01T23:59:59Z","link":{"type":"view","webUrl":"https://cloud.example.org/s/AAA"}}`)
+		case r.Method == "PATCH" || r.Method == "DELETE":
+			http.Redirect(w, r, evil.URL+r.URL.Path, http.StatusTemporaryRedirect)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	g := graphAPI{base: srv.URL, tok: "secret-token"}
+	ctx := context.Background()
+	exp := time.Now().Add(72 * time.Hour)
+	if err := g.setLinkExpiry(ctx, "st$sp!aaa", "link-view", &exp); err == nil {
+		t.Error("PATCH followed or accepted a redirect")
+	}
+	if err := g.removeLink(ctx, "st$sp!aaa", "link-view", "https://cloud.example.org/s/AAA"); err == nil {
+		t.Error("DELETE followed or accepted a redirect")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if evilHits != 0 {
+		t.Errorf("the other server got %d requests", evilHits)
+	}
+	if counts["PATCH"] != 1 || counts["DELETE"] != 1 {
+		t.Errorf("requests %v: each should be sent once", counts)
+	}
+}
+
+func TestEnforcedPasswordIsTyped(t *testing.T) {
+	f := newFakeGraph(t)
+	f.setCreateErr(`{"error":{"code":"invalidRequest","message":"Password Protection Is Enforced"}}`)
+	_, err := createShareLinkFor(context.Background(), "st$sp!aaa", f.base(), "tok", ShareOptions{Days: 7}, time.Now())
+	if !errors.Is(err, errPasswordRequired) {
+		t.Fatalf("err %v", err)
+	}
+	if err.Error() != "This server requires a password for public links." {
+		t.Errorf("text %q", err)
+	}
+	// Other 400s, and the same words with another status, are ordinary errors.
+	f.setCreateErr(`{"error":{"code":"invalidRequest","message":"bad expiry"}}`)
+	if _, err = createShareLinkFor(context.Background(), "st$sp!aaa", f.base(), "tok", ShareOptions{}, time.Now()); err == nil || errors.Is(err, errPasswordRequired) {
+		t.Errorf("other 400: %v", err)
+	}
+	if passwordEnforced(403, []byte(`{"error":{"message":"password protection is enforced"}}`)) || passwordEnforced(400, []byte("<html>")) {
+		t.Error("recognised something else")
+	}
+	// It comes through shareOrReuse unchanged, and with a password the link is made.
+	f.setCreateErr(`{"error":{"code":"invalidRequest","message":"password protection is enforced"}}`)
+	dav := f.base() + "/dav/files/sam/Q1.pdf"
+	if _, err = shareOrReuse(context.Background(), dav, f.api(), ShareOptions{}, true, time.Now(), nil); !errors.Is(err, errPasswordRequired) {
+		t.Errorf("shareOrReuse: %v", err)
+	}
+	f.setCreateErr("")
+	if r, err := shareOrReuse(context.Background(), dav, f.api(), ShareOptions{Password: "pw"}, true, time.Now(), nil); err != nil || r.URL == "" {
+		t.Errorf("retry: %+v %v", r, err)
+	}
+}
+
+func TestExpiryForUsesLocalDay(t *testing.T) {
+	nz := time.FixedZone("NZDT", 13*3600)                 // UTC+13
+	la := time.FixedZone("PST", -8*3600)                  // UTC-8
+	now := time.Date(2026, 11, 18, 20, 0, 0, 0, time.UTC) // 19 Nov 09:00 in NZ, 18 Nov 12:00 in LA
+	// In NZ it is already the 19th: the 18th has passed there, though it hasn't in UTC.
+	if e, err := expiryForIn(0, "2026-11-18", now, nz); err == nil {
+		t.Errorf("NZ 18th accepted: %v", e)
+	}
+	e, err := expiryForIn(0, "2026-11-19", now, nz)
+	if err != nil || e == nil || e.UTC().Format(time.RFC3339) != "2026-11-19T10:59:59Z" {
+		t.Errorf("NZ 19th: %v %v", e, err)
+	}
+	// In LA it is still the 18th.
+	e, err = expiryForIn(0, "2026-11-18", now, la)
+	if err != nil || e == nil || e.UTC().Format(time.RFC3339) != "2026-11-19T07:59:59Z" {
+		t.Errorf("LA 18th: %v %v", e, err)
+	}
+	if _, err = expiryForIn(0, "2026-11-17", now, la); err == nil {
+		t.Error("LA 17th accepted")
+	}
+	// The 10-year limit counts local days too.
+	if _, err = expiryForIn(0, "2036-11-18", now, la); err != nil {
+		t.Errorf("exactly 10 years: %v", err)
+	}
+	if _, err = expiryForIn(0, "2036-11-19", now, la); err == nil {
+		t.Error("beyond 10 years accepted")
+	}
+}
+
+func TestExpiryReadBackMismatch(t *testing.T) {
+	f := newFakeGraph(t)
+	f.setNoApply(true) // 200, but the server changed nothing
+	ctx := context.Background()
+	exp := time.Date(2026, 12, 25, 23, 59, 59, 0, time.UTC)
+	err := f.api().setLinkExpiry(ctx, "st$sp!aaa", "link-view", &exp)
+	if err == nil || err.Error() != "OpenCloud didn't change the expiry" {
+		t.Errorf("set: %v", err)
+	}
+	if err = f.api().setLinkExpiry(ctx, "st$sp!aaa", "link-view", nil); err == nil || err.Error() != "OpenCloud didn't change the expiry" {
+		t.Errorf("remove: %v", err)
+	}
+	// A server that does apply it passes the check.
+	f.setNoApply(false)
+	if err = f.api().setLinkExpiry(ctx, "st$sp!aaa", "link-view", nil); err != nil {
+		t.Errorf("remove (applied): %v", err)
+	}
+	if err = f.api().setLinkExpiry(ctx, "st$sp!aaa", "link-view", &exp); err != nil {
+		t.Errorf("set (applied): %v", err)
+	}
+	d := time.Date(2026, 12, 25, 12, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		got  string
+		want *time.Time
+		ok   bool
+	}{
+		{"", nil, true}, {"0001-01-01T00:00:00Z", nil, true}, {"2026-12-25T23:59:59Z", nil, false},
+		{"2026-12-25T23:59:59Z", &d, true}, {"2026-12-26T23:59:59Z", &d, false}, {"", &d, false}, {"soon", &d, false}, {"soon", nil, false},
+	} {
+		if got := expiryMatches(c.got, c.want); got != c.ok {
+			t.Errorf("expiryMatches(%q, %v) = %v", c.got, c.want, got)
+		}
+	}
+}
+
+func TestUnparseableExpirySkippedForReuse(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	mk := func(id, exp, created string) gPerm {
+		p := gPerm{ID: id, Expiration: exp, Created: created}
+		p.Link = &struct {
+			Type   string `json:"type"`
+			WebURL string `json:"webUrl"`
+		}{Type: "view", WebURL: "https://cloud.example.org/s/" + id}
+		return p
+	}
+	got := pickExistingView([]gPerm{mk("odd", "next tuesday", "2026-11-17T00:00:00Z"), mk("ok", "2026-12-24T23:59:59Z", "2026-11-01T00:00:00Z")}, now)
+	if got == nil || got.URL != "https://cloud.example.org/s/ok" {
+		t.Errorf("got %+v", got)
+	}
+	if got := pickExistingView([]gPerm{mk("odd", "next tuesday", "2026-11-17T00:00:00Z")}, now); got != nil {
+		t.Errorf("an unreadable expiry was reused: %+v", got)
 	}
 }

@@ -468,7 +468,7 @@ async function loadItems(f, sub) {
   try {
     const r = await get("items?folder=" + encodeURIComponent(f.path) + "&sub=" + encodeURIComponent(sub));
     const old = sharePick && sharePick.folder === f.path ? sharePick : {};
-    sharePick = { folder: f.path, sub, items: r.items, chosen: old.chosen || "", days: old.days || "0", pw: old.pw || "", url: old.url || "" };
+    sharePick = { folder: f.path, sub, items: r.items, chosen: old.chosen || "", days: old.days || "0", pw: old.pw || "", url: old.url || "", pwRequired: !!old.pwRequired };
   } catch (e) { toast(e.message, true); }
   drawFolders();
 }
@@ -485,22 +485,37 @@ async function copyLink(url, okMsg) {
 async function makeLink(f, btn, newLink) {
   if (btn) btn.disabled = true;
   const p = sharePick;
+  if (p.pwRequired && !p.pw) {
+    toast("Type a password for the link. This server requires one for public links.", true);
+    const el = document.getElementById("share-pw"); if (el) el.focus();
+    if (btn) btn.disabled = false;
+    return;
+  }
   try {
     const r = await post("share", { folder: f.path, path: p.chosen, days: parseInt(p.days, 10), password: p.pw, newLink });
     if (r.existing) { p.existing = r; drawFolders(); return; }
     p.pw = ""; p.url = r.url; p.existing = null;
     drawFolders();
     await copyLink(r.url);
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    if (e.data && e.data.code === "password_required") {
+      // The server won't make a link without a password: mark the field required, keep the expiry.
+      p.pwRequired = true; p.focusPw = true; p.existing = null; drawFolders();
+    }
+    toast(e.message, true);
+  }
   if (btn) btn.disabled = false;
 }
 function existingCard(f) {
   const x = sharePick.existing;
   const when = x.expires ? "expires " + new Date(x.expires).toLocaleDateString() : "never expires";
+  const typed = sharePick.days !== "0" || sharePick.pw;
   const copyBtn = h("button", { class: "btn primary", onclick: async () => { sharePick.url = x.url; sharePick.existing = null; drawFolders(); await copyLink(x.url, "Existing link copied"); } }, "Copy Existing Link");
   setTimeout(() => copyBtn.isConnected && copyBtn.focus(), 0);
   return h("div", { class: "card", role: "group", "aria-label": "This item already has a public link" },
     h("p", { text: "This item already has a public link (" + when + (x.password ? ", with a password" : "") + (x.created ? ", made " + new Date(x.created).toLocaleDateString() : "") + ")." }),
+    x.password ? h("p", { class: "hint", text: "It has a password \u2014 you'll need the one you set when you made it." }) : null,
+    typed ? h("p", { class: "hint", text: "The expiry or password you chose weren't applied to the existing link; Make New Link uses them." }) : null,
     h("div", { class: "row" }, copyBtn,
       h("button", { class: "btn", onclick: (ev) => makeLink(f, ev.currentTarget, true) }, "Make New Link"),
       h("button", { class: "btn", onclick: () => { sharePick.existing = null; drawFolders(); } }, "Cancel")));
@@ -529,15 +544,19 @@ function shareBox(f) {
   const days = h("select", { id: "share-days" }, [["0", "Never"], ["1", "After 1 day"], ["7", "After 7 days"], ["30", "After 30 days"]].map(([v, t]) => h("option", { value: v, text: t })));
   days.value = sharePick.days;
   days.addEventListener("change", () => { sharePick.days = days.value; });
-  const pw = h("input", { type: "password", id: "share-pw", autocomplete: "new-password", placeholder: "optional" });
+  const need = !!sharePick.pwRequired;
+  const pw = h("input", { type: "password", id: "share-pw", autocomplete: "new-password", placeholder: need ? "required" : "optional" });
+  if (need) { pw.required = true; pw.setAttribute("aria-required", "true"); pw.setAttribute("aria-describedby", "share-pw-hint"); }
   pw.value = sharePick.pw;
   pw.addEventListener("input", () => { sharePick.pw = pw.value; });
+  if (sharePick.focusPw) { sharePick.focusPw = false; setTimeout(() => pw.isConnected && pw.focus(), 0); }
   const out = h("input", { type: "text", id: "share-url", readonly: true, "aria-label": "Share link", placeholder: "The link appears here" });
   out.value = sharePick.url;
-  box.append(h("p", { class: "hint", text: "Anyone with the link can view and download it, without signing in. It stays active until you delete it in OpenCloud (in the browser: the file's sharing panel), unless you pick an expiry. The password, if you set one, isn't stored here." }),
+  box.append(h("p", { class: "hint", text: "Anyone with the link can view and download it, without signing in. It stays active until you remove it (Shared Links, in this window), unless you pick an expiry. The password, if you set one, isn't stored here." }),
     list,
     h("div", { class: "row" }, h("label", { text: "Link expires" }), days),
-    h("div", { class: "row" }, h("label", { text: "Password" }), pw),
+    h("div", { class: "row" }, h("label", { text: need ? "Password (required)" : "Password" }), pw),
+    need ? h("p", { class: "hint", id: "share-pw-hint", text: "This server requires a password for public links." }) : null,
     sharePick.existing ? existingCard(f) : null,
     h("div", { class: "row" },
       h("button", { class: "btn primary", onclick: (ev) => makeLink(f, ev.currentTarget, false) }, "Create and Copy Public Link"),
@@ -844,7 +863,7 @@ async function sharedLinks(main, r) {
       return h("tr", {},
         h("td", { class: "path", text: name }),
         h("td", { text: (LINK_TYPES[l.type] || l.type || "Link") + (l.password ? ", password" : "") }),
-        h("td", { text: exp ? exp + (expired ? " (expired)" : "") : "Never" }),
+        h("td", { text: exp ? exp + (expired ? " (expired)" : "") : (l.expires && isNaN(new Date(l.expires)) ? "Expiry unknown" : "Never") }),
         h("td", { text: linkWhen(l.created, true) }),
         h("td", {},
           h("button", { class: "btn", "aria-label": "Copy the link to " + name, onclick: async () => {

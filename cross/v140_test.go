@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -184,7 +185,7 @@ func TestCreateShareLinkServerRefuses(t *testing.T) {
 	cfg.ServerURL, cfg.DavPath = srv.URL+"/opencloud", "/remote.php/dav/files/sam"
 	dav, _ := itemDavURL(cfg, KeptFolder{Path: "Docs"}, "Q1 report.pdf")
 	_, err := createShareLink(context.Background(), dav, cfg.ServerURL, "tok", ShareOptions{}, time.Now())
-	if err == nil || !strings.Contains(err.Error(), "password protection is enforced") {
+	if !errors.Is(err, errPasswordRequired) {
 		t.Errorf("error: %v", err)
 	}
 }

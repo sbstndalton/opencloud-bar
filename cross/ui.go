@@ -363,6 +363,10 @@ func (u *webUI) handler(e *Engine) http.Handler {
 			return
 		}
 		res, err := e.ShareLinkReuse(b.Folder, b.Path, ShareOptions{Days: b.Days, Password: b.Password}, b.NewLink)
+		if errors.Is(err, errPasswordRequired) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error(), "code": "password_required"})
+			return
+		}
 		if err != nil {
 			jsonErr(w, http.StatusBadRequest, err)
 			return
