@@ -88,6 +88,7 @@ type fakeOC struct {
 	exists   map[string]bool
 	trash    map[string]string // space path → multistatus answer
 	drives   string            // the /me/drives answer ("" for the usual one)
+	report   http.HandlerFunc  // answers REPORT (search, 2.2); called with mu held
 }
 
 // reportTime is the server's modification time of Docs/report.txt (size 7, "current").
@@ -142,6 +143,8 @@ func (f *fakeOC) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.NotFound(w, r)
+	case r.Method == "REPORT" && f.report != nil:
+		f.report(w, r)
 	case r.Method == "COPY" || r.Method == "MOVE":
 		f.writes = append(f.writes, r.Method+" "+r.URL.EscapedPath()+" | "+r.Header.Get("Destination")+" | "+r.Header.Get("Overwrite"))
 		if r.Method == "MOVE" {

@@ -192,7 +192,7 @@ func (u *webUI) loginURL(section string) string {
 
 func validSection(s string) bool {
 	switch s {
-	case "folders", "conflicts", "trash", "activity", "account", "sync", "drive", "general", "logs", "about":
+	case "folders", "search", "conflicts", "trash", "activity", "account", "sync", "drive", "general", "logs", "about":
 		return true
 	}
 	return false
@@ -341,6 +341,14 @@ func (u *webUI) handler(e *Engine) http.Handler {
 			return
 		}
 		jsonOK(w, e.RestoreVersion(b.Folder, b.Path, b.Key))
+	})
+	mux.HandleFunc("GET /ui/api/search", func(w http.ResponseWriter, r *http.Request) {
+		res, err := e.Search(r.URL.Query().Get("q"))
+		if err != nil {
+			jsonErr(w, http.StatusConflict, err)
+			return
+		}
+		writeJSON(w, 200, res)
 	})
 	mux.HandleFunc("GET /ui/api/trash", func(w http.ResponseWriter, r *http.Request) {
 		l, err := e.ListTrash(r.URL.Query().Get("all") == "1")
@@ -669,6 +677,16 @@ func (e *Engine) serveOpen(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := openURL(base); err != nil {
+			jsonErr(w, http.StatusConflict, err)
+			return
+		}
+	case "search-web": // a search match in OpenCloud in the browser (its own id only)
+		u, err := searchWebURL(cfg, b.Path)
+		if err != nil {
+			jsonErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := openURL(u); err != nil {
 			jsonErr(w, http.StatusConflict, err)
 			return
 		}

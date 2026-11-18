@@ -61,6 +61,7 @@ type Status struct {
 	Paused       bool           `json:"paused,omitempty"` // kept folders don't sync until resumed
 	Update       UpdateState    `json:"update"`
 	Conflicts    int            `json:"conflicts,omitempty"` // conflict copies over all kept folders
+	Storage      *quotaInfo     `json:"storage,omitempty"`   // the personal space's quota, last checked
 }
 
 // Engine runs the SSH tunnel, the on-demand drive (rclone mount) and the two-way sync
@@ -108,6 +109,13 @@ type Engine struct {
 
 	updates *updater
 
+	// Storage quota (quota.go): when it was last checked, and what it said.
+	quotaAt    time.Time
+	quotaBusy  bool
+	quotaShown *quotaInfo
+	quotaGen   uint64 // bumped when the quota state is reset (sign-out, sign-in, other server)
+	quotaID    string // server|account the quota on hand is from
+
 	notes      notifyState // what has been announced (notify.go)
 	autoMerged []string    // folders merged automatically since the last notification check
 	// conflict copies found since the last notification check
@@ -140,6 +148,7 @@ func NewEngine() *Engine {
 		rcUser: "ocb-" + randomToken()[:12], rcPass: randomToken(), updates: newUpdater(),
 		cmds: map[*exec.Cmd]bool{}, running: map[string]workItem{}, runTimes: map[string]runTimes{}, active: map[string]*activeRun{}}
 	e.signedOut = cfg.OIDC() && cfg.Configured() && !haveCredentials(cfg)
+	e.quotaID = quotaIdentity(cfg)
 	e.refreshStatusLocked()
 	return e
 }
@@ -151,6 +160,7 @@ func (e *Engine) markSignedOut() {
 	e.mu.Lock()
 	e.signedOut = true
 	e.message = signedOutMessage
+	e.resetQuotaLocked(e.cfg)
 	e.mu.Unlock()
 	e.logLine("signed out (sign-in missing or revoked)")
 	e.notify()
@@ -211,6 +221,7 @@ func (e *Engine) SignOut(force bool) error {
 	e.mu.Lock()
 	e.signedOut = true
 	e.message = signedOutMessage
+	e.resetQuotaLocked(e.cfg)
 	m, t := e.mount, e.tunnel
 	if m != nil {
 		e.unmountRequest = true
@@ -311,6 +322,7 @@ func (e *Engine) tick() {
 	if e.quitting || e.cfgErr != nil || !e.cfg.Configured() {
 		return
 	}
+	e.quotaDueLocked()
 	up := true // without a tunnel the server is reached directly
 	if e.cfg.Tunnel() {
 		open := portOpen(e.cfg.LocalPort)
@@ -1613,6 +1625,12 @@ func (e *Engine) Reload() error {
 		}
 	}
 	wasOut := e.signedOut
+	if id := quotaIdentity(cfg); wasOut || out || cfg.ServerURL != e.cfg.ServerURL || id != e.quotaID {
+		// Signed out or in, another server or account: the old quota (and what was warned
+		// about) isn't this one's.
+		e.quotaID = id
+		e.resetQuotaLocked(e.cfg, cfg)
+	}
 	e.cfg, e.cfgErr = cfg, nil
 	e.signedOut = out
 	if out {
@@ -1702,6 +1720,10 @@ func (e *Engine) Status() Status {
 	st.DriveMounted = e.cfg.Mounting() && isMounted(e.mountTargetLocked())
 	st.Paused = e.cfg.Paused
 	st.Update = e.updates.State()
+	if e.quotaShown != nil && e.cfg.OIDC() && !e.signedOut {
+		q := *e.quotaShown
+		st.Storage = &q
+	}
 	if e.cfgErr != nil {
 		st.ConfigError = e.cfgErr.Error()
 	}

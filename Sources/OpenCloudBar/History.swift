@@ -52,7 +52,7 @@ enum DavHistory {
             completionHandler(nil)
         }
     }
-    private static let session: URLSession = {
+    static let session: URLSession = {
         let c = URLSessionConfiguration.ephemeral
         c.httpCookieStorage = nil
         c.urlCache = nil
@@ -63,7 +63,13 @@ enum DavHistory {
     static let segmentAllowed = CharacterSet.urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#;"))
     static func esc(_ s: String) -> String { s.addingPercentEncoding(withAllowedCharacters: segmentAllowed) ?? "" }
 
-    private static func request(_ method: String, _ url: URL, token: String, headers: [String: String] = [:], body: String? = nil) async throws -> (Data, Int) {
+    static func request(_ method: String, _ url: URL, token: String, headers: [String: String] = [:], body: String? = nil) async throws -> (Data, Int) {
+        let (data, resp) = try await requestWithHeaders(method, url, token: token, headers: headers, body: body)
+        return (data, resp?.statusCode ?? 0)
+    }
+
+    /// The same, with the answer's headers (the search reads Content-Range).
+    static func requestWithHeaders(_ method: String, _ url: URL, token: String, headers: [String: String] = [:], body: String? = nil) async throws -> (Data, HTTPURLResponse?) {
         var req = URLRequest(url: url)
         req.httpMethod = method
         req.timeoutInterval = 30
@@ -75,7 +81,7 @@ enum DavHistory {
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         do {
             let (data, resp) = try await session.data(for: req)
-            return (data, (resp as? HTTPURLResponse)?.statusCode ?? 0)
+            return (data, resp as? HTTPURLResponse)
         } catch {
             throw AuthError.message("The server didn't answer.")
         }
@@ -306,9 +312,12 @@ enum DavHistory {
 
     /// The personal space (from /me/drives) and the spaces folders are kept from, and a
     /// problem line when the personal space can't be used.
-    static func spaces(_ c: Config, token: String) async throws -> ([TrashSpace], [String]) {
+    /// GET /graph/v1.0/me/drives (with an optional $filter): its "value" list.
+    static func drives(_ c: Config, token: String, filter: String? = nil) async throws -> [[String: Any]] {
         let base = (c.serverURL ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard let url = URL(string: base + "/graph/v1.0/me/drives") else { throw AuthError.message("The server address isn't valid.") }
+        guard var comps = URLComponents(string: base + "/graph/v1.0/me/drives") else { throw AuthError.message("The server address isn't valid.") }
+        if let filter { comps.queryItems = [URLQueryItem(name: "$filter", value: filter)] }
+        guard let url = comps.url else { throw AuthError.message("The server address isn't valid.") }
         var req = URLRequest(url: url)
         req.timeoutInterval = 30
         req.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -317,8 +326,13 @@ enum DavHistory {
               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             throw AuthError.message("Couldn't list the spaces.")
         }
+        return (obj["value"] as? [[String: Any]]) ?? []
+    }
+
+    static func spaces(_ c: Config, token: String) async throws -> ([TrashSpace], [String]) {
+        let value = try await drives(c, token: token)
         var out: [TrashSpace] = [], problems: [String] = []
-        if let d = ((obj["value"] as? [[String: Any]]) ?? []).first(where: { ($0["driveType"] as? String) == "personal" }),
+        if let d = value.first(where: { ($0["driveType"] as? String) == "personal" }),
            let id = d["id"] as? String, !id.isEmpty,
            let p = personalSpacePath(((d["root"] as? [String: Any])?["webDavUrl"] as? String) ?? "") {
             out.append(TrashSpace(id: id, name: "Personal", davPath: p, kept: c.kept.filter { $0.space == nil }))

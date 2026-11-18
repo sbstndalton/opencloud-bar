@@ -84,6 +84,7 @@ struct MenuContent: View {
     var body: some View {
         Text(model.summary)
         if let msg = model.lastMessage { Text(msg) }
+        if model.config.isOIDC, !model.needsSignIn, let q = model.storageQuota { Text(q.menuText) }
         if model.needsSignIn {
             Button(model.waitingForKeychain ? "Sign In Again…" : "Set Up / Sign In…") { model.showSetup() }
         }
@@ -106,6 +107,9 @@ struct MenuContent: View {
 
         keptFoldersMenu
         recentChangesMenu
+        Button("Search OpenCloud…") { model.showSearch() }
+            .disabled(model.needsSignIn || !model.config.isOIDC)
+            .keyboardShortcut("f")
         Button("Copy Public Link…") { model.shareFile() }
             .disabled(model.needsSignIn || !model.config.isOIDC || model.config.kept.isEmpty)
         Button("File History…") { model.fileHistory() }

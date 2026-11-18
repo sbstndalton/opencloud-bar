@@ -50,7 +50,14 @@ final class AppModel: ObservableObject {
     private var authRetryAt = Date.distantPast
     private var setupWindow: SetupWindowController?
     private var aboutWindow: AboutWindowController?
-    private lazy var notifier = Notifier(model: self)
+    lazy var notifier = Notifier(model: self)
+    /// The personal space's quota, last checked (Quota.swift); nil until then or without a limit given.
+    @Published var storageQuota: StorageQuota?
+    var quotaCheckedAt = Date.distantPast
+    var quotaGeneration = 0          // bumped when the quota state is reset
+    var quotaIdentity = ""           // server + account the quota on hand is from
+    var quotaBusy = false
+    var searchWindow: SearchWindowController?
     private var notePlanner = NotePlanner()
     private var autoMerged: [String] = []
     /// Conflict copies per kept folder (keyed by KeptFolder.path); see Conflicts.swift.
@@ -124,6 +131,7 @@ final class AppModel: ObservableObject {
         config = c
         configError = err
         signedOut = c.isOIDC && c.isConfigured && !Auth.haveCredentials(c)
+        quotaIdentity = Self.quotaIdentity(c)
         applyEnvironment()
         refreshStatusEntries()
         recentChanges = Changes.load(changesURL)
@@ -192,6 +200,7 @@ final class AppModel: ObservableObject {
         guard !signedOut else { return }
         signedOut = true
         lastMessage = Self.signedOutText
+        resetQuota(stateFolders: [config.stateURL])
         Log.line("signed out (sign-in missing or revoked)")
     }
 
@@ -275,6 +284,7 @@ final class AppModel: ObservableObject {
         if config.isOIDC {
             if signedOut { return }
             checkAuth()
+            checkQuotaIfDue()
         }
         driveMounted = Shell.isMounted(config.mountURL)
         checkFinderEject()
@@ -365,8 +375,11 @@ final class AppModel: ObservableObject {
     // MARK: - On-demand drive
 
     // The drive is `rclone serve nfs` on a free 127.0.0.1 port, mounted with mount_nfs under the
-    // host name opencloud.localhost (it resolves to 127.0.0.1 by itself): Finder shows the
-    // name it was mounted with, and `rclone nfsmount` always says "localhost". The mount
+    // host name opencloud.localhost (it resolves to 127.0.0.1 by itself): Finder shows that as
+    // the server, and `rclone nfsmount` always says "localhost". The volume itself is named
+    // after the mount point folder (an NFS mount has no volume label to set; rclone serve nfs
+    // only exports "/", so no other export path can carry a name), which is why there is no
+    // separate volume name setting on the Mac (2.2). The mount
     // options are the ones rclone nfsmount uses (port, mountport, tcp). Unlike nfsmount, the
     // server doesn't stop when the volume is ejected in Finder: tick() notices and stops it
     // (after any uploads).
@@ -1784,6 +1797,10 @@ final class AppModel: ObservableObject {
         }
         do { try c.write() } catch { return "Couldn't save the settings: \(error.localizedDescription)" }
 
+        if c.serverURL != old.serverURL {
+            quotaIdentity = Self.quotaIdentity(c)
+            resetQuota(stateFolders: [old.stateURL, c.stateURL])
+        }
         config = c
         applyEnvironment()
         refreshStatusEntries()
@@ -1802,7 +1819,7 @@ final class AppModel: ObservableObject {
         }
         if reconnect {
             restartConnection()
-        } else if c.cacheMaxSize != old.cacheMaxSize || c.cacheMaxAge != old.cacheMaxAge || c.volumeName != old.volumeName
+        } else if c.cacheMaxSize != old.cacheMaxSize || c.cacheMaxAge != old.cacheMaxAge
                     || c.bwLimitUp != old.bwLimitUp || c.bwLimitDown != old.bwLimitDown {
             restartDriveForNewSettings()
         }
@@ -1847,6 +1864,12 @@ final class AppModel: ObservableObject {
         let out = c.isOIDC && c.isConfigured && !Auth.haveCredentials(c)
         let wasOut = signedOut
         let reconnect = c.connectionKey != config.connectionKey || out
+        let id = Self.quotaIdentity(c)
+        if wasOut || out || c.serverURL != config.serverURL || id != quotaIdentity {
+            // Signed out or in, another server or account: the old quota isn't this one's.
+            quotaIdentity = id
+            resetQuota(stateFolders: [config.stateURL, c.stateURL])
+        }
         config = c
         signedOut = out
         if !out { waitingForKeychain = false }
@@ -1884,6 +1907,7 @@ final class AppModel: ObservableObject {
             Auth.logout()
             signedOut = true
             lastMessage = Self.signedOutText
+            resetQuota(stateFolders: [config.stateURL])
             restartConnection()
         }
     }

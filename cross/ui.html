@@ -76,7 +76,7 @@ tbody tr:focus-visible { outline-offset:-2px; }
 <script nonce="{{NONCE}}">
 "use strict";
 // Plain DOM code, no libraries. Text from the server is only ever set with textContent.
-const SECTIONS = [["folders","Folders"],["activity","Activity"],["conflicts","Conflicts"],["trash","Deleted Files"],["account","Account"],["sync","Sync"],["drive","Drive"],["general","General"],["logs","Logs"],["about","About"]];
+const SECTIONS = [["folders","Folders"],["search","Search"],["activity","Activity"],["conflicts","Conflicts"],["trash","Deleted Files"],["account","Account"],["sync","Sync"],["drive","Drive"],["general","General"],["logs","Logs"],["about","About"]];
 let S = null;            // last /ui/api/state
 let section = "folders";
 let selected = null;     // selected folder path
@@ -236,7 +236,7 @@ function go(id, focus) {
   buildNav();
   const main = document.getElementById("main");
   main.replaceChildren();
-  ({ folders, activity, conflicts, trash, account, sync: syncPage, drive, general, logs, about })[id](main, render);
+  ({ folders, search, activity, conflicts, trash, account, sync: syncPage, drive, general, logs, about })[id](main, render);
   // A section chosen in the list: move the keyboard focus to its heading.
   const h2 = focus && main.querySelector("h2");
   if (h2) { h2.tabIndex = -1; h2.focus(); }
@@ -266,6 +266,10 @@ function drawNotices() {
   if (u && u.available) out.push(h("div", { class: "notice" },
     h("span", { text: "OpenCloud Bar " + u.latest + " is available (you have " + u.running + ")." }),
     h("button", { class: "btn primary", onclick: () => act(() => post("open", { kind: "release" })) }, "Open Release Page")));
+  const q = S.status.storage;
+  if (q && q.total > 0 && q.used >= 0.9 * q.total) out.push(h("div", { class: "notice" },
+    h("span", { text: (q.used >= q.total ? "Your OpenCloud storage is full: " : "Your OpenCloud storage is almost full: ") + fmtBytes(q.used) + " of " + fmtBytes(q.total) + " used." + (q.used >= q.total ? " New files and changes can't be uploaded until you free up space." : "") }),
+    h("button", { class: "btn", onclick: () => go("account", true) }, "Account")));
   box.replaceChildren(...out);
 }
 function setPaused(p) {
@@ -600,6 +604,50 @@ async function activity(main, r) {
   timers.push(setInterval(load, 10000));
 }
 
+// ---- Search (names in OpenCloud, all spaces)
+
+let searchTerm = "", searchRes = null;
+function search(main, r) {
+  header(main, "Search");
+  main.append(h("p", { class: "hint", text: "Finds files and folders in OpenCloud by name, in your personal space, project spaces and shares (up to 50 matches). Show in Browser opens the folder in OpenCloud; Show on This Computer appears when the item is in a kept folder and already synced here." }));
+  const field = h("input", { type: "search", placeholder: "Part of a name", value: searchTerm, "aria-label": "Search OpenCloud" });
+  const btn = h("button", { class: "btn primary", type: "submit" }, "Search");
+  const body = h("div", { id: "search-body" });
+  const form = h("form", { class: "row", onsubmit: (ev) => { ev.preventDefault(); run(); } }, field, btn);
+  main.append(form, body);
+  const draw = (res) => {
+    if (!res) { body.replaceChildren(); return; }
+    if (!res.results.length) { body.replaceChildren(h("div", { class: "card" }, "Nothing in OpenCloud has a name like that.")); return; }
+    const parts = [h("table", { "aria-label": "Search results" },
+      h("thead", {}, h("tr", {}, h("th", { text: "Name" }), h("th", { text: "Folder" }), h("th", { text: "Modified" }), h("th", { text: "" }))),
+      h("tbody", {}, res.results.map(it => h("tr", {},
+        h("td", { text: it.name + (it.dir ? "/" : "") }),
+        h("td", { class: "path", text: it.folder }),
+        h("td", { text: it.modified && Date.parse(it.modified) > 86400000 ? new Date(it.modified).toLocaleString() : "" }),
+        h("td", {},
+          it.webId ? h("button", { class: "btn", "aria-label": "Show " + it.name + " in the browser", onclick: () => act(() => post("open", { kind: "search-web", path: it.webId })) }, "Show in Browser") : null,
+          it.kept ? h("button", { class: "btn", "aria-label": "Show " + it.name + " on this computer", onclick: () => act(() => post("open", { kind: "item", folder: it.kept, path: it.rel })) }, "Show on This Computer") : null)))))];
+    if (res.total > res.results.length) parts.push(h("p", { class: "hint", text: "Showing " + res.results.length + " of " + res.total + " matches. Type more of the name to narrow it down." }));
+    body.replaceChildren(...parts);
+  };
+  const run = async () => {
+    const term = field.value.trim();
+    if (!term) { toast("Type part of a name first", true); return; }
+    searchTerm = term;
+    btn.disabled = true;
+    body.replaceChildren(h("p", { class: "hint", text: "Searching…" }));
+    let res;
+    try { res = await get("search?q=" + encodeURIComponent(term)); }
+    catch (e) { if (r === render) { btn.disabled = false; body.replaceChildren(h("div", { class: "card inline-err", text: e.message })); } return; }
+    if (r !== render) return;
+    btn.disabled = false;
+    searchRes = res;
+    draw(res);
+  };
+  draw(searchRes);
+  field.focus();
+}
+
 // ---- Conflicts
 
 function trashWhere() {
@@ -798,7 +846,7 @@ function drive(main, r) {
     main.append(h("div", { class: "card" },
       checkField("Show the OpenCloud drive", "mountEnabled", "Mounts your OpenCloud files as a drive that downloads files when you open them."),
       textField("Mount location", "mountPoint", isWin ? "A drive letter like O: or an empty folder." : "An empty folder."),
-      textField("Volume name", "volumeName"),
+      isWin ? textField("Volume name", "volumeName") : null, // rclone --volname only works on Windows and macOS
       selectField("Cache size limit", "cacheMaxSize", [["5G","5 GB"],["10G","10 GB"],["20G","20 GB"],["50G","50 GB"],["100G","100 GB"]]),
       selectField("Keep cached files for", "cacheMaxAge", [["24h","24 hours"],["72h","3 days"],["168h","7 days"]])));
     main.append(h("div", { class: "card", id: "drive-live" }));
