@@ -54,7 +54,12 @@ enum SpacesAPI {
 
     /// The WebDAV URL of a folder in a space, for the server's API (not rclone).
     static func davURL(base: String, _ s: Space, path: String) -> URL? {
-        var u = Config.origin(base) + s.davPath   // davPath already holds the server's path prefix
+        davURL(root: Config.origin(base) + s.davPath, path: path)   // davPath already holds the server's path prefix
+    }
+
+    /// The WebDAV URL of a folder below a full WebDAV root URL (server, any path prefix, dav path).
+    static func davURL(root: String, path: String) -> URL? {
+        var u = root
         for part in path.split(separator: "/") {
             u += "/" + (String(part).addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))) ?? "")
         }

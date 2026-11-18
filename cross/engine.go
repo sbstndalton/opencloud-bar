@@ -45,6 +45,9 @@ type FolderStatus struct {
 	// Quiet: a first failure that looks like a network blip; shown, but not notified (the
 	// next failed run in a row is).
 	Quiet bool `json:"quiet,omitempty"`
+	// BlockGen counts how often the folder entered the large-deletion state. Allow Large
+	// Deletion approves one specific block; a newer block is a different deletion set.
+	BlockGen int `json:"blockGen,omitempty"`
 }
 
 type Status struct {
@@ -747,6 +750,9 @@ func (e *Engine) setStateNet(f KeptFolder, state, detail string, transient bool)
 	}
 	if s := e.status[f.Key()]; s != nil {
 		s.State, s.Detail = state, detail
+		if state == StBigDeletion {
+			s.BlockGen++
+		}
 		s.Quiet = state == StFailed && transient && e.failStreak[f.Key()] == 1
 		if state == StOK {
 			s.LastSuccess = time.Now()
@@ -1457,37 +1463,37 @@ func (e *Engine) Repair(path string) (queued bool, err error) {
 }
 
 // bigDeletionDetail is the blocked-deletion detail the user sees ("on this computer", "in
-// OpenCloud", or ""), and whether the folder is blocked for that reason at all.
-func (e *Engine) bigDeletionDetail(key string) (string, bool) {
+// OpenCloud", or ""), the block's generation, and whether the folder is blocked for that reason at all.
+func (e *Engine) bigDeletionDetail(key string) (string, int, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	s := e.status[key]
 	if s == nil || s.State != StBigDeletion {
-		return "", false
+		return "", 0, false
 	}
-	return s.Detail, true
+	return s.Detail, s.BlockGen, true
 }
 
 // AllowBigDeletion applies a blocked large deletion. It is only offered (and only accepted)
 // while the folder is blocked for that reason, never when the server copy is missing. approved
-// is what the user saw and agreed to (the detail naming the side); when the action had to wait,
+// is what the user saw and agreed to (the detail naming the side) and gen that block's generation; when the action had to wait,
 // it runs only if the folder is still blocked for the same thing, else it aborts and says so.
-func (e *Engine) AllowBigDeletion(path, approved string) (queued bool, err error) {
+func (e *Engine) AllowBigDeletion(path, approved string, gen int) (queued bool, err error) {
 	f, ok := e.find(path)
 	if !ok {
 		return false, fmt.Errorf("%q isn't a kept folder", path)
 	}
 	key := f.Key()
-	detail, blocked := e.bigDeletionDetail(key)
+	detail, g, blocked := e.bigDeletionDetail(key)
 	if !blocked {
 		return false, fmt.Errorf("%q has no blocked deletion to apply", f.DisplayName())
 	}
-	if detail != approved {
+	if detail != approved || g != gen {
 		return false, fmt.Errorf("%s", changedWhileWaiting)
 	}
 	return e.exclusiveQ(func() {
 		cur, ok := e.find(key)
-		if d, blocked := e.bigDeletionDetail(key); !ok || !blocked || d != approved {
+		if d, g, blocked := e.bigDeletionDetail(key); !ok || !blocked || d != approved || g != gen {
 			e.reportAction(changedWhileWaiting)
 			return
 		}

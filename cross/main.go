@@ -397,8 +397,8 @@ func apiHandler(e *Engine, stop func(), tok string, ui *webUI) http.Handler {
 		if f, ok := e.find(p); !ok {
 			err = fmt.Errorf("%q isn't a kept folder", p)
 		} else {
-			side, _ := e.bigDeletionDetail(f.Key())
-			_, err = e.AllowBigDeletion(p, side)
+			side, gen, _ := e.bigDeletionDetail(f.Key())
+			_, err = e.AllowBigDeletion(p, side, gen)
 		}
 		reply(w, err)
 	})

@@ -257,15 +257,17 @@ func TestQueuedAllowBigDeletionChanged(t *testing.T) {
 	setBig := func(side string) {
 		e.mu.Lock()
 		e.status[f.Key()].State, e.status[f.Key()].Detail = StBigDeletion, side
+		e.status[f.Key()].BlockGen++
 		e.mu.Unlock()
 	}
+	gen := func() int { _, g, _ := e.bigDeletionDetail(f.Key()); return g }
 	setBig("on this computer")
-	if _, err := e.AllowBigDeletion("Docs", "in OpenCloud"); err == nil {
+	if _, err := e.AllowBigDeletion("Docs", "in OpenCloud", gen()); err == nil {
 		t.Error("a different approval was accepted")
 	}
 	start, end := laneHooks(e)
 	start()
-	if q, err := e.AllowBigDeletion("Docs", "on this computer"); err != nil || !q {
+	if q, err := e.AllowBigDeletion("Docs", "on this computer", gen()); err != nil || !q {
 		t.Fatalf("queued=%v %v", q, err)
 	}
 	setBig("in OpenCloud") // the deletion is now on the other side
@@ -281,7 +283,7 @@ func TestQueuedAllowBigDeletionChanged(t *testing.T) {
 	// No longer blocked at all: the same.
 	setBig("on this computer")
 	start()
-	if _, err := e.AllowBigDeletion("Docs", "on this computer"); err != nil {
+	if _, err := e.AllowBigDeletion("Docs", "on this computer", gen()); err != nil {
 		t.Fatal(err)
 	}
 	e.mu.Lock()
@@ -338,7 +340,7 @@ func TestUIActionsReportQueued(t *testing.T) {
 	start, end := laneHooks(e)
 	needRepair(t, e, "A", "B")
 	e.mu.Lock()
-	e.status["C"].State, e.status["C"].Detail = StBigDeletion, "in OpenCloud"
+	e.status["C"].State, e.status["C"].Detail, e.status["C"].BlockGen = StBigDeletion, "in OpenCloud", 3
 	e.mu.Unlock()
 
 	if resp, body := r.post("/ui/api/allow-delete", `{"path":"C"}`); resp.StatusCode != 400 {
@@ -360,10 +362,40 @@ func TestUIActionsReportQueued(t *testing.T) {
 	waitFor(t, func() bool { return idle(e) && !e.Status().Syncing })
 
 	start()
-	resp, body = r.post("/ui/api/allow-delete", `{"path":"C","side":"in OpenCloud"}`)
+	if resp, body := r.post("/ui/api/allow-delete", `{"path":"C","side":"in OpenCloud"}`); resp.StatusCode != 400 {
+		t.Errorf("allow-delete without gen: %d %s", resp.StatusCode, body)
+	}
+	resp, body = r.post("/ui/api/allow-delete", `{"path":"C","side":"in OpenCloud","gen":3}`)
 	if resp.StatusCode != 200 || !strings.Contains(body, `"queued":true`) {
 		t.Errorf("queued allow-delete: %d %s", resp.StatusCode, body)
 	}
 	end()
 	waitFor(t, func() bool { return idle(e) && !e.Status().Syncing })
+}
+
+// A block of the same side that was entered again (a different deletion set) while the Allow
+// waited is not what the user approved: the Allow aborts and never forces.
+func TestQueuedAllowBigDeletionSameSideReblocked(t *testing.T) {
+	e, fr, f := syncRig(t, false)
+	_ = os.WriteFile(filepath.Join(e.cfg.Local(f), "keep.txt"), []byte("x"), 0o600)
+	e.setState(f, StBigDeletion, "on this computer")
+	_, gen, _ := e.bigDeletionDetail(f.Key())
+	start, end := laneHooks(e)
+	start()
+	if q, err := e.AllowBigDeletion("Docs", "on this computer", gen); err != nil || !q {
+		t.Fatalf("queued=%v %v", q, err)
+	}
+	e.setState(f, StBigDeletion, "on this computer") // blocked again, same side
+	if _, g2, _ := e.bigDeletionDetail(f.Key()); g2 == gen {
+		t.Fatal("generation didn't change")
+	}
+	fr.reset()
+	end()
+	waitFor(t, func() bool { return idle(e) && !e.Status().Syncing })
+	if strings.Contains(fr.calls(), "--force") || strings.Contains(fr.calls(), "bisync") {
+		t.Errorf("ran after the folder was blocked again: %s", fr.calls())
+	}
+	if msg := e.Status().Message; msg != changedWhileWaiting {
+		t.Errorf("message %q", msg)
+	}
 }

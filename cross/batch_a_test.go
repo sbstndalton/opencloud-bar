@@ -325,11 +325,11 @@ func TestSettingsSafety(t *testing.T) {
 
 func TestAllowBigDeletionOnlyWhenBlocked(t *testing.T) {
 	e := pausedRig(t, `,"kept":[{"path":"Docs","stateName":"docs-1"}]`)
-	if _, err := e.AllowBigDeletion("Docs", ""); err == nil {
+	if _, err := e.AllowBigDeletion("Docs", "", 0); err == nil {
 		t.Error("deletion override accepted for a folder that isn't blocked")
 	}
 	e.status["Docs"].State, e.status["Docs"].Detail = StFailed, missingRemoteText
-	if _, err := e.AllowBigDeletion("Docs", ""); err == nil {
+	if _, err := e.AllowBigDeletion("Docs", "", 0); err == nil {
 		t.Error("deletion override accepted when the server copy is missing")
 	}
 }

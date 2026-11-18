@@ -465,6 +465,7 @@ func (u *webUI) handler(e *Engine) http.Handler {
 		var b struct {
 			Path string
 			Side *string
+			Gen  *int
 		}
 		if !readJSON(w, r, &b) {
 			return
@@ -473,7 +474,11 @@ func (u *webUI) handler(e *Engine) http.Handler {
 			jsonErr(w, http.StatusBadRequest, errors.New(`bad request: "side" (what was approved) is missing`))
 			return
 		}
-		q, err := e.AllowBigDeletion(b.Path, *b.Side)
+		if b.Gen == nil {
+			jsonErr(w, http.StatusBadRequest, errors.New(`bad request: "gen" (which block was approved) is missing`))
+			return
+		}
+		q, err := e.AllowBigDeletion(b.Path, *b.Side, *b.Gen)
 		jsonQueued(w, q, err)
 	})
 	mux.HandleFunc("POST /ui/api/open", func(w http.ResponseWriter, r *http.Request) { e.serveOpen(w, r) })

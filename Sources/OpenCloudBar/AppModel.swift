@@ -33,6 +33,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var driveWanted = true
     @Published private(set) var syncing = false
     @Published private(set) var status: [String: FolderStatus] = [:]   // keyed by KeptFolder.path
+    /// How often each folder entered the large-deletion state. Allow Large Deletion approves one
+    /// block; a newer block (even on the same side) is a different deletion set.
+    private var blockGen: [String: Int] = [:]
     @Published private(set) var lastMessage: String? {
         didSet { if lastMessage != oldValue { lastMessageAt = Date() } }
     }
@@ -1277,6 +1280,7 @@ final class AppModel: ObservableObject {
             } else if res.side != "Path1", await remoteMissingOrEmpty(f) {
                 status[f.key]?.state = .failed(Self.missingRemoteText)
             } else {
+                blockGen[f.key, default: 0] += 1
                 status[f.key]?.state = .bigDeletion(res.side == "Path1" ? "on this Mac" : res.side == "Path2" ? "in OpenCloud" : "")
             }
         case .filtersChanged:
@@ -1421,6 +1425,7 @@ final class AppModel: ObservableObject {
     /// Only while the folder is blocked for that reason, never when the server copy is missing.
     func allowBigDeletion(_ f: KeptFolder) {
         guard case .bigDeletion(let side) = status[f.key]?.state else { return }
+        let gen = blockGen[f.key, default: 0]
         let (where_, other) = side == "on this Mac" ? ("on this Mac", "OpenCloud")
             : side == "in OpenCloud" ? ("in OpenCloud", "this Mac") : ("on one side", "the other side")
         guard confirm("Allow a large deletion in “\(f.displayName)”?",
@@ -1430,7 +1435,8 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             // It may have waited for a sync: the folder must still be blocked for what the user approved.
             guard let cur = self.config.kept.first(where: { $0.key == f.key }),
-                  case .bigDeletion(let now)? = self.status[cur.key]?.state, now == side else {
+                  case .bigDeletion(let now)? = self.status[cur.key]?.state, now == side,
+                  self.blockGen[cur.key, default: 0] == gen else {
                 self.abortQueued(Self.changedWhileWaitingText)
                 return
             }
@@ -1549,7 +1555,9 @@ final class AppModel: ObservableObject {
                 let personal = Space(id: "", name: "OpenCloud", type: "personal", davPath: config.davPath)
                 do {
                     let token = try await Auth.accessToken(serverURL: server)
-                    guard let url = SpacesAPI.davURL(base: server, personal, path: rel) else { return "That path isn't valid." }
+                    // The same base rclone uses: the full server URL (keeping a path prefix) plus davPath.
+                    let base = server.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                    guard let url = SpacesAPI.davURL(root: base + config.davPath, path: rel) else { return "That path isn't valid." }
                     if SpacesAPI.readOnly(try await SpacesAPI.permissions(url, token: token, missing: Self.missingPersonalText)) {
                         return "“\(rel)” is read-only for you, so it can't be kept here (a kept folder syncs both ways). Open it in the browser instead."
                     }

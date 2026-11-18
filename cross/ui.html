@@ -350,7 +350,7 @@ function folderDetail(f) {
     if (confirm("Repair " + f.name + "?\n\nThis merges this computer's copy with OpenCloud. For each file the newer copy wins; the older copies are kept in the backups (.opencloud-bar-backups in OpenCloud, and on this computer). Files deleted since the last good sync will come back.")) act(() => post("repair", { path: f.path }), waits("Repair started"));
   } }, "Repair (Merge Both Sides)…"));
   if (f.state === "large-deletion") acts.push(h("button", { class: "btn", onclick: () => {
-    if (confirm("Allow a large deletion in " + f.name + "?\n\n" + deletionPrompt(f.detail))) act(() => post("allow-delete", { path: f.path, side: f.detail || "" }), waits("Started"));
+    if (confirm("Allow a large deletion in " + f.name + "?\n\n" + deletionPrompt(f.detail))) act(() => post("allow-delete", { path: f.path, side: f.detail || "", gen: f.blockGen || 0 }), waits("Started"));
   } }, "Allow Large Deletion…"));
   acts.push(h("button", { class: "btn danger", onclick: () => stopKeeping(f) }, "Stop Keeping Here…"));
   return h("div", { class: "card" },
