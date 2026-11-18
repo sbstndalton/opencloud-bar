@@ -4,6 +4,18 @@ All notable changes to OpenCloud Bar. The format follows [Keep a Changelog](http
 
 The release workflow copies the section for a tag into that tag's GitHub release, so every version heading must stay in the form `## [X.Y.Z] - date`.
 
+## [2.4.0] - 2026-11-17
+
+### Added
+- **Windows and Linux: Start at sign-in.** A checkbox in Settings ▸ General, reported by the page's API as `openAtLogin` (and set with `POST /ui/api/config`, `{"openAtLogin": true|false}`). It is the operating system's setting, read when the page asks, and is never stored in `config.json`.
+  - Windows: the `OpenCloud Bar` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, the same name the installer writes, so uninstalling still removes it. The value is the quoted path of `OpenCloud Bar.exe` (when run from `opencloud-bar.exe`, the windowed program next to it).
+  - Linux: `$XDG_CONFIG_HOME/autostart/opencloud-bar.desktop` (`~/.config/autostart` by default). If the systemd user service is enabled, the page says "Started by the systemd service", the checkbox is disabled and nothing is written, so the app can't start twice.
+- **Tests on every push and pull request** (`.github/workflows/test.yml`): `go vet` and `go test -race` on Windows, Ubuntu and macOS (`-tags notray` on the last two), and a release build of the Mac app.
+- `docs/manual-test-checklist.md`: what to try by hand on Windows 11 and Ubuntu before a release.
+
+### Fixed
+- Tests on Windows: each test's temporary home now also sets `USERPROFILE` and `LOCALAPPDATA` (Windows ignores `HOME`), and a test that relied on a read-only folder refusing new files is skipped there.
+
 ## [2.3.0] - 2026-11-17
 
 ### Added

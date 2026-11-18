@@ -45,6 +45,9 @@ type configPatch struct {
 	KeptSubfolders map[string]map[string]bool `json:"keptSubfolders"`
 	BwLimitUp      *string                    `json:"bwLimitUp"` // "" for no limit
 	BwLimitDown    *string                    `json:"bwLimitDown"`
+	// Start at sign-in is the operating system's setting (the Run key, an autostart entry), not
+	// the settings file's: it is applied by serveConfigPost and never written to config.json.
+	OpenAtLogin *bool `json:"openAtLogin"`
 }
 
 var (
@@ -382,10 +385,33 @@ func (e *Engine) serveConfigPost(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"saved": false}) // nothing changed: the file stays as it is
 		return
 	}
-	restart, err := applyConfigPatch(p)
-	if err != nil {
-		jsonErr(w, http.StatusBadRequest, err)
-		return
+	openAtLogin := p.OpenAtLogin
+	p.OpenAtLogin = nil
+	restart := false
+	if !p.isEmpty() {
+		var err error
+		if restart, err = applyConfigPatch(p); err != nil {
+			jsonErr(w, http.StatusBadRequest, err)
+			return
+		}
+	}
+	if openAtLogin != nil {
+		if st := autostartState(); !st.Supported || st.Note != "" {
+			msg := st.Note
+			if !st.Supported {
+				msg = "Start at sign-in isn't available on this system"
+			}
+			jsonErr(w, http.StatusBadRequest, errors.New(msg))
+			return
+		}
+		if err := setAutostart(*openAtLogin); err != nil {
+			jsonErr(w, http.StatusBadRequest, fmt.Errorf("couldn't change start at sign-in: %w", err))
+			return
+		}
+		if p.isEmpty() { // nothing in the settings file changed: no reload
+			writeJSON(w, 200, map[string]any{"saved": true})
+			return
+		}
 	}
 	resp := map[string]any{"saved": true, "restartRequired": restart}
 	if err := e.Reload(); err != nil {

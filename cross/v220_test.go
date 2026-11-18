@@ -22,6 +22,7 @@ import (
 // before TestMain points the environment elsewhere). No test may use it.
 var (
 	realAppDir   string
+	runHome      string       // TestMain's temporary home
 	appDirMisuse atomic.Value // string: the first real app folder a test resolved
 )
 
@@ -43,6 +44,7 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "no temporary folder:", err)
 		os.Exit(2)
 	}
+	runHome = tmp
 	for k, v := range map[string]string{"HOME": tmp, "XDG_CONFIG_HOME": filepath.Join(tmp, "cfg"),
 		"APPDATA": filepath.Join(tmp, "cfg"), "LOCALAPPDATA": filepath.Join(tmp, "local"), "USERPROFILE": tmp} {
 		_ = os.Setenv(k, v)
@@ -68,6 +70,13 @@ func TestTestsNeverUseTheRealAppFolder(t *testing.T) {
 	for _, d := range []string{appDir(), logDir(), configFile(), defaultConfig().StateDir} {
 		if underDir(d, realAppDir) {
 			t.Errorf("%s is in the real app folder %s", d, realAppDir)
+		}
+	}
+	// Everything a platform reads its folders from points into the run's temporary folder
+	// (HOME on Unix; USERPROFILE, APPDATA and LOCALAPPDATA on Windows).
+	for _, k := range []string{"HOME", "XDG_CONFIG_HOME", "APPDATA", "LOCALAPPDATA", "USERPROFILE"} {
+		if v := os.Getenv(k); !underDir(v, runHome) {
+			t.Errorf("%s=%q isn't inside the run's temporary folder", k, v)
 		}
 	}
 	// A log written after a test's own environment is gone lands in the run's temporary home.

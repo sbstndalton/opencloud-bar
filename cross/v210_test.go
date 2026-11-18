@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -269,6 +270,12 @@ func TestFileVersionsRefusesPathsOutsideKeptFolders(t *testing.T) {
 
 // A backup that can't be made: no COPY, an error.
 func TestRestoreVersionBackupFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a read-only folder (chmod 0500) still accepts new files on Windows; only Unix permissions can make this backup fail")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root can write into a read-only folder")
+	}
 	e, oc := historyRig(t)
 	writeReport(t, e, "current")
 	backups := filepath.Join(expand(e.cfg.StateDir), "backups")

@@ -75,7 +75,7 @@ On the Mac, **Settings…** (⌘,) opens these pages. Windows and Linux have the
 | **Account** | Server address and version, your name, email and username, and a storage bar with used and total space. **Open OpenCloud in Browser**, **Refresh**, and **Sign Out** (or **Sign In…**). It reads these from the server with your sign-in; nothing is shown if you're signed out. |
 | **Sync** | How often kept folders sync (1, 5, 15, 30 or 60 minutes), the exclude rules for all folders (with **Restore Defaults**), where kept folders live on this Mac (changeable only while no folder is kept), upload and download limits, and the file names the server refuses. |
 | **OpenCloud Drive** | Connect or eject the drive, its mount location, the cache size limit and age, and live cache use and pending uploads while it is connected. On the Mac, Finder names the drive after the last folder of its location (`~/OpenCloud-Drive` shows as "OpenCloud-Drive"); to rename it, choose a location with that name. Windows keeps a volume name setting (rclone's `--volname` only works on Windows and macOS, so Linux doesn't show it). |
-| **General** | Open at Login, the version, update checks (**Check Now**) and notifications (on the Mac, if macOS hasn't been asked yet, **Allow Notifications…** asks it; if macOS is blocking them, a line says so with **Open Notification Settings…**). With an SSH tunnel: whether to check the server's memory before syncing. Under **Advanced**: the SSH tunnel settings, the rclone path, **Open Settings File** and **Reload Settings**. |
+| **General** | Open at Login (Windows and Linux: **Start at sign-in**, see [Start at sign-in](#start-at-sign-in-windows-and-linux)), the version, update checks (**Check Now**) and notifications (on the Mac, if macOS hasn't been asked yet, **Allow Notifications…** asks it; if macOS is blocking them, a line says so with **Open Notification Settings…**). With an SSH tunnel: whether to check the server's memory before syncing. Under **Advanced**: the SSH tunnel settings, the rclone path, **Open Settings File** and **Reload Settings**. |
 | **Logs** | The app log, the drive and tunnel logs, and each folder's sync log: the last 3000 lines, refreshed every 2 seconds, with errors in red. **Copy**, **Reveal in Finder** and **Clear…**. |
 
 Changing exclude rules (for one folder or for all) asks first. Each affected folder then syncs right away, comparing both sides once (newer copy wins, replaced files kept in the backups, nothing deleted), without a Repair. A filters file changed by hand outside the app still asks for a Repair.
@@ -266,16 +266,22 @@ Only the refresh token is kept. The short-lived access token is cached next to t
 
 **Security trade-off of the file (macOS, and Linux without a Secret Service):** file permissions keep other users out, but not other programs running as you. Any program you run can read the token, as it can read `rclone.conf`, your SSH keys or browser data. The Keychain would ask before another program reads it, but not reliably for an ad-hoc-signed app (see above). If someone may have copied it, choose **Sign Out** (it deletes the file), and sign out of other sessions in OpenCloud's web UI to revoke it on the server. Backups of your home folder (Time Machine, for example) include the file.
 
+## Start at sign-in (Windows and Linux)
+
+**Settings ▸ General ▸ Start at sign-in** opens OpenCloud Bar when you sign in to the computer. The setting is the system's own, read each time the page asks, and isn't stored in `config.json`:
+- **Windows:** the value `OpenCloud Bar` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, the same one the installer's "Start OpenCloud Bar when I sign in" option writes (and that uninstalling removes). It runs `OpenCloud Bar.exe`, the one with no console window.
+- **Linux:** the file `opencloud-bar.desktop` in `$XDG_CONFIG_HOME/autostart` (`~/.config/autostart` by default), running this program with `run`. If the systemd service is enabled (`systemctl --user is-enabled opencloud-bar`), the page says "Started by the systemd service" and the checkbox is off limits, and no file is written: the app would start twice. Disable the service first to use the checkbox.
+
 ## Uninstall
 
 - **macOS:**
   1. Choose **Sign Out** in Settings ▸ Account if you want the sign-in removed.
   2. Quit OpenCloud Bar.
   3. Drag the app from Applications to the Trash.
-- **Windows:** use **Settings ▸ Apps ▸ Installed apps ▸ OpenCloud Bar ▸ Uninstall**. It stops the app and removes the stored sign-in. WinFsp is a separate app; uninstall it too if nothing else uses it.
+- **Windows:** use **Settings ▸ Apps ▸ Installed apps ▸ OpenCloud Bar ▸ Uninstall**. It stops the app, removes the stored sign-in and the start at sign-in entry. WinFsp is a separate app; uninstall it too if nothing else uses it.
 - **Linux:**
   1. Run `opencloud-bar logout` and `opencloud-bar quit`.
-  2. If you use the service, run `systemctl --user disable --now opencloud-bar`.
+  2. If you use the service, run `systemctl --user disable --now opencloud-bar`. If you turned on **Start at sign-in**, turn it off first (or delete `~/.config/autostart/opencloud-bar.desktop`).
   3. Run `sudo apt remove opencloud-bar`, or `sudo dnf remove opencloud-bar`.
 
 **What stays:** your kept folders (by default `~/OpenCloud/Personal`, untouched), the merge backups in OpenCloud (`.opencloud-bar-backups`), and the settings folder. Delete the settings folder by hand for a clean slate. It holds the settings, the sync state and local merge backups, the logs and the drive cache, and on macOS also the sign-in file if you didn't sign out:

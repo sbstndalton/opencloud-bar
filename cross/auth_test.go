@@ -114,9 +114,14 @@ func newFakeOIDC(t *testing.T) *fakeOIDC {
 func testEnv(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
+	// The same five TestMain sets: os.UserHomeDir reads USERPROFILE on Windows (not HOME) and
+	// os.UserConfigDir reads APPDATA, so setting only HOME would leave a Windows test sharing
+	// the run's folder with every other test.
 	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "cfg"))
 	t.Setenv("APPDATA", filepath.Join(dir, "cfg"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(dir, "local"))
 	keyring.MockInit()
 	old := openBrowser
 	openBrowser = func(u string) error {

@@ -602,6 +602,7 @@ func (e *Engine) uiState() map[string]any {
 	}
 	def := defaultConfig()
 	mountEnabled := cfg.Mounting()
+	login := autostartState() // the operating system's, not config.json's
 	return map[string]any{
 		"status":     st,
 		"folders":    folders,
@@ -636,6 +637,9 @@ func (e *Engine) uiState() map[string]any {
 			"bwLimitDown":           cfg.BwLimitDown,
 			"liveSync":              cfg.LiveOn(),
 			"syncParallel":          cfg.Parallel(),
+			"openAtLogin":           login.Enabled,
+			"openAtLoginAvailable":  login.Supported,
+			"openAtLoginNote":       login.Note,
 		},
 		"defaults": map[string]any{
 			"syncIntervalSeconds": def.SyncIntervalSeconds,
