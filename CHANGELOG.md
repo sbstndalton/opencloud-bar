@@ -4,7 +4,7 @@ All notable changes to OpenCloud Bar. The format follows [Keep a Changelog](http
 
 The release workflow copies the section for a tag into that tag's GitHub release, so every version heading must stay in the form `## [X.Y.Z] - date`.
 
-## [Unreleased]
+## [2.6.0] - 2026-11-18
 
 ### Fixed
 - **Servers that enforce a password on public links.** A `createLink` refused with 400 "password protection is enforced" is now recognised (`errPasswordRequired` in Go) and shown as "This server requires a password for public links." The Mac reopens the options dialog with the password required and the other choices kept; the Windows and Linux page marks the password field required, focuses it, explains it and keeps the expiry (`POST /ui/api/share` answers `{"error": …, "code": "password_required"}`). Capabilities aren't fetched beforehand.
@@ -17,8 +17,6 @@ The release workflow copies the section for a tag into that tag's GitHub release
 ### Tests
 - Go: a fake that answers 307 only on PATCH and DELETE (the list and GETs work): neither follows it, each is sent once, nothing reaches the other host; the enforced-password 400; date checks with an injected clock and zone; the expiry read-back mismatch; an unreadable expiry skipped for reuse. The fake's PATCH now stores the expiry, rounded like the server.
 - The Mac's DEBUG self-check (`--self-check`) covers parsing and helpers (not network calls or dialogs): it now also checks the end-of-day computation in New York and Auckland, local-day validation, the expiry read-back match, unreadable expiries and the enforced-password recognition.
-
-## [2.6.0] - 2026-11-18
 
 ### Added
 - **Reuse an existing link.** Copy Public Link (all platforms) first lists the item's permissions (`GET /graph/v1beta1/drives/{drive}/items/{id}/permissions`). If it already has a `view` link that hasn't expired, you can **Copy Existing Link** (the default) or **Make New Link**, so public links stop piling up. A link without a password comes first, then the newest. If the permissions can't be read, the link is made as before. Windows and Linux: `POST /ui/api/share` answers `{"existing": true, "url": …}` and makes nothing unless the request has `"newLink": true`.
