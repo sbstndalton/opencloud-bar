@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"golang.org/x/text/cases"
@@ -144,6 +145,9 @@ type Config struct {
 
 	// Paused stops kept-folder syncing (the drive keeps working). Same key as the macOS app.
 	Paused bool `json:"paused,omitempty"`
+	// PausedUntil (RFC 3339) ends a pause by itself: syncing resumes at that time. Empty: the
+	// pause lasts until the user resumes. Only meaningful with Paused. Same key as the macOS app.
+	PausedUntil string `json:"pausedUntil,omitempty"`
 	// CheckForUpdates: look for a new release once a day (default on).
 	CheckForUpdates *bool `json:"checkForUpdates,omitempty"`
 	// Notifications: desktop notifications for problems, automatic merges and updates (default on).
@@ -192,6 +196,15 @@ func bwLimitArgs(up, down string) []string {
 		return s
 	}
 	return []string{"--bwlimit", or(up) + ":" + or(down)}
+}
+
+// pauseEnd is when a timed pause ends (zero: it doesn't, or the value isn't a time).
+func (c Config) pauseEnd() time.Time {
+	t, err := time.Parse(time.RFC3339, c.PausedUntil)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 func (c Config) UpdateChecks() bool    { return c.CheckForUpdates == nil || *c.CheckForUpdates }

@@ -4,6 +4,28 @@ All notable changes to OpenCloud Bar. The format follows [Keep a Changelog](http
 
 The release workflow copies the section for a tag into that tag's GitHub release, so every version heading must stay in the form `## [X.Y.Z] - date`.
 
+## [2.3.0] - 2026-11-17
+
+### Added
+- **Pause for a set time.** Pause Syncing is now a choice: **For 1 Hour**, **Until Tomorrow** (the next 08:00, local time) or **Until I Resume**. Mac: the menu's **Pause Syncing** submenu (also in Settings ▸ Kept Folders). Windows and Linux: the tray's **Pause Syncing** submenu and the command line, `opencloud-bar pause --for 1h` (a length like `30m` or `8h`, from a minute to 30 days; `pause` alone lasts until `resume`). A timed pause is saved as `pausedUntil` (RFC 3339) next to `paused` in `config.json`, the same key in both apps; syncing resumes by itself at that time (checked every few seconds while the app runs, and right at the next start), and the status says "Paused until 14:30". Resuming, or pausing without a time, removes it. A clock set forward only ends the pause early.
+- **Windows and Linux: Sync Now for one folder.** A **Sync Now** button in a folder's details, `opencloud-bar sync PATH`, and `POST /ui/api/sync` with an optional `{"path": …}`. The folder goes first, like a newly kept one (also while the interval's run is going on); the others are not synced. The button is disabled while syncing is paused, while that folder syncs or waits, and until the app is set up. A request that can't start says why instead of claiming it started, and `sync PATH` then exits non-zero: syncing is paused, Repair, Allow Large Deletion, Stop Keeping or a conflict action is running or waiting, you are signed out, or the settings file has a problem; an unknown path is a 400. The top **Sync Now** (all folders) is disabled the same way, and also while any sync runs. On the Mac, the menu's **Sync Now** is disabled while paused or signed out, and a folder's **Sync Now** (its Actions menu) also while that folder syncs or waits.
+- **Mac: keep a folder without the drive.** The folder picker (Settings ▸ Kept Folders ▸ **Keep from a Space…**) has a **Personal** entry at the top, listing your own files from the server with rclone. With the browser sign-in, keeping a personal folder asks the server first, as keeping a space's folder does: a folder that isn't there is refused with "That folder doesn't exist in OpenCloud", and a read-only one can't be kept. **Keep a Folder…** in the menu opens this picker when the drive isn't connected, instead of asking you to connect it, and the first sign-in opens it too.
+
+### Changed
+- **Folder actions wait instead of greying out.** Repair, Allow Large Deletion, Stop Keeping and the conflict actions (Keep This Version, Discard) can be chosen while a sync runs. They wait for the running sync, as Repair already did on the Mac, and say so: Windows and Linux show "Waits for the running sync" (taken from the app's answer, `{"queued": true|false}` from the page's API, not from what the page last saw); the Mac menu shows "Starts when the running sync finishes". Only one action waits at a time; a second one is refused ("Another action is waiting"). When an action runs after waiting, it looks everything up again first:
+  - **Allow Large Deletion** runs only if the folder is still blocked for the same thing you were shown (the side the deletion is on: on this computer, or in OpenCloud). Otherwise nothing runs and the app says "The folder changed while waiting; check it again before allowing." (Neither app counts the deleted files, so the side is what is compared.)
+  - **Repair** runs only if the folder still needs a repair; otherwise it says the folder no longer needs a repair.
+  - **Keep This Version** and **Discard** use the folder's current location and settings; if the folder is no longer kept, or the conflict copy was synced or removed meanwhile, nothing is changed and the app says so. On Windows and Linux a failure after waiting appears in the status message ("Couldn't keep …") and the log; on the Mac it is an alert.
+  - Windows and Linux: a Repair or Allow Large Deletion that isn't needed when you choose it is refused at once. The conflict actions now queue like the others instead of being refused during a sync; **Show in Folder** never waits.
+- **Windows/Linux:** the settings page's timed pause (`POST /ui/api/pause` with `until`) has the same limits as `pause --for`: a minute to 30 days.
+- **Mac:** if ending a timed pause fails (the settings can't be saved), the app waits 5 minutes before trying again and shows one alert, not one per tick.
+- **Mac:** a message in the menu (for example "Link copied") disappears after about 2 minutes. The signed-out message stays until you sign in.
+- **Mac:** **Show in Settings…** for a folder in the menu now selects that folder in Settings ▸ Kept Folders.
+
+### Fixed
+- **Mac:** after the first sign-in the message told you to choose "Keep a Folder on This Mac…", a menu item that doesn't exist. It now opens the folder picker.
+- **Windows/Linux:** the Folders page failed to draw its folder list (a variable in the page's script hid the function that keeps focus while the list is redrawn).
+
 ## [2.2.0] - 2026-11-17
 
 ### Added

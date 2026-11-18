@@ -265,7 +265,7 @@ func TestSettingsSafety(t *testing.T) {
 	if err := e.Keep("Photos", ""); err == nil {
 		t.Error("Keep accepted with a broken settings file")
 	}
-	if err := e.Unkeep("Docs", func(error) {}); err == nil {
+	if _, err := e.Unkeep("Docs", func(error) {}); err == nil {
 		t.Error("Unkeep accepted with a broken settings file")
 	}
 	e.cfgErr = nil
@@ -325,11 +325,11 @@ func TestSettingsSafety(t *testing.T) {
 
 func TestAllowBigDeletionOnlyWhenBlocked(t *testing.T) {
 	e := pausedRig(t, `,"kept":[{"path":"Docs","stateName":"docs-1"}]`)
-	if err := e.AllowBigDeletion("Docs"); err == nil {
+	if _, err := e.AllowBigDeletion("Docs", "", 0); err == nil {
 		t.Error("deletion override accepted for a folder that isn't blocked")
 	}
 	e.status["Docs"].State, e.status["Docs"].Detail = StFailed, missingRemoteText
-	if err := e.AllowBigDeletion("Docs"); err == nil {
+	if _, err := e.AllowBigDeletion("Docs", "", 0); err == nil {
 		t.Error("deletion override accepted when the server copy is missing")
 	}
 }

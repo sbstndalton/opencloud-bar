@@ -9,7 +9,7 @@ A small menu-bar and tray app for [OpenCloud](https://opencloud.eu) on macOS, Wi
   - If the two sides drift out of sync, the folder is merged automatically: the newer copy of each file wins, and the older copy is kept in a backup folder (see [Safety](#safety)).
   - Anything that needs you says why in the menu.
 - **Browser sign-in.** You sign in on your server's own page, the same way OpenCloud's desktop client does it (OpenID Connect with PKCE). There is no app token, SSH key or rclone set-up.
-- **Pause and resume** syncing. The drive keeps working while paused.
+- **Pause and resume** syncing: for 1 hour, until tomorrow morning (08:00), or until you resume. The drive keeps working while paused.
 - **Notifications** when a folder needs attention, was merged automatically, when you are signed out, when your storage is almost full, and when an update is available. You get one per change, never repeated.
 - **Update checks** once a day (they can be turned off), plus **Check for Updates…**. A new version is announced, not installed: the app opens the release page and you download it yourself.
 - **Search** file and folder names across your OpenCloud, and **storage warnings** at 90% and when it is full (see [Search](#search) and [Storage warnings](#storage-warnings)).
@@ -43,7 +43,7 @@ Get the latest version from [Releases](https://github.com/sbstndalton/opencloud-
 
 1. Open the app. The first time, the set-up opens by itself; later, choose **Set Up / Sign In…** in the menu. On the command line, run `opencloud-bar setup https://cloud.example.com`.
 2. Enter your server address, for example `https://cloud.example.com`. Your browser opens your server's sign-in page; sign in there.
-3. In the menu, open **Kept Folders ▸ Keep a Folder…** and choose a folder to keep on this computer. Everything else stays on the drive.
+3. In the menu, open **Kept Folders ▸ Keep a Folder…** and choose a folder to keep on this computer. Everything else stays on the drive. On the Mac, the first sign-in opens the folder picker by itself, and **Keep a Folder…** opens it too while the drive is not connected (see [Spaces](#spaces)).
 
 **Settings…** opens everything else. **Sign Out** (Settings ▸ Account) forgets the sign-in on this computer.
 
@@ -58,7 +58,7 @@ The menu stays short however many folders you keep. It has:
 - the drive items;
 - a **Kept Folders (N)** submenu;
 - on the Mac, **Search OpenCloud…** (⌘F), **Copy Public Link…**, **File History…** and **Deleted Files…**;
-- **Sync Now**, **Pause Syncing** and **Settings…**;
+- **Sync Now**, **Pause Syncing** (a submenu: **For 1 Hour**, **Until Tomorrow**, **Until I Resume**; while paused it is **Resume Syncing**, and the status line says "Paused until 14:30") and **Settings…**;
 - **Check for Updates…**, **About OpenCloud Bar** and **Quit**.
 
 In **Kept Folders**, each folder shows its status or when it last synced. Folders that need attention are listed first and say why. On the Mac they open a submenu with the fix, for example **Repair**; on Windows and Linux, choosing one opens its settings. Choosing any other folder opens it.
@@ -83,7 +83,7 @@ Changing exclude rules (for one folder or for all) asks first. Each affected fol
 ### Command line (Windows and Linux)
 
 `opencloud-bar run` starts the app (`run --no-tray` on a server). Then control it with:
-- `status`, `sync`, `pause`, `resume`;
+- `status`, `sync [PATH]` (one kept folder), `pause [--for 1h]` (a length like `30m`, `1h` or `8h`, from a minute to 30 days, also for the settings page's timed pause; without it, until `resume`), `resume`;
 - `keep PATH [--local DIR]`, `unkeep PATH`, `repair PATH`, `allow-delete PATH`;
 - `connect`, `eject`, `settings`, `check-updates`, `version`, `reload`, `quit`.
 
@@ -99,7 +99,7 @@ On Windows there are two programs in one folder:
 
 Besides your personal files, OpenCloud has **project spaces** and folders **shared with you**. You can keep folders from them too:
 
-- **Mac:** Settings ▸ Kept Folders ▸ **Keep from a Space…**. Choose the space, then the folder (type its path or pick it from the list).
+- **Mac:** Settings ▸ Kept Folders ▸ **Keep from a Space…**. Choose **Personal** (your own files) or a space, then the folder (type its path or pick it from the list). The same picker opens from the menu's **Keep a Folder…** when the drive is not connected, and after the first sign-in, so a folder can be kept without the drive. Folders are listed with rclone, from the server. With the browser sign-in, keeping a personal folder asks the server first, like a space's folder: a folder that isn't there is refused ("That folder doesn't exist in OpenCloud") and a read-only one can't be kept.
 - **Windows, Linux:** in the settings window, Folders ▸ **Keep a folder by its path, or from another space**: **Load Spaces**, choose one, then type or list the folder.
 - The app asks the server which spaces you have (`/graph/v1.0/me/drives`: project spaces and accepted shares, not disabled ones). Whether the folder is read-only for you is checked when you keep it: a read-only folder is refused, since a kept folder syncs both ways. Open it in the browser instead.
 - A space's folders go to `<local folder>/<space name>/<folder>`, apart from your personal folders. The folder list shows which space each one is in. Characters Windows can't use in a folder name become `-`, and names like `CON` or `NUL` get a `_`, on every system, so the settings file works on any computer.
@@ -214,7 +214,7 @@ Kept folders sync side by side, two at a time by default (**Folders synced at on
 - A folder never syncs twice at once, and kept folders never overlap on disk.
 - Folders with a change (live sync), a newly kept folder and a folder's own **Sync Now** go first, so a small folder doesn't wait behind a long sync of a big one.
 - A folder whose sync takes more than half the interval syncs less often on the interval: at most every twice its last sync time, up to 30 minutes and never more than three intervals apart. Its status says "syncs less often: large folder". Changes (live sync) and **Sync Now** still sync it right away.
-- Repair, allowing a large deletion, Stop Keeping and conflict actions wait until every running sync has finished, and nothing new starts meanwhile.
+- Repair, allowing a large deletion, Stop Keeping and conflict actions wait until every running sync has finished, and nothing new starts meanwhile. Their buttons stay available while a sync runs: choosing one says "Waits for the running sync" (Windows and Linux) or "Starts when the running sync finishes" (Mac), and it runs when that ends. Only one action waits at a time. It then looks the folder up again: Allow Large Deletion runs only if the folder is still blocked for the same side you approved (otherwise: "The folder changed while waiting; check it again before allowing."), Repair only if the folder still needs one, and a conflict action uses the folder's current location and says when the folder is no longer kept or the conflict copy was synced away. **Sync Now** for a single folder (Windows and Linux: in the folder's details; Mac: in its Actions menu) goes first, also during the interval's run. It is disabled while syncing is paused, while that folder syncs or waits, and until you are signed in or set up; Windows and Linux also refuse it (`sync PATH` exits non-zero, saying why) while Repair, Allow Large Deletion, Stop Keeping or a conflict action runs or waits. The all-folders **Sync Now** is disabled while paused or signed out (Windows and Linux: also while any sync runs).
 - The server memory check (when it is on) runs before each batch of folders starts.
 - The menu shows "Syncing 2 folders…" while more than one syncs.
 
@@ -231,7 +231,7 @@ When a file changed on both sides between two syncs, the newer copy keeps its na
   - **Reveal in Finder** (Mac) / **Show in Folder** (Windows, Linux).
   - **Keep This Version** makes the conflict copy the file. The file it replaces goes to the local backups (`backups/` in the sync state folder, kept 30 days).
   - **Discard** moves the conflict copy to the Trash (Windows: the "Removed by OpenCloud Bar" folder in your user folder).
-- These are changes on this computer; the next sync applies them to OpenCloud. They wait while a sync is running.
+- These are changes on this computer; the next sync applies them to OpenCloud. While a sync is running they wait for it to finish and then run.
 
 ## Bandwidth limit
 
@@ -337,6 +337,7 @@ Keys the app doesn't know about are kept when it saves.
 | `kept` | kept folders: `path` (relative to the space root), `stateName`, optional `extraFilters`, and `space` (`id`, `name`, `davPath`) for a folder from a project space or share; without `space` it is the personal space | `[]` |
 | `commonFilters` | rclone filter rules for every kept folder | build folders, `node_modules`, `.venv`, temp files |
 | `paused` | kept folders don't sync | `false` |
+| `pausedUntil` | with `paused`: when the pause ends by itself, as an RFC 3339 time like `2026-11-18T08:00:00+01:00`; without it the pause lasts until you resume | none |
 | `checkForUpdates` / `notifications` | daily update check / notifications | `true` / `true` |
 | `bwLimitUp` / `bwLimitDown` | upload / download limit, like `512K` or `2M` | none |
 

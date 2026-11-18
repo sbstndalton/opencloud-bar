@@ -145,8 +145,8 @@ struct ConflictsPage: View {
                                 .font(.caption).foregroundStyle(.secondary)
                             HStack {
                                 Button("Reveal in Finder") { model.revealConflict(f, c) }.accessibilityLabel("Reveal in Finder")
-                                Button("Keep This Version…") { model.keepConflict(f, c) }.disabled(model.syncing).accessibilityLabel("Keep This Version…")
-                                Button("Discard…") { model.discardConflict(f, c) }.disabled(model.syncing).accessibilityLabel("Discard…")
+                                Button("Keep This Version…") { model.keepConflict(f, c) }.accessibilityLabel("Keep This Version…")
+                                Button("Discard…") { model.discardConflict(f, c) }.accessibilityLabel("Discard…")
                             }
                         }
                         .padding(.vertical, 2)

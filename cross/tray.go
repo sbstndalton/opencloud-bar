@@ -63,6 +63,10 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 	systray.AddSeparator()
 	syncNow := systray.AddMenuItem("Sync Now", "")
 	pause := systray.AddMenuItem("Pause Syncing", "Stop syncing kept folders; the drive keeps working")
+	pauseHour := pause.AddSubMenuItem("For 1 Hour", "")
+	pauseTomorrow := pause.AddSubMenuItem("Until Tomorrow", "Until 08:00")
+	pauseResume := pause.AddSubMenuItem("Until I Resume", "")
+	resume := systray.AddMenuItem("Resume Syncing", "")
 	settings := systray.AddMenuItem("Settings…", "")
 	checkUpdates := systray.AddMenuItem("Check for Updates…", "")
 	about := systray.AddMenuItem("About OpenCloud Bar", "")
@@ -93,12 +97,18 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 		} else {
 			update.Hide()
 		}
-		if st.Paused {
-			pause.SetTitle("Resume Syncing")
+		canPause := configured && st.ConfigError == ""
+		show(pause, !st.Paused)
+		show(resume, st.Paused)
+		enable(pause, canPause)
+		enable(resume, canPause)
+		if st.Paused && st.PausedUntil != "" {
+			if t, err := time.Parse(time.RFC3339, st.PausedUntil); err == nil {
+				resume.SetTitle("Resume Syncing (paused until " + pauseClock(t, time.Now()) + ")")
+			}
 		} else {
-			pause.SetTitle("Pause Syncing")
+			resume.SetTitle("Resume Syncing")
 		}
-		enable(pause, configured && st.ConfigError == "")
 		if !e.config().Mounting() {
 			openDrive.Hide()
 			toggleDrive.Hide()
@@ -255,8 +265,14 @@ func trayReady(e *Engine, ctx context.Context, quit func()) {
 				pickAndKeep(e)
 			case <-syncNow.ClickedCh:
 				e.SyncNow()
-			case <-pause.ClickedCh:
-				alertErr(e.SetPaused(!e.Status().Paused))
+			case <-pauseHour.ClickedCh:
+				alertErr(e.PauseUntil(time.Now().Add(time.Hour)))
+			case <-pauseTomorrow.ClickedCh:
+				alertErr(e.PauseUntil(nextMorning(time.Now())))
+			case <-pauseResume.ClickedCh:
+				alertErr(e.SetPaused(true))
+			case <-resume.ClickedCh:
+				alertErr(e.SetPaused(false))
 			case <-update.ClickedCh:
 				openRelease(e.Status().Update)
 			case <-about.ClickedCh:

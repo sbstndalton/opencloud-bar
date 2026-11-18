@@ -135,6 +135,17 @@ struct Config: Codable {
     var webdavVendor: String?  // OIDC remote's rclone vendor; default "infinitescale" (tus chunked uploads)
     /// Kept folders don't sync while paused; the drive keeps working. Same key as the Go app.
     var paused = false
+    /// RFC 3339: a pause ends by itself at this time. nil: it lasts until the user resumes. Only
+    /// meaningful with `paused`. Same key as the Go app.
+    var pausedUntil: String?
+    /// When a timed pause ends (nil: it doesn't, or the value isn't a time).
+    var pauseEnd: Date? {
+        guard let s = pausedUntil else { return nil }
+        let plain = ISO8601DateFormatter()
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return plain.date(from: s) ?? fractional.date(from: s)
+    }
     /// Look for a new release once a day.
     var checkForUpdates = true
     /// Notifications for problems, automatic merges and updates.
@@ -184,6 +195,7 @@ struct Config: Codable {
         useTunnel = try c.decodeIfPresent(Bool.self, forKey: .useTunnel)
         webdavVendor = try c.decodeIfPresent(String.self, forKey: .webdavVendor)
         paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? def.paused
+        pausedUntil = (try? c.decodeIfPresent(String.self, forKey: .pausedUntil)) ?? nil
         checkForUpdates = try c.decodeIfPresent(Bool.self, forKey: .checkForUpdates) ?? def.checkForUpdates
         notifications = try c.decodeIfPresent(Bool.self, forKey: .notifications) ?? def.notifications
         // Either case, as rclone takes it ("512k" is "512K").
@@ -448,7 +460,7 @@ struct Config: Codable {
             var merged = old
             // Optional settings this app owns are left out of the encoding when nil; drop them
             // from the old file too, so clearing one actually removes it.
-            for k in ["serverURL", "auth", "useTunnel", "webdavVendor", "bwLimitUp", "bwLimitDown", "liveSync", "syncParallel"] { merged.removeValue(forKey: k) }
+            for k in ["serverURL", "auth", "useTunnel", "webdavVendor", "bwLimitUp", "bwLimitDown", "liveSync", "syncParallel", "pausedUntil"] { merged.removeValue(forKey: k) }
             let oldKept = (old["kept"] as? [[String: Any]]) ?? []
             if let newKept = new["kept"] as? [[String: Any]] {
                 new["kept"] = newKept.map { entry -> [String: Any] in

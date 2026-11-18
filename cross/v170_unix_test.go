@@ -171,10 +171,11 @@ func TestParallelExclusiveWaits(t *testing.T) {
 	e.startSyncAllLocked(false) // A, B run; C waits
 	e.mu.Unlock()
 	waitFor(t, func() bool { return len(bisyncs(fr)) == 2 })
-	if err := e.Repair("C"); err != nil {
-		t.Fatalf("repair while syncing: %v", err)
+	needRepair(t, e, "A", "C")
+	if q, err := e.Repair("C"); err != nil || !q {
+		t.Fatalf("repair while syncing: queued=%v %v", q, err)
 	}
-	if err := e.Repair("A"); err == nil {
+	if _, err := e.Repair("A"); err == nil {
 		t.Error("a second waiting action accepted")
 	}
 	time.Sleep(300 * time.Millisecond)

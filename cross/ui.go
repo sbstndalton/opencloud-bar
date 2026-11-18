@@ -216,6 +216,15 @@ func jsonOK(w http.ResponseWriter, err error) {
 	writeJSON(w, 200, map[string]any{})
 }
 
+// jsonQueued answers an action that may have to wait for the running sync: {"queued": true|false}.
+func jsonQueued(w http.ResponseWriter, queued bool, err error) {
+	if err != nil {
+		jsonErr(w, http.StatusConflict, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"queued": queued})
+}
+
 // readJSON decodes a small request body strictly.
 func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
@@ -252,7 +261,24 @@ func (u *webUI) handler(e *Engine) http.Handler {
 
 	mux.HandleFunc("POST /ui/api/log/clear", func(w http.ResponseWriter, r *http.Request) { e.clearLog(w, r) })
 	mux.HandleFunc("POST /ui/api/config", func(w http.ResponseWriter, r *http.Request) { e.serveConfigPost(w, r) })
-	mux.HandleFunc("POST /ui/api/sync", func(w http.ResponseWriter, r *http.Request) { e.SyncNow(); jsonOK(w, nil) })
+	mux.HandleFunc("POST /ui/api/sync", func(w http.ResponseWriter, r *http.Request) {
+		var b struct {
+			Path string `json:"path"` // optional: one kept folder
+		}
+		if !readJSON(w, r, &b) {
+			return
+		}
+		if b.Path == "" {
+			e.SyncNow()
+			jsonOK(w, nil)
+			return
+		}
+		if err := e.SyncFolder(b.Path); err != nil {
+			jsonErr(w, http.StatusBadRequest, err)
+			return
+		}
+		jsonOK(w, nil)
+	})
 	mux.HandleFunc("POST /ui/api/connect", func(w http.ResponseWriter, r *http.Request) { e.Connect(); jsonOK(w, nil) })
 	mux.HandleFunc("POST /ui/api/eject", func(w http.ResponseWriter, r *http.Request) { jsonOK(w, e.Eject()) })
 	mux.HandleFunc("POST /ui/api/reload", func(w http.ResponseWriter, r *http.Request) { jsonOK(w, e.Reload()) })
@@ -289,13 +315,27 @@ func (u *webUI) handler(e *Engine) http.Handler {
 	})
 	mux.HandleFunc("POST /ui/api/pause", func(w http.ResponseWriter, r *http.Request) {
 		var b struct {
-			Paused *bool `json:"paused"`
+			Paused *bool  `json:"paused"`
+			Until  string `json:"until"` // optional with paused true: RFC 3339, the pause ends then
 		}
 		if !readJSON(w, r, &b) {
 			return
 		}
 		if b.Paused == nil {
 			jsonErr(w, http.StatusBadRequest, errors.New(`bad request: "paused" (true or false) is missing`))
+			return
+		}
+		if b.Until != "" {
+			t, err := time.Parse(time.RFC3339, b.Until)
+			if err != nil || !*b.Paused || !t.After(time.Now()) {
+				jsonErr(w, http.StatusBadRequest, errors.New(`bad request: "until" must be a future time (RFC 3339) with "paused": true`))
+				return
+			}
+			if err := checkPauseLength(time.Until(t)); err != nil {
+				jsonErr(w, http.StatusBadRequest, err)
+				return
+			}
+			jsonOK(w, e.PauseUntil(t))
 			return
 		}
 		jsonOK(w, e.SetPaused(*b.Paused))
@@ -390,7 +430,8 @@ func (u *webUI) handler(e *Engine) http.Handler {
 	mux.HandleFunc("POST /ui/api/conflict", func(w http.ResponseWriter, r *http.Request) {
 		var b struct{ Folder, File, Action string }
 		if readJSON(w, r, &b) {
-			jsonOK(w, e.ConflictAction(b.Folder, b.File, b.Action))
+			q, err := e.ConflictAction(b.Folder, b.File, b.Action)
+			jsonQueued(w, q, err)
 		}
 	})
 	mux.HandleFunc("POST /ui/api/check-updates", func(w http.ResponseWriter, r *http.Request) {
@@ -402,26 +443,43 @@ func (u *webUI) handler(e *Engine) http.Handler {
 		if !readJSON(w, r, &b) {
 			return
 		}
-		jsonOK(w, e.Unkeep(b.Path, func(err error) {
+		q, err := e.Unkeep(b.Path, func(err error) {
 			if err != nil {
 				e.setMessage(err.Error())
 			} else {
 				e.setMessage(fmt.Sprintf("%q is now only in OpenCloud", b.Path))
 			}
 			e.notify()
-		}))
+		})
+		jsonQueued(w, q, err)
 	})
 	mux.HandleFunc("POST /ui/api/repair", func(w http.ResponseWriter, r *http.Request) {
 		var b struct{ Path string }
 		if readJSON(w, r, &b) {
-			jsonOK(w, e.Repair(b.Path))
+			q, err := e.Repair(b.Path)
+			jsonQueued(w, q, err)
 		}
 	})
 	mux.HandleFunc("POST /ui/api/allow-delete", func(w http.ResponseWriter, r *http.Request) {
-		var b struct{ Path string }
-		if readJSON(w, r, &b) {
-			jsonOK(w, e.AllowBigDeletion(b.Path))
+		// Side is the blocked-deletion detail the user saw and agreed to; it must be sent.
+		var b struct {
+			Path string
+			Side *string
+			Gen  *int
 		}
+		if !readJSON(w, r, &b) {
+			return
+		}
+		if b.Side == nil {
+			jsonErr(w, http.StatusBadRequest, errors.New(`bad request: "side" (what was approved) is missing`))
+			return
+		}
+		if b.Gen == nil {
+			jsonErr(w, http.StatusBadRequest, errors.New(`bad request: "gen" (which block was approved) is missing`))
+			return
+		}
+		q, err := e.AllowBigDeletion(b.Path, *b.Side, *b.Gen)
+		jsonQueued(w, q, err)
 	})
 	mux.HandleFunc("POST /ui/api/open", func(w http.ResponseWriter, r *http.Request) { e.serveOpen(w, r) })
 
@@ -520,6 +578,7 @@ func (e *Engine) config() Config {
 
 type uiFolder struct {
 	FolderStatus
+	Queued       bool     `json:"queued"` // a sync of it waits to start
 	Remote       string   `json:"remote"`
 	ExtraFilters []string `json:"extraFilters"`
 }
@@ -530,6 +589,9 @@ func (e *Engine) uiState() map[string]any {
 	folders := make([]uiFolder, 0, len(st.Folders))
 	for _, f := range st.Folders {
 		uf := uiFolder{FolderStatus: f, Remote: f.Path, ExtraFilters: []string{}}
+		e.mu.Lock()
+		uf.Queued = e.waitingLocked(f.Path)
+		e.mu.Unlock()
 		for _, k := range cfg.Kept {
 			if k.Key() == f.Path {
 				uf.Remote = k.Path

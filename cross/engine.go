@@ -45,6 +45,9 @@ type FolderStatus struct {
 	// Quiet: a first failure that looks like a network blip; shown, but not notified (the
 	// next failed run in a row is).
 	Quiet bool `json:"quiet,omitempty"`
+	// BlockGen counts how often the folder entered the large-deletion state. Allow Large
+	// Deletion approves one specific block; a newer block is a different deletion set.
+	BlockGen int `json:"blockGen,omitempty"`
 }
 
 type Status struct {
@@ -58,7 +61,8 @@ type Status struct {
 	SignedOut    bool           `json:"signedOut,omitempty"` // browser sign-in is missing or was revoked
 	Folders      []FolderStatus `json:"folders"`
 	ConfigError  string         `json:"configError,omitempty"`
-	Paused       bool           `json:"paused,omitempty"` // kept folders don't sync until resumed
+	Paused       bool           `json:"paused,omitempty"`      // kept folders don't sync until resumed
+	PausedUntil  string         `json:"pausedUntil,omitempty"` // RFC 3339: the pause ends by itself then
 	Update       UpdateState    `json:"update"`
 	Conflicts    int            `json:"conflicts,omitempty"` // conflict copies over all kept folders
 	Storage      *quotaInfo     `json:"storage,omitempty"`   // the personal space's quota, last checked
@@ -309,6 +313,9 @@ func (e *Engine) tick() {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if !e.quitting && e.cfgErr == nil {
+		e.resumeIfDueLocked(time.Now())
+	}
 	if !e.quitting && e.cfgErr == nil && e.cfg.UpdateChecks() && e.updates.due() {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -743,6 +750,9 @@ func (e *Engine) setStateNet(f KeptFolder, state, detail string, transient bool)
 	}
 	if s := e.status[f.Key()]; s != nil {
 		s.State, s.Detail = state, detail
+		if state == StBigDeletion {
+			s.BlockGen++
+		}
 		s.Quiet = state == StFailed && transient && e.failStreak[f.Key()] == 1
 		if state == StOK {
 			s.LastSuccess = time.Now()
@@ -819,6 +829,33 @@ func (e *Engine) SyncNow() {
 	if !e.timerOn && !e.exclOn && len(e.exclQ) == 0 && e.cfgErr == nil && e.cfg.Configured() && !e.signedOut && !e.cfg.Paused {
 		e.startSyncAllLocked(true)
 	}
+}
+
+// SyncFolder syncs one kept folder now. An unknown path is an error, and so is any reason it
+// can't start (paused, an action running or waiting, no sign-in, broken settings), so the
+// caller can say why instead of claiming it started. A timer run in progress doesn't stop it:
+// the folder goes ahead of that run's waiting folders.
+func (e *Engine) SyncFolder(path string) error {
+	f, ok := e.find(path)
+	if !ok {
+		return fmt.Errorf("%q isn't a kept folder", path)
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	switch {
+	case e.cfgErr != nil:
+		return settingsBroken(e.cfgErr)
+	case !e.cfg.Configured():
+		return fmt.Errorf("OpenCloud Bar isn't set up yet")
+	case e.signedOut:
+		return fmt.Errorf("sign in to OpenCloud first")
+	case e.cfg.Paused:
+		return fmt.Errorf("syncing is paused; resume it first")
+	case e.exclOn || len(e.exclQ) > 0:
+		return fmt.Errorf("an action is running or waiting for the running sync; try again when it finishes")
+	}
+	e.startRunLocked(true, map[string]bool{f.Key(): true})
+	return nil
 }
 
 func (e *Engine) startSyncAllLocked(manual bool) { e.startRunLocked(manual, nil) }
@@ -1374,66 +1411,197 @@ func (e *Engine) find(path string) (KeptFolder, bool) {
 	return KeptFolder{}, false
 }
 
-func (e *Engine) Repair(path string) error {
+// changedWhileWaiting is shown when a queued Allow Large Deletion finds the folder different.
+const changedWhileWaiting = "The folder changed while waiting; check it again before allowing."
+
+// reportAction shows the result of an action that ran after waiting for the running sync (the
+// same way Unkeep's result does): in the status message, and the page and menu refresh.
+func (e *Engine) reportAction(msg string) {
+	e.setMessage(msg)
+	e.notify()
+}
+
+// needsRepair: the folder is marked for repair (in its state files or in the status).
+func (e *Engine) needsRepair(f KeptFolder) bool {
+	if exists(e.stateFile(f, ".needs-repair")) {
+		return true
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	s := e.status[f.Key()]
+	return s != nil && s.State == StNeedsRepair
+}
+
+// Repair merges both sides of a folder that needs it. It runs as the only sync activity; when
+// it waits (queued), it looks the folder up again and only runs if it still needs a repair.
+func (e *Engine) Repair(path string) (queued bool, err error) {
 	f, ok := e.find(path)
 	if !ok {
-		return fmt.Errorf("%q isn't a kept folder", path)
+		return false, fmt.Errorf("%q isn't a kept folder", path)
 	}
-	return e.exclusive(func() {
-		_ = os.Remove(e.stateFile(f, ".needs-repair"))
+	key := f.Key()
+	noLonger := func(name string) string { return fmt.Sprintf("%q no longer needs a repair.", name) }
+	if !e.needsRepair(f) {
+		return false, fmt.Errorf("%s", noLonger(f.DisplayName()))
+	}
+	return e.exclusiveQ(func() {
+		cur, ok := e.find(key)
+		if !ok {
+			e.reportAction(fmt.Sprintf("%q isn't kept any more; nothing was repaired.", f.DisplayName()))
+			return
+		}
+		if !e.needsRepair(cur) {
+			e.reportAction(noLonger(cur.DisplayName()))
+			return
+		}
+		_ = os.Remove(e.stateFile(cur, ".needs-repair"))
 		// A repair the user chose also resets the daily automatic-merge allowance.
-		_ = os.Remove(e.stateFile(f, ".auto-merge"))
-		_ = os.Remove(e.stateFile(f, ".drift-parked"))
-		e.syncFolder(f, modeRepair)
+		_ = os.Remove(e.stateFile(cur, ".auto-merge"))
+		_ = os.Remove(e.stateFile(cur, ".drift-parked"))
+		e.syncFolder(cur, modeRepair)
 	})
 }
 
+// bigDeletionDetail is the blocked-deletion detail the user sees ("on this computer", "in
+// OpenCloud", or ""), the block's generation, and whether the folder is blocked for that reason at all.
+func (e *Engine) bigDeletionDetail(key string) (string, int, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	s := e.status[key]
+	if s == nil || s.State != StBigDeletion {
+		return "", 0, false
+	}
+	return s.Detail, s.BlockGen, true
+}
+
 // AllowBigDeletion applies a blocked large deletion. It is only offered (and only accepted)
-// while the folder is blocked for that reason, never when the server copy is missing.
-func (e *Engine) AllowBigDeletion(path string) error {
+// while the folder is blocked for that reason, never when the server copy is missing. approved
+// is what the user saw and agreed to (the detail naming the side) and gen that block's generation; when the action had to wait,
+// it runs only if the folder is still blocked for the same thing, else it aborts and says so.
+func (e *Engine) AllowBigDeletion(path, approved string, gen int) (queued bool, err error) {
 	f, ok := e.find(path)
 	if !ok {
-		return fmt.Errorf("%q isn't a kept folder", path)
+		return false, fmt.Errorf("%q isn't a kept folder", path)
 	}
-	e.mu.Lock()
-	s := e.status[f.Key()]
-	blocked := s != nil && s.State == StBigDeletion
-	e.mu.Unlock()
+	key := f.Key()
+	detail, g, blocked := e.bigDeletionDetail(key)
 	if !blocked {
-		return fmt.Errorf("%q has no blocked deletion to apply", f.DisplayName())
+		return false, fmt.Errorf("%q has no blocked deletion to apply", f.DisplayName())
 	}
-	return e.exclusive(func() { e.syncFolder(f, modeAllowBigDeletion) })
+	if detail != approved || g != gen {
+		return false, fmt.Errorf("%s", changedWhileWaiting)
+	}
+	return e.exclusiveQ(func() {
+		cur, ok := e.find(key)
+		if d, g, blocked := e.bigDeletionDetail(key); !ok || !blocked || d != approved || g != gen {
+			e.reportAction(changedWhileWaiting)
+			return
+		}
+		e.syncFolder(cur, modeAllowBigDeletion)
+	})
 }
 
 // SetPaused pauses or resumes syncing of kept folders and remembers it in the settings.
 // The drive keeps working. A sync that is already running finishes first.
-func (e *Engine) SetPaused(paused bool) error {
+func (e *Engine) SetPaused(paused bool) error { return e.pause(paused, time.Time{}) }
+
+// PauseUntil pauses syncing until t, then it resumes by itself (the next tick after t).
+func (e *Engine) PauseUntil(t time.Time) error { return e.pause(true, t) }
+
+func (e *Engine) pause(paused bool, until time.Time) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	return e.setPauseLocked(paused, until)
+}
+
+// setPauseLocked is SetPaused with e.mu held. A zero until pauses until the user resumes.
+func (e *Engine) setPauseLocked(paused bool, until time.Time) error {
 	if e.cfgErr != nil {
 		return settingsBroken(e.cfgErr)
 	}
-	if e.cfg.Paused == paused {
+	want := ""
+	if paused && !until.IsZero() {
+		want = until.Format(time.RFC3339)
+	}
+	if e.cfg.Paused == paused && e.cfg.PausedUntil == want {
 		return nil
 	}
-	// Only "paused" changes in the file; everything else stays as it is there.
+	// Only "paused" and "pausedUntil" change in the file; everything else stays as it is there.
 	if _, err := editConfig(func(raw map[string]json.RawMessage) error {
 		if paused {
 			raw["paused"] = mustJSON(true)
 		} else {
 			delete(raw, "paused") // the default, as the macOS app writes it
 		}
+		if want != "" {
+			raw["pausedUntil"] = mustJSON(want)
+		} else {
+			delete(raw, "pausedUntil")
+		}
 		return nil
 	}); err != nil {
 		return err
 	}
 	cfg := e.cfg
-	cfg.Paused = paused
+	cfg.Paused, cfg.PausedUntil = paused, want
 	e.cfg = cfg
 	if !paused {
 		e.nextSyncAt = time.Time{} // sync right away
 	}
 	go e.notify()
+	return nil
+}
+
+// resumeIfDueLocked ends a timed pause whose time has come. A clock set back only keeps the
+// pause longer; set forward, it ends early, which is harmless.
+func (e *Engine) resumeIfDueLocked(now time.Time) {
+	if !e.cfg.Paused || e.cfg.PausedUntil == "" {
+		return
+	}
+	end := e.cfg.pauseEnd()
+	if end.IsZero() || now.Before(end) {
+		return // not due (an unreadable time never resumes by itself: Resume does)
+	}
+	if err := e.setPauseLocked(false, time.Time{}); err == nil {
+		e.logLine("the pause ended; syncing resumed")
+	}
+}
+
+// nextMorning is the next 08:00 local time after now (the "until tomorrow" pause).
+func nextMorning(now time.Time) time.Time {
+	t := time.Date(now.Year(), now.Month(), now.Day(), 8, 0, 0, 0, now.Location())
+	if !t.After(now) {
+		t = time.Date(now.Year(), now.Month(), now.Day()+1, 8, 0, 0, 0, now.Location())
+	}
+	return t
+}
+
+// pauseClock shows when a pause ends: "14:30" today, "Wed 08:00" on another day (local time).
+func pauseClock(t, now time.Time) string {
+	t, now = t.Local(), now.Local()
+	if t.Year() == now.Year() && t.YearDay() == now.YearDay() {
+		return t.Format("15:04")
+	}
+	return t.Format("Mon 15:04")
+}
+
+// pauseFor reads the CLI's --for value: a Go duration like 1h or 90m, positive, at most 30 days.
+func pauseFor(s string) (time.Duration, error) {
+	d, err := time.ParseDuration(strings.TrimSpace(s))
+	if err != nil {
+		return 0, fmt.Errorf("%q isn't a length of time (examples: 30m, 1h, 8h)", s)
+	}
+	return d, checkPauseLength(d)
+}
+
+// checkPauseLength: a timed pause is 1 minute to 30 days (the CLI and the settings page).
+func checkPauseLength(d time.Duration) error {
+	if d < time.Minute {
+		return fmt.Errorf("pause for at least a minute")
+	}
+	if d > 30*24*time.Hour {
+		return fmt.Errorf("pause for at most 30 days (720h); use pause without --for to wait until you resume")
+	}
 	return nil
 }
 
@@ -1534,18 +1702,18 @@ func (e *Engine) UnsyncedCount(path string) int {
 }
 
 // Unkeep does a final sync, then moves the local copy to the trash (or a holding folder).
-func (e *Engine) Unkeep(path string, result func(error)) error {
+func (e *Engine) Unkeep(path string, result func(error)) (queued bool, err error) {
 	f, ok := e.find(path)
 	if !ok {
-		return fmt.Errorf("%q isn't a kept folder", path)
+		return false, fmt.Errorf("%q isn't a kept folder", path)
 	}
 	e.mu.Lock()
 	bad := e.cfgErr
 	e.mu.Unlock()
 	if bad != nil {
-		return settingsBroken(bad)
+		return false, settingsBroken(bad)
 	}
-	return e.exclusive(func() {
+	return e.exclusiveQ(func() {
 		// This computer's copy is gone or empty (an unplugged disk, say): there is nothing to
 		// upload or move away, so just stop keeping it. Syncing would only fail (or worse).
 		if local := e.config().Local(f); localMissingOrEmpty(local) {
@@ -1719,6 +1887,9 @@ func (e *Engine) Status() Status {
 	st.TunnelUp = !e.cfg.Tunnel() || (e.tunnelOurs() && portOpen(e.cfg.LocalPort))
 	st.DriveMounted = e.cfg.Mounting() && isMounted(e.mountTargetLocked())
 	st.Paused = e.cfg.Paused
+	if st.Paused && !e.cfg.pauseEnd().IsZero() {
+		st.PausedUntil = e.cfg.PausedUntil
+	}
 	st.Update = e.updates.State()
 	if e.quotaShown != nil && e.cfg.OIDC() && !e.signedOut {
 		q := *e.quotaShown

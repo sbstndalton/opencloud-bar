@@ -41,8 +41,22 @@ import (
 	"time"
 )
 
+// parsePauseArgs reads what follows "pause": nothing (until resumed) or --for DURATION (also
+// --for=DURATION). It returns 0 for no duration.
+func parsePauseArgs(args []string) (time.Duration, error) {
+	switch {
+	case len(args) == 0:
+		return 0, nil
+	case len(args) == 2 && args[0] == "--for":
+		return pauseFor(args[1])
+	case len(args) == 1 && strings.HasPrefix(args[0], "--for="):
+		return pauseFor(strings.TrimPrefix(args[0], "--for="))
+	}
+	return 0, fmt.Errorf("usage: opencloud-bar pause [--for 1h]")
+}
+
 func usage() {
-	fmt.Fprintln(os.Stderr, `usage: opencloud-bar setup [URL] | logout [--force] | token | run [--no-tray] | status | sync | pause | resume |
+	fmt.Fprintln(os.Stderr, `usage: opencloud-bar setup [URL] | logout [--force] | token | run [--no-tray] | status | sync [PATH] | pause [--for 1h] | resume |
        keep PATH [--local DIR] | unkeep PATH | repair PATH | allow-delete PATH | connect | eject | settings |
        check-updates | version | reload | quit [--force]`)
 	os.Exit(2)
@@ -64,11 +78,26 @@ func main() {
 		}
 		printUpdate(u)
 	case "pause", "resume":
-		if err := call("POST", "/"+os.Args[1], nil, nil); err != nil {
+		q := url.Values{}
+		if os.Args[1] == "pause" {
+			d, err := parsePauseArgs(os.Args[2:])
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "opencloud-bar:", err)
+				os.Exit(2)
+			}
+			if d > 0 {
+				q.Set("for", d.String())
+			}
+		}
+		if err := call("POST", "/"+os.Args[1], q, nil); err != nil {
 			fail(err)
 		}
 		if os.Args[1] == "pause" {
-			fmt.Println("syncing paused (the drive keeps working); `opencloud-bar resume` restarts it")
+			if q.Get("for") != "" {
+				fmt.Println("syncing paused for " + q.Get("for") + " (the drive keeps working); `opencloud-bar resume` restarts it sooner")
+			} else {
+				fmt.Println("syncing paused (the drive keeps working); `opencloud-bar resume` restarts it")
+			}
 		} else {
 			fmt.Println("syncing resumed")
 		}
@@ -109,7 +138,11 @@ func main() {
 		}
 		printStatus(st)
 	case "sync", "connect", "eject", "reload":
-		if err := call("POST", "/"+os.Args[1], nil, nil); err != nil {
+		q := url.Values{}
+		if os.Args[1] == "sync" && len(os.Args) > 2 {
+			q.Set("path", os.Args[2]) // one kept folder
+		}
+		if err := call("POST", "/"+os.Args[1], q, nil); err != nil {
 			fail(err)
 		}
 	case "settings":
@@ -210,7 +243,11 @@ func printStatus(st Status) {
 	if st.Message != "" {
 		fmt.Println("  " + st.Message)
 	}
-	if st.Paused {
+	if st.Paused && st.PausedUntil != "" {
+		if t, err := time.Parse(time.RFC3339, st.PausedUntil); err == nil {
+			fmt.Println("  syncing is paused until " + t.Local().Format("Mon 15:04") + " (opencloud-bar resume)")
+		}
+	} else if st.Paused {
 		fmt.Println("  syncing is paused (opencloud-bar resume)")
 	}
 	if st.Update.Available {
@@ -324,7 +361,14 @@ func apiHandler(e *Engine, stop func(), tok string, ui *webUI) http.Handler {
 	mux.HandleFunc("GET /unsynced", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]int{"Unsynced": e.UnsyncedCount(r.URL.Query().Get("path"))})
 	})
-	mux.HandleFunc("POST /sync", func(w http.ResponseWriter, r *http.Request) { e.SyncNow(); reply(w, nil) })
+	mux.HandleFunc("POST /sync", func(w http.ResponseWriter, r *http.Request) {
+		if p := r.URL.Query().Get("path"); p != "" {
+			reply(w, e.SyncFolder(p))
+			return
+		}
+		e.SyncNow()
+		reply(w, nil)
+	})
 	mux.HandleFunc("POST /connect", func(w http.ResponseWriter, r *http.Request) { e.Connect(); reply(w, nil) })
 	mux.HandleFunc("POST /eject", func(w http.ResponseWriter, r *http.Request) { reply(w, e.Eject()) })
 	mux.HandleFunc("POST /reload", func(w http.ResponseWriter, r *http.Request) { reply(w, e.Reload()) })
@@ -333,17 +377,30 @@ func apiHandler(e *Engine, stop func(), tok string, ui *webUI) http.Handler {
 	})
 	mux.HandleFunc("POST /unkeep", func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Query().Get("path")
-		reply(w, e.Unkeep(p, func(err error) {
+		_, err := e.Unkeep(p, func(err error) {
 			if err != nil {
 				e.setMessage(err.Error())
 			} else {
 				e.setMessage(fmt.Sprintf("%q is now only in OpenCloud", p))
 			}
-		}))
+		})
+		reply(w, err)
 	})
-	mux.HandleFunc("POST /repair", func(w http.ResponseWriter, r *http.Request) { reply(w, e.Repair(r.URL.Query().Get("path"))) })
+	mux.HandleFunc("POST /repair", func(w http.ResponseWriter, r *http.Request) {
+		_, err := e.Repair(r.URL.Query().Get("path"))
+		reply(w, err)
+	})
 	mux.HandleFunc("POST /allow-delete", func(w http.ResponseWriter, r *http.Request) {
-		reply(w, e.AllowBigDeletion(r.URL.Query().Get("path")))
+		// The command line has no dialog: it allows what is blocked right now.
+		p := r.URL.Query().Get("path")
+		var err error
+		if f, ok := e.find(p); !ok {
+			err = fmt.Errorf("%q isn't a kept folder", p)
+		} else {
+			side, gen, _ := e.bigDeletionDetail(f.Key())
+			_, err = e.AllowBigDeletion(p, side, gen)
+		}
+		reply(w, err)
 	})
 	mux.HandleFunc("POST /quit", func(w http.ResponseWriter, r *http.Request) {
 		// Fail closed: files written to the drive may still be uploading.
@@ -363,7 +420,18 @@ func apiHandler(e *Engine, stop func(), tok string, ui *webUI) http.Handler {
 		go openSettings(r.URL.Query().Get("section"))
 		reply(w, nil)
 	})
-	mux.HandleFunc("POST /pause", func(w http.ResponseWriter, r *http.Request) { reply(w, e.SetPaused(true)) })
+	mux.HandleFunc("POST /pause", func(w http.ResponseWriter, r *http.Request) {
+		if f := r.URL.Query().Get("for"); f != "" {
+			d, err := pauseFor(f)
+			if err != nil {
+				reply(w, err)
+				return
+			}
+			reply(w, e.PauseUntil(time.Now().Add(d)))
+			return
+		}
+		reply(w, e.SetPaused(true))
+	})
 	mux.HandleFunc("POST /resume", func(w http.ResponseWriter, r *http.Request) { reply(w, e.SetPaused(false)) })
 	mux.HandleFunc("POST /check-updates", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(e.CheckForUpdates(r.Context()))

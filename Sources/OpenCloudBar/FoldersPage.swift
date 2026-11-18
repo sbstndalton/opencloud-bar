@@ -213,7 +213,8 @@ struct FoldersPage: View {
             if model.config.paused {
                 HStack {
                     Image(systemName: "pause.circle.fill").foregroundStyle(.orange).accessibilityHidden(true)
-                    Text("Syncing is paused. Kept folders don't sync until you resume; the drive keeps working.")
+                    Text(model.config.pauseEnd.map { "Paused until \(AppModel.pauseClock($0)). Kept folders don't sync until then or until you resume; the drive keeps working." }
+                         ?? "Syncing is paused. Kept folders don't sync until you resume; the drive keeps working.")
                     Spacer()
                     Button("Resume Syncing") { model.setPaused(false) }.accessibilityLabel("Resume Syncing")
                 }
@@ -228,9 +229,20 @@ struct FoldersPage: View {
                     .disabled(model.needsSignIn || !model.config.isOIDC)
                     .help("Project spaces and folders shared with you")
                     .accessibilityLabel("Keep from a Space…")
-                Button(model.config.paused ? "Resume Syncing" : "Pause Syncing") { model.setPaused(!model.config.paused) }
+                if model.config.paused {
+                    Button("Resume Syncing") { model.setPaused(false) }
+                        .disabled(model.configError != nil || !model.config.isConfigured)
+                        .accessibilityLabel("Resume Syncing")
+                } else {
+                    Menu("Pause Syncing") {
+                        Button("For 1 Hour") { model.setPaused(true, until: Date().addingTimeInterval(3600)) }
+                        Button("Until Tomorrow") { model.setPaused(true, until: AppModel.nextMorning(after: Date())) }
+                        Button("Until I Resume") { model.setPaused(true) }
+                    }
+                    .fixedSize()
                     .disabled(model.configError != nil || !model.config.isConfigured)
-                    .accessibilityLabel(model.config.paused ? "Resume Syncing" : "Pause Syncing")
+                    .accessibilityLabel("Pause Syncing")
+                }
                 Spacer()
                 if let f = selected {
                     Menu("Actions for “\(f.displayName)”") { actions(f) }.fixedSize()
@@ -243,6 +255,21 @@ struct FoldersPage: View {
                 Divider()
                 detail(f)
             }
+        }
+        .onAppear { applyRequests() }
+        .onChange(of: model.selectFolder) { _, _ in applyRequests() }
+        .onChange(of: model.showKeepPicker) { _, _ in applyRequests() }
+    }
+
+    /// What the menu asked for: a folder to select ("Show in Settings…"), the folder picker.
+    private func applyRequests() {
+        if let key = model.selectFolder {
+            if let f = model.config.kept.first(where: { $0.key == key }) { selection = f.id }
+            model.selectFolder = nil
+        }
+        if model.showKeepPicker {
+            keepingFromSpace = true
+            model.showKeepPicker = false
         }
     }
 
