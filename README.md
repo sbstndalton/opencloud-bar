@@ -71,6 +71,7 @@ On the Mac, **Settings…** (⌘,) opens these pages. Windows and Linux have the
 | Page | What it does |
 |---|---|
 | **Kept Folders** | A table of your kept folders: name, location on this Mac, status and when each last synced (this survives restarts). Per folder: Open in Finder, Open in Browser, Sync Now, Repair, Allow Large Deletion (when needed), Choose Subfolders, Copy Public Link, File History and Stop Keeping. Select a folder to see its paths, its last error and its own exclude rules. |
+| **Shared Links** | The public links you made, with **Copy**, **Change Expiry** and **Remove Link…**. See [Shared links](#shared-links). |
 | **Transfers** | The files moving right now, per kept folder, and the drive's uploads. See [Transfers](#transfers). |
 | **Conflicts** | Conflict copies (`name.conflict1`) in your kept folders, with Reveal, Keep This Version and Discard. See [Conflicts](#conflicts). |
 | **Deleted Files** | OpenCloud's trash for your personal space and the spaces you keep folders from, with **Restore**. See [Deleted files](#deleted-files). |
@@ -128,8 +129,9 @@ The list comes from OpenCloud: the folder's subfolders, and with **Show Subfolde
 
 Every sync remembers what it changed: files uploaded, downloaded, deleted on this computer (also removed from OpenCloud) and deleted in OpenCloud (also removed here). The last 500 changes are kept, in `activity.json` in the sync state folder (written safely; a damaged file is kept aside as `activity.json.bad`).
 
-- **Mac:** the menu's **Recent Changes** lists the last 10; click one to show it in Finder. Settings ▸ **Activity** lists them all, with a search field, **Show in Finder** and **Open OpenCloud**.
-- **Windows, Linux:** the tray's **Recent Changes** lists the last 5; the settings window's **Activity** section lists them all.
+- **Mac:** the menu's **Recent Changes** lists the last 10; click one to show it in Finder. Settings ▸ **Activity** lists them all, with a search field, **Show in Finder** and **Open OpenCloud**, which opens the file itself (or the folder) in OpenCloud's web interface.
+- **Windows, Linux:** the tray's **Recent Changes** lists the last 5; the settings window's **Activity** section lists them all, with **Show in Folder** and **Open OpenCloud** (the file itself in OpenCloud's web interface).
+- **Open OpenCloud** and a folder's **Open in Browser** open `<your server>/f/<file id>`, the web interface's link to that very item. The app asks the server for the item's id with a `PROPFIND` (`oc:fileid`), the same way as for share links. Without the browser sign-in there is no token to ask with, so they open the web interface's front page. A file that is no longer in OpenCloud has no button.
 - A merge (a first sync, a Repair, the automatic merge) is one line, like "Repair of Notes: 512 files compared, 2 updated", and so is a sync that changed more than 200 files ("Sync of Photos: 5000 uploaded"). Conflict copies and the backup folder aren't listed.
 - bisync doesn't report renames or moves: a renamed or moved file shows as a new file and a deleted one.
 - Syncs now log at rclone's INFO level (every file copied or deleted). Each folder's sync log starts a new file at 5 MB (the previous one is kept as `.1`), also during a long sync, and the app keeps only the start and end of a sync's output in memory.
@@ -145,13 +147,27 @@ A read-only list of what is moving right now.
 
 ## Share links
 
-**Copy Public Link…** makes a public, read-only link to a file or folder in a kept folder and copies it, so you can paste it anywhere. Anyone with the link can view and download it, without signing in. It stays active until you delete it in OpenCloud (in the browser: the file's sharing panel), unless you pick an expiry.
+**Copy Public Link…** makes a public, read-only link to a file or folder in a kept folder and copies it, so you can paste it anywhere. Anyone with the link can view and download it, without signing in. It stays active until you remove it (see [Shared links](#shared-links)), unless you pick an expiry.
 
 - **Mac:** the menu's **Copy Public Link…** (choose any file or folder in your kept folders), or a kept folder's **Copy Public Link…** in Settings ▸ Kept Folders.
 - **Windows, Linux:** select the folder in the settings window, Folders, then **Copy Public Link…** and choose the file or folder.
 - Choose when the link expires (never, 1, 7 or 30 days) and, if you like, type a password for it. The password goes to OpenCloud with the request and isn't stored or logged by OpenCloud Bar.
 - Only for kept folders that have synced, and only for files that are in OpenCloud already; with the browser sign-in only. If the server requires a password for links, it says so.
-- The link is made with OpenCloud's libre-graph API (`createLink`, type `view`); only an https link is accepted. Manage or delete links in OpenCloud's web interface.
+- **An existing link is reused.** Before it makes one, the app lists the item's permissions (`GET /graph/v1beta1/drives/<drive>/items/<id>/permissions`). If the item already has a `view` link that hasn't expired, you choose **Copy Existing Link** (the default) or **Make New Link**, so public links don't pile up. A link without a password is offered before one with a password, then the newest. If the list can't be read, the link is made as before.
+- The link is made with OpenCloud's libre-graph API (`createLink`, type `view`); only an https link is accepted. Manage or remove links under [Shared links](#shared-links).
+
+## Shared links
+
+**Mac:** Settings ▸ **Shared Links**. **Windows, Linux:** the **Shared Links** section of the settings window. It lists the public links you made, from all your files in OpenCloud (not only kept folders), read with `GET /graph/v1beta1/me/drive/sharedByMe`. Only links are listed; shares with people or groups are left out, and can't be changed from here. Each row shows the item, the link's type (View, Edit, Upload only, …, and "password" if it has one), when it expires and when it was created, and:
+
+- **Copy** copies the link's address, as the server says it now.
+- **Change Expiry** sets it to none, in 7 days, in 30 days or a date you pick (`PATCH …/permissions/<id>` with `expirationDateTime`; none sends `null`). OpenCloud keeps a link valid until the end of its last day.
+- **Remove Link…** deletes the link (`DELETE …/permissions/<id>`). It ends for everyone who has it and can't be undone, so a dialog first shows the item's name and the link's address, and Cancel is the default on the Mac. The item itself is not deleted.
+
+What the app checks before it changes anything:
+- The ids in a request never come from the page or the list on screen alone. The app asks the server for your links again and picks the entry by id; the ids it uses come from that answer. It then fetches that permission by id and goes on only if it has a link (`link`) part, so a share with a person or group is never changed or deleted. The address you confirmed must still be the link's address, or nothing is removed.
+- Ids must be one plain path segment (no `/`, `?`, `#`, `\` or `%`).
+- Everything goes over https to your server only; redirects aren't followed, so the sign-in token never goes anywhere else. With the browser sign-in only.
 
 ## Search
 

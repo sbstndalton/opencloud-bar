@@ -30,7 +30,7 @@ enum SharesAPI {
         req.setValue("application/xml", forHTTPHeaderField: "Content-Type")
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.httpBody = Data(#"<?xml version="1.0"?><d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:prop><oc:fileid/></d:prop></d:propfind>"#.utf8)
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await DavHistory.session.data(for: req)   // no redirects: the token stays with the server
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         if code == 404 { throw AuthError.message("It isn't in OpenCloud yet. Wait for the folder to sync, then try again.") }
         guard code == 207 else { throw AuthError.message("The server answered \(code).") }
@@ -47,6 +47,11 @@ enum SharesAPI {
 
     static func createLink(_ dav: URL, serverURL: String, token: String, _ o: Options, now: Date = Date()) async throws -> String {
         let id = try await fileID(dav, token: token)
+        return try await createLink(id: id, serverURL: serverURL, token: token, o, now: now)
+    }
+
+    /// Makes the view link for a file id the server gave.
+    static func createLink(id: String, serverURL: String, token: String, _ o: Options, now: Date = Date()) async throws -> String {
         guard let bang = id.lastIndex(of: "!"), bang > id.startIndex, !id.contains(where: { "/?#".contains($0) }) else {
             throw AuthError.message("The server's file id isn't one this version understands.")
         }
@@ -71,7 +76,7 @@ enum SharesAPI {
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await DavHistory.session.data(for: req)   // no redirects: the token stays with the server
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         guard code == 200 || code == 201 else {
@@ -88,12 +93,32 @@ enum SharesAPI {
         return link
     }
 
+    enum ExistingChoice { case copyExisting, makeNew, cancel }
+
+    /// The item already has a public view link: Copy Existing Link (the default) or Make New Link.
+    @MainActor
+    static func askExisting(for name: String, _ ex: SharedLinksAPI.Existing) -> ExistingChoice {
+        let a = NSAlert()
+        a.messageText = "“\(name)” already has a public link"
+        let when = ex.expires.map { "expires " + $0.formatted(date: .abbreviated, time: .omitted) } ?? "never expires"
+        a.informativeText = "A public, read-only link exists (it \(when)\(ex.password ? ", with a password" : "")). Copy it, or make a new one? A new link doesn't replace this one; manage links in Settings ▸ Shared Links."
+        a.addButton(withTitle: "Copy Existing Link")
+        a.addButton(withTitle: "Make New Link")
+        a.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        switch a.runModal() {
+        case .alertFirstButtonReturn: return .copyExisting
+        case .alertSecondButtonReturn: return .makeNew
+        default: return .cancel
+        }
+    }
+
     /// Asks for the link's expiry and an optional password. nil if cancelled.
     @MainActor
     static func askOptions(for name: String) -> Options? {
         let a = NSAlert()
         a.messageText = "Copy a public link to “\(name)”?"
-        a.informativeText = "Anyone with the link can view and download it, without signing in. It stays active until you delete it in OpenCloud (in the browser: the file's sharing panel), unless you pick an expiry. The password, if you set one, isn't stored on this Mac."
+        a.informativeText = "Anyone with the link can view and download it, without signing in. It stays active until you remove it (Settings ▸ Shared Links), unless you pick an expiry. The password, if you set one, isn't stored on this Mac."
         a.addButton(withTitle: "Create and Copy Public Link")
         a.addButton(withTitle: "Cancel")
         let expiry = NSPopUpButton(frame: .zero, pullsDown: false)

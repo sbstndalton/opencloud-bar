@@ -76,7 +76,7 @@ tbody tr:focus-visible { outline-offset:-2px; }
 <script nonce="{{NONCE}}">
 "use strict";
 // Plain DOM code, no libraries. Text from the server is only ever set with textContent.
-const SECTIONS = [["folders","Folders"],["search","Search"],["activity","Activity"],["transfers","Transfers"],["conflicts","Conflicts"],["trash","Deleted Files"],["account","Account"],["sync","Sync"],["drive","Drive"],["general","General"],["logs","Logs"],["about","About"]];
+const SECTIONS = [["folders","Folders"],["search","Search"],["links","Shared Links"],["activity","Activity"],["transfers","Transfers"],["conflicts","Conflicts"],["trash","Deleted Files"],["account","Account"],["sync","Sync"],["drive","Drive"],["general","General"],["logs","Logs"],["about","About"]];
 let S = null;            // last /ui/api/state
 let section = "folders";
 let selected = null;     // selected folder path
@@ -240,7 +240,7 @@ function go(id, focus) {
   buildNav();
   const main = document.getElementById("main");
   main.replaceChildren();
-  ({ folders, search, activity, transfers, conflicts, trash, account, sync: syncPage, drive, general, logs, about })[id](main, render);
+  ({ folders, search, links: sharedLinks, activity, transfers, conflicts, trash, account, sync: syncPage, drive, general, logs, about })[id](main, render);
   // A section chosen in the list: move the keyboard focus to its heading.
   const h2 = focus && main.querySelector("h2");
   if (h2) { h2.tabIndex = -1; h2.focus(); }
@@ -344,6 +344,7 @@ function folderDetail(f) {
   ta.value = f.extraFilters.join("\n");
   const acts = [
     h("button", { class: "btn", onclick: () => act(() => post("open", { kind: "folder", path: f.path })) }, "Open Folder"),
+    h("button", { class: "btn", disabled: !S.config.serverURL, "aria-label": "Open " + f.name + " in OpenCloud in the browser", onclick: () => act(() => post("open", { kind: "item-web", folder: f.path, path: "" })) }, "Open in Browser"),
     h("button", { class: "btn", disabled: !S.config.configured || S.status.paused || f.state === "syncing" || !!f.queued,
       onclick: () => act(() => post("sync", { path: f.path }), "Sync started") }, "Sync Now")];
   if (f.state === "needs-repair") acts.push(h("button", { class: "btn", onclick: () => {
@@ -471,6 +472,39 @@ async function loadItems(f, sub) {
   } catch (e) { toast(e.message, true); }
   drawFolders();
 }
+// Copy text to the clipboard; if the browser refuses, select it in the field and say so.
+async function copyLink(url, okMsg) {
+  try { await navigator.clipboard.writeText(url); toast(okMsg || "Link copied"); }
+  catch (e) {
+    const o = document.getElementById("share-url");
+    if (o) { o.select(); toast("Copy it from the field below"); } else toast("The browser wouldn't copy it. The link is " + url, true);
+  }
+}
+// Make (or, unless newLink, find) the public link for the chosen item. If the item already has a
+// view link the server makes none and says so; the card below then offers the choice.
+async function makeLink(f, btn, newLink) {
+  if (btn) btn.disabled = true;
+  const p = sharePick;
+  try {
+    const r = await post("share", { folder: f.path, path: p.chosen, days: parseInt(p.days, 10), password: p.pw, newLink });
+    if (r.existing) { p.existing = r; drawFolders(); return; }
+    p.pw = ""; p.url = r.url; p.existing = null;
+    drawFolders();
+    await copyLink(r.url);
+  } catch (e) { toast(e.message, true); }
+  if (btn) btn.disabled = false;
+}
+function existingCard(f) {
+  const x = sharePick.existing;
+  const when = x.expires ? "expires " + new Date(x.expires).toLocaleDateString() : "never expires";
+  const copyBtn = h("button", { class: "btn primary", onclick: async () => { sharePick.url = x.url; sharePick.existing = null; drawFolders(); await copyLink(x.url, "Existing link copied"); } }, "Copy Existing Link");
+  setTimeout(() => copyBtn.isConnected && copyBtn.focus(), 0);
+  return h("div", { class: "card", role: "group", "aria-label": "This item already has a public link" },
+    h("p", { text: "This item already has a public link (" + when + (x.password ? ", with a password" : "") + (x.created ? ", made " + new Date(x.created).toLocaleDateString() : "") + ")." }),
+    h("div", { class: "row" }, copyBtn,
+      h("button", { class: "btn", onclick: (ev) => makeLink(f, ev.currentTarget, true) }, "Make New Link"),
+      h("button", { class: "btn", onclick: () => { sharePick.existing = null; drawFolders(); } }, "Cancel")));
+}
 function shareBox(f) {
   const box = h("div", {}, h("h3", { text: "Public link" }));
   if (!sharePick || sharePick.folder !== f.path) {
@@ -482,7 +516,7 @@ function shareBox(f) {
   const sub = sharePick.sub;
   const list = h("div", { class: "card", role: "list", "aria-label": "Files and folders in " + (sub ? f.name + "/" + sub : f.name) });
   if (sub) list.append(h("div", { role: "listitem" }, h("button", { class: "btn", onclick: () => loadItems(f, sub.split("/").slice(0, -1).join("/")) }, "Up")));
-  const pick = (rel) => { sharePick.chosen = rel; drawFolders(); };
+  const pick = (rel) => { sharePick.chosen = rel; sharePick.existing = null; drawFolders(); };
   list.append(h("label", { class: "check", role: "listitem" }, (() => { const r = h("input", { type: "radio", name: "share-item" }); r.checked = sharePick.chosen === sub; r.addEventListener("change", () => pick(sub)); return r; })(),
     h("span", { text: (sub ? sub.split("/").pop() : f.name) + "/ (this folder)" })));
   for (const it of sharePick.items) {
@@ -504,18 +538,9 @@ function shareBox(f) {
     list,
     h("div", { class: "row" }, h("label", { text: "Link expires" }), days),
     h("div", { class: "row" }, h("label", { text: "Password" }), pw),
+    sharePick.existing ? existingCard(f) : null,
     h("div", { class: "row" },
-      h("button", { class: "btn primary", onclick: async (ev) => {
-        const btn = ev.currentTarget; btn.disabled = true;
-        const p = sharePick;
-        try {
-          const r = await post("share", { folder: f.path, path: p.chosen, days: parseInt(p.days, 10), password: p.pw });
-          p.pw = ""; p.url = r.url;
-          drawFolders();
-          try { await navigator.clipboard.writeText(r.url); toast("Link copied"); } catch (e) { const o = document.getElementById("share-url"); if (o) o.select(); toast("Link made; copy it from the field below"); }
-        } catch (e) { toast(e.message, true); }
-        btn.disabled = false;
-      } }, "Create and Copy Public Link"),
+      h("button", { class: "btn primary", onclick: (ev) => makeLink(f, ev.currentTarget, false) }, "Create and Copy Public Link"),
       h("button", { class: "btn", onclick: () => { sharePick = null; drawFolders(); } }, "Close")),
     h("div", { class: "row" }, out));
   return box;
@@ -609,7 +634,7 @@ async function activity(main, r) {
         h("td", { text: triggerText(c.trigger) }),
         h("td", {},
           c.exists ? h("button", { class: "btn", "aria-label": "Show " + c.path + " in its folder", onclick: () => act(() => post("open", { kind: "item", folder: c.folder, path: c.path })) }, "Show in Folder") : null,
-          c.exists && S.config.serverURL ? h("button", { class: "btn", "aria-label": "Open OpenCloud in the browser", onclick: () => act(() => post("open", { kind: "web" })) }, "Open OpenCloud") : null)))))));
+          c.exists && S.config.serverURL ? h("button", { class: "btn", "aria-label": "Open " + c.path + " in OpenCloud in the browser", onclick: () => act(() => post("open", { kind: "item-web", folder: c.folder, path: c.path })) }, "Open OpenCloud") : null)))))));
   };
   q.addEventListener("input", () => { activityFilter = q.value; draw(); });
   const load = async () => {
@@ -776,6 +801,66 @@ async function trash(main, r) {
     keepFocus(body, () => body.replaceChildren(...parts));
   };
   all.addEventListener("change", () => { trashAll = all.checked; load(); });
+  await load();
+}
+
+// ---- Shared Links: the public links you made, read from OpenCloud (GET /me/drive/sharedByMe).
+// The page only shows them. Copy, Change expiry and Remove send the ids this list was given;
+// the app looks the link up again on the server and checks it is a public link before it acts.
+const LINK_TYPES = { view: "View", edit: "Edit", upload: "Upload", createOnly: "Upload only", blocksDownload: "View, no download", internal: "Internal" };
+function linkWhen(t, withTime) {
+  const d = t ? new Date(t) : null;
+  return d && !isNaN(d) && d.getTime() > 86400000 ? (withTime ? d.toLocaleString() : d.toLocaleDateString()) : "";
+}
+async function sharedLinks(main, r) {
+  header(main, "Shared Links");
+  main.append(h("p", { class: "hint", text: "The public links you made, from all your files in OpenCloud. Links only: shares with people or groups aren't listed here. Removing a link ends it for everyone who has it, and it can't be undone." }));
+  const body = h("div", { id: "links-body" }, h("p", { class: "hint", text: "Loading…" }));
+  main.append(h("div", { class: "row" }, h("button", { class: "btn", onclick: () => load() }, "Reload")), body);
+  const load = async () => {
+    let d;
+    try { d = await get("links"); } catch (e) { if (r === render) body.replaceChildren(h("div", { class: "card" }, e.message)); return; }
+    if (r !== render) return;
+    const links = d.links || [];
+    if (!links.length) { keepFocus(body, () => body.replaceChildren(h("div", { class: "card" }, "You haven't made any public links."))); return; }
+    const setExpiry = async (l, patch) => {
+      await act(() => post("links/expiry", Object.assign({ item: l.item, perm: l.perm }, patch)), "Expiry changed");
+      load();
+    };
+    const row = (l) => {
+      const name = l.name + (l.dir ? "/" : "");
+      const sel = h("select", { "aria-label": "Change expiry of the link to " + name },
+        [["", "Change expiry…"], ["none", "No expiry"], ["7", "In 7 days"], ["30", "In 30 days"], ["date", "On a date…"]].map(([v, t]) => h("option", { value: v, text: t })));
+      const date = h("input", { type: "date", "aria-label": "Expiry date for the link to " + name });
+      const setDate = h("button", { class: "btn", "aria-label": "Set the expiry date of the link to " + name, onclick: () => { if (date.value) setExpiry(l, { date: date.value }); } }, "Set");
+      const dateBox = h("span", {}, date, setDate); dateBox.hidden = true;
+      sel.addEventListener("change", () => {
+        const v = sel.value; dateBox.hidden = v !== "date";
+        if (v === "none") setExpiry(l, { days: 0 }); else if (v === "7" || v === "30") setExpiry(l, { days: parseInt(v, 10) });
+        else if (v === "date") date.focus();
+      });
+      const exp = linkWhen(l.expires, false);
+      const expired = l.expires && Date.parse(l.expires) <= Date.now();
+      return h("tr", {},
+        h("td", { class: "path", text: name }),
+        h("td", { text: (LINK_TYPES[l.type] || l.type || "Link") + (l.password ? ", password" : "") }),
+        h("td", { text: exp ? exp + (expired ? " (expired)" : "") : "Never" }),
+        h("td", { text: linkWhen(l.created, true) }),
+        h("td", {},
+          h("button", { class: "btn", "aria-label": "Copy the link to " + name, onclick: async () => {
+            try { const c = await post("links/copy", { item: l.item, perm: l.perm }); await copyLink(c.url); } catch (e) { toast(e.message, true); }
+          } }, "Copy"),
+          sel, dateBox,
+          h("button", { class: "btn danger", "aria-label": "Remove the link to " + name, onclick: async () => {
+            if (!confirm("Remove the public link to " + name + "?\n\n" + l.url + "\n\nAnyone who has this link loses access to it. This can't be undone.")) return;
+            await act(() => post("links/remove", { item: l.item, perm: l.perm, url: l.url }), "Link removed");
+            load();
+          } }, "Remove Link")));
+    };
+    keepFocus(body, () => body.replaceChildren(h("table", { "aria-label": "Shared links" },
+      h("thead", {}, h("tr", {}, h("th", { text: "Item" }), h("th", { text: "Type" }), h("th", { text: "Expires" }), h("th", { text: "Created" }), h("th", { text: "" }))),
+      h("tbody", {}, links.map(row)))));
+  };
   await load();
 }
 

@@ -21,6 +21,7 @@ enum Launcher {
         if CommandLine.arguments.contains("--token") { Auth.runTokenMode() }
         #if DEBUG
         StatsFilter.selfCheck()   // DEBUG builds only: traps if the Swift parser drifts from the Go one
+        SharedLinksAPI.selfCheck()
         if CommandLine.arguments.contains("--self-check") { print("self-check ok"); exit(0) }
         #endif
         guard SingleInstance.claim() else {

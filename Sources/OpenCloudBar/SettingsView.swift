@@ -2,12 +2,13 @@ import AppKit
 import SwiftUI
 
 enum SettingsPage: String, CaseIterable, Identifiable {
-    case folders, activity, transfers, conflicts, trash, account, sync, drive, general, logs
+    case folders, activity, links, transfers, conflicts, trash, account, sync, drive, general, logs
     var id: String { rawValue }
     var title: String {
         switch self {
         case .folders: return "Kept Folders"
         case .activity: return "Activity"
+        case .links: return "Shared Links"
         case .transfers: return "Transfers"
         case .conflicts: return "Conflicts"
         case .trash: return "Deleted Files"
@@ -22,6 +23,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         switch self {
         case .folders: return "folder"
         case .activity: return "clock.arrow.circlepath"
+        case .links: return "link"
         case .transfers: return "list.bullet.rectangle"   // no arrows: rclone doesn't say which way a file goes
         case .conflicts: return "doc.on.doc"
         case .trash: return "trash"
@@ -120,6 +122,7 @@ struct SettingsView: View {
                 switch router.page {
                 case .folders: FoldersPage(model: model, store: store)
                 case .activity: ActivityPage(model: model)
+                case .links: SharedLinksPage(model: model)
                 case .transfers: TransfersPage(model: model)
                 case .conflicts: ConflictsPage(model: model)
                 case .trash: DeletedFilesPage(model: model)

@@ -4,6 +4,22 @@ All notable changes to OpenCloud Bar. The format follows [Keep a Changelog](http
 
 The release workflow copies the section for a tag into that tag's GitHub release, so every version heading must stay in the form `## [X.Y.Z] - date`.
 
+## [2.6.0] - 2026-11-18
+
+### Added
+- **Reuse an existing link.** Copy Public Link (all platforms) first lists the item's permissions (`GET /graph/v1beta1/drives/{drive}/items/{id}/permissions`). If it already has a `view` link that hasn't expired, you can **Copy Existing Link** (the default) or **Make New Link**, so public links stop piling up. A link without a password comes first, then the newest. If the permissions can't be read, the link is made as before. Windows and Linux: `POST /ui/api/share` answers `{"existing": true, "url": …}` and makes nothing unless the request has `"newLink": true`.
+- **Shared Links.** Mac: Settings ▸ **Shared Links**. Windows and Linux: a **Shared Links** section (`GET /ui/api/links`, `POST /ui/api/links/copy`, `/links/expiry` and `/links/remove`). It lists the links you made (`GET /graph/v1beta1/me/drive/sharedByMe`; links only, not shares with people or groups) with the item, type, expiry and created date, and:
+  - **Copy**;
+  - **Change Expiry**: none, 7 days, 30 days or a date (`PATCH …/permissions/{id}`, `expirationDateTime`, `null` for none);
+  - **Remove Link…** (`DELETE …/permissions/{id}`), after a confirm dialog with the item's name and the link's address.
+  Before a PATCH or DELETE the app looks the link up again: the ids sent come from the server's own list, not from the page; the permission is fetched by id and must have a `link` part, or nothing is changed (a user or group share is never touched); the address that was confirmed must still be the link's. Ids must be one plain path segment. The no-redirect clients and https only are kept; the token goes only to the configured server.
+- Tests (Go, a fake graph server): the list keeps links and drops user and group shares; an existing view link is found and reused; the PATCH body; no DELETE when the fresh permission has no link part; the permission is fetched again before the DELETE; no request to another host; redirects aren't followed; ids are validated.
+
+### Changed
+- **Open OpenCloud** (Activity rows) and a folder's **Open in Browser** now open the item itself, `<server>/f/<file id>`, using the item's `oc:fileid` from a `PROPFIND`, not the web interface's front page. Without the browser sign-in they open the front page as before. This ends the known limit "Open OpenCloud opens OpenCloud's web interface, not the file itself."
+- Mac: the share-link requests (the `PROPFIND` and `createLink`) now use the client that doesn't follow redirects, like the other requests.
+- Copy Public Link's text says where to remove a link (Shared Links) instead of the browser's sharing panel.
+
 ## [2.5.0] - 2026-11-18
 
 ### Added
