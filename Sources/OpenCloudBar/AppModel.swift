@@ -38,6 +38,11 @@ final class AppModel: ObservableObject {
     }
     private var lastMessageAt = Date()
     private var resumingPause = false
+    /// A timed pause that couldn't be ended (the settings couldn't be saved) is tried again
+    /// after this, and the user is told once.
+    private var resumeRetryAt = Date.distantPast
+    private var resumeAlerted = false
+    private static let resumeRetryDelay: TimeInterval = 300
     /// A one-off message ("Link copied") leaves the menu after this long.
     private static let messageLifetime: TimeInterval = 120
     /// Settings ▸ Kept Folders: select this folder (its key) when the page shows; the page clears it.
@@ -291,9 +296,9 @@ final class AppModel: ObservableObject {
             lastMessage = nil
         }
         // A timed pause ends by itself. A clock set back only keeps it longer; forward, it ends early.
-        if config.paused, let end = config.pauseEnd, Date() >= end, configError == nil, !resumingPause {
+        if config.paused, let end = config.pauseEnd, Date() >= end, configError == nil, !resumingPause, Date() >= resumeRetryAt {
             resumingPause = true
-            setPaused(false)
+            setPaused(false, automatic: true)
         }
         checkNotifications()
         if !quitting, configError == nil, config.checkForUpdates, Updates.due(updateState), Date() >= updateRetryAt {
@@ -1160,20 +1165,28 @@ final class AppModel: ObservableObject {
     }
 
     /// Runs a conflict action as the only sync activity (like Stop Keeping): now, or when the
-    /// running syncs end (the menu says so). The copy is looked up again then, because a sync
-    /// can have moved or removed it meanwhile; moving files under a running bisync could reach
-    /// OpenCloud as a deletion. Syncs wait until it is done.
+    /// running syncs end (the menu says so). The folder and the copy are looked up again then,
+    /// because a sync can have moved or removed the copy meanwhile (moving files under a running
+    /// bisync could reach OpenCloud as a deletion), and the folder can have been removed or its
+    /// settings changed. `work` gets the folder's current local copy, a fresh backup folder
+    /// and the conflict copy. Syncs wait until it is done.
     private func conflictAction(_ f: KeptFolder, _ item: ConflictItem, failure: String,
-                                _ work: @escaping @Sendable () throws -> Void, done: @escaping @MainActor () -> Void) {
+                                _ work: @escaping @Sendable (_ local: URL, _ backupDir: URL, _ loser: URL) throws -> Void,
+                                done: @escaping @MainActor () -> Void) {
         _ = exclusive { [self] in
             do {
+                guard let cur = self.config.kept.first(where: { $0.key == f.key }) else {
+                    throw AuthError.message("“\(f.displayName)” isn't kept on this Mac any more; nothing was changed.")
+                }
+                let local = self.config.localURL(cur)
+                let backupDir = Backups.localDir(self.config.stateURL, cur.stateName, Backups.stamp())
                 // It may have waited for a sync: is the copy still there?
-                guard let (loser, _) = Conflicts.target(self.config.localURL(f), item),
+                guard let (loser, _) = Conflicts.target(local, item),
                       FileManager.default.fileExists(atPath: loser.path) else {
                     throw AuthError.message("The conflict copy is gone (synced or removed meanwhile).")
                 }
                 // Off the main thread: a move to another disk copies the whole file.
-                try await Task.detached { try work() }.value
+                try await Task.detached { try work(local, backupDir, loser) }.value
                 done()
             } catch {
                 self.alert(failure, error.localizedDescription)
@@ -1187,18 +1200,16 @@ final class AppModel: ObservableObject {
         guard confirm("Keep this version of “\(c.original)”?",
                       "The conflict copy replaces the current file. The current file is kept in the backups (in the app's state folder, for 30 days). The next sync sends the change to OpenCloud.",
                       button: "Keep This Version") else { return }
-        let local = config.localURL(f)
-        let backupDir = Backups.localDir(config.stateURL, f.stateName, Backups.stamp())
-        conflictAction(f, c, failure: "Couldn't keep that version", {
+        conflictAction(f, c, failure: "Couldn't keep that version", { local, backupDir, _ in
             try Conflicts.keep(c, local: local, backupDir: backupDir)
         }, done: { Log.line("\(f.path): conflict kept: \(c.file)") })
     }
 
     /// Discard: the conflict copy goes to the Trash.
     func discardConflict(_ f: KeptFolder, _ c: ConflictItem) {
-        guard let (loser, _) = Conflicts.target(config.localURL(f), c),
+        guard let (_, _) = Conflicts.target(config.localURL(f), c),
               confirm("Discard “\(c.file)”?", "It moves to the Trash. The next sync removes it from OpenCloud too.", button: "Discard") else { return }
-        conflictAction(f, c, failure: "Couldn't move it to the Trash", {
+        conflictAction(f, c, failure: "Couldn't move it to the Trash", { _, _, loser in
             try FileManager.default.trashItem(at: loser, resultingItemURL: nil)
         }, done: { Log.line("\(f.path): conflict discarded: \(c.file)") })
     }
@@ -1390,11 +1401,20 @@ final class AppModel: ObservableObject {
                       button: "Repair") else { return }
         _ = exclusive { [weak self] in
             guard let self else { return }
-            try? FileManager.default.removeItem(at: self.stateFile(f, ".needs-repair"))
+            // It may have waited for a sync: look the folder up again, and repair only if it still needs it.
+            guard let cur = self.config.kept.first(where: { $0.key == f.key }) else {
+                self.abortQueued("“\(f.displayName)” isn't kept on this Mac any more; nothing was repaired.")
+                return
+            }
+            guard self.needsRepairReason(cur) != nil else {
+                self.abortQueued("“\(cur.displayName)” no longer needs a repair.")
+                return
+            }
+            try? FileManager.default.removeItem(at: self.stateFile(cur, ".needs-repair"))
             // A repair the user chose also resets the daily automatic-merge allowance.
-            try? FileManager.default.removeItem(at: self.stateFile(f, ".auto-merge"))
-            try? FileManager.default.removeItem(at: self.stateFile(f, ".drift-parked"))
-            await self.syncFolder(f, mode: .repair)
+            try? FileManager.default.removeItem(at: self.stateFile(cur, ".auto-merge"))
+            try? FileManager.default.removeItem(at: self.stateFile(cur, ".drift-parked"))
+            await self.syncFolder(cur, mode: .repair)
         }
     }
 
@@ -1407,8 +1427,24 @@ final class AppModel: ObservableObject {
                       "More than half of this folder's files were deleted \(where_). If that was on purpose, the deletion will be applied to \(other) too. If not, choose Cancel and restore the files first.",
                       button: "Apply Deletion") else { return }
         _ = exclusive { [weak self] in
-            await self?.syncFolder(f, mode: .allowBigDeletion)
+            guard let self else { return }
+            // It may have waited for a sync: the folder must still be blocked for what the user approved.
+            guard let cur = self.config.kept.first(where: { $0.key == f.key }),
+                  case .bigDeletion(let now)? = self.status[cur.key]?.state, now == side else {
+                self.abortQueued(Self.changedWhileWaitingText)
+                return
+            }
+            await self.syncFolder(cur, mode: .allowBigDeletion)
         }
+    }
+
+    nonisolated static let missingPersonalText = "That folder doesn't exist in OpenCloud"
+    nonisolated static let changedWhileWaitingText = "The folder changed while waiting; check it again before allowing."
+
+    /// A queued action that found things changed: shown in the menu and as an alert, not silent.
+    private func abortQueued(_ text: String) {
+        lastMessage = text
+        alert("Nothing was changed", text)
     }
 
     // MARK: - Adding and removing kept folders
@@ -1505,10 +1541,25 @@ final class AppModel: ObservableObject {
         if rel.isEmpty { return "Choose a folder in the space (the whole space can't be kept)." }
         if let p = KeptFolder.problem(newPath: rel) { return p.prefix(1).uppercased() + p.dropFirst() + "." }
         if rel.utf8.count > 90 { return "That path is too long (rclone's limit is about 90 characters)." }
+        let server = config.serverURL ?? ""
         guard let space else {
+            // The personal space gets the same check as a space (browser sign-in only: the token is
+            // the sign-in's). A missing folder is refused here instead of failing at the first sync.
+            if config.isOIDC {
+                let personal = Space(id: "", name: "OpenCloud", type: "personal", davPath: config.davPath)
+                do {
+                    let token = try await Auth.accessToken(serverURL: server)
+                    guard let url = SpacesAPI.davURL(base: server, personal, path: rel) else { return "That path isn't valid." }
+                    if SpacesAPI.readOnly(try await SpacesAPI.permissions(url, token: token, missing: Self.missingPersonalText)) {
+                        return "“\(rel)” is read-only for you, so it can't be kept here (a kept folder syncs both ways). Open it in the browser instead."
+                    }
+                } catch {
+                    if case AuthError.message(let m) = error, m == Self.missingPersonalText { return m }   // a 404
+                    return "Couldn't check “\(rel)”: \(error.localizedDescription)"
+                }
+            }
             return addKept(KeptFolder(path: rel, stateName: KeptFolder.makeStateName(for: rel)))
         }
-        let server = config.serverURL ?? ""
         do {
             let token = try await Auth.accessToken(serverURL: server)
             guard let url = SpacesAPI.davURL(base: server, space, path: rel) else { return "That path isn't valid." }
@@ -1717,14 +1768,23 @@ final class AppModel: ObservableObject {
     /// Pauses or resumes syncing of kept folders (saved in the settings). The drive keeps
     /// working; a sync that is already running finishes first.
     /// `until` makes it a timed pause: syncing resumes by itself then (the supervisor's tick).
-    func setPaused(_ paused: Bool, until: Date? = nil) {
+    /// `automatic` is the supervisor ending a timed pause: if that fails it waits 5 minutes before
+    /// trying again and shows one alert, not one per tick.
+    func setPaused(_ paused: Bool, until: Date? = nil, automatic: Bool = false) {
         Task {
             defer { resumingPause = false }
             let stamp = paused ? until.map { ISO8601DateFormatter().string(from: $0) } : nil
             if let e = await updateConfig({ $0.paused = paused; $0.pausedUntil = stamp }) {
+                if automatic {
+                    resumeRetryAt = Date().addingTimeInterval(Self.resumeRetryDelay)
+                    guard !resumeAlerted else { return }
+                    resumeAlerted = true
+                }
                 alert(paused ? "Couldn't pause syncing" : "Couldn't resume syncing", e)
                 return
             }
+            resumeRetryAt = .distantPast
+            resumeAlerted = false
             Log.line(paused ? "syncing paused" + (stamp.map { " until \($0)" } ?? "") : "syncing resumed")
             if !paused { nextSyncAt = Date(); tick() }
         }

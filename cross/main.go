@@ -377,17 +377,30 @@ func apiHandler(e *Engine, stop func(), tok string, ui *webUI) http.Handler {
 	})
 	mux.HandleFunc("POST /unkeep", func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Query().Get("path")
-		reply(w, e.Unkeep(p, func(err error) {
+		_, err := e.Unkeep(p, func(err error) {
 			if err != nil {
 				e.setMessage(err.Error())
 			} else {
 				e.setMessage(fmt.Sprintf("%q is now only in OpenCloud", p))
 			}
-		}))
+		})
+		reply(w, err)
 	})
-	mux.HandleFunc("POST /repair", func(w http.ResponseWriter, r *http.Request) { reply(w, e.Repair(r.URL.Query().Get("path"))) })
+	mux.HandleFunc("POST /repair", func(w http.ResponseWriter, r *http.Request) {
+		_, err := e.Repair(r.URL.Query().Get("path"))
+		reply(w, err)
+	})
 	mux.HandleFunc("POST /allow-delete", func(w http.ResponseWriter, r *http.Request) {
-		reply(w, e.AllowBigDeletion(r.URL.Query().Get("path")))
+		// The command line has no dialog: it allows what is blocked right now.
+		p := r.URL.Query().Get("path")
+		var err error
+		if f, ok := e.find(p); !ok {
+			err = fmt.Errorf("%q isn't a kept folder", p)
+		} else {
+			side, _ := e.bigDeletionDetail(f.Key())
+			_, err = e.AllowBigDeletion(p, side)
+		}
+		reply(w, err)
 	})
 	mux.HandleFunc("POST /quit", func(w http.ResponseWriter, r *http.Request) {
 		// Fail closed: files written to the drive may still be uploading.

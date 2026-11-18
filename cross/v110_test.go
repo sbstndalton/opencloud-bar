@@ -77,11 +77,11 @@ func TestConflictKeepAndDiscard(t *testing.T) {
 	}
 	// Only listed copies, inside the folder.
 	for _, bad := range []string{"../x.conflict1", "n/todo.txt", "nope.txt.conflict1", "/etc/passwd.conflict1"} {
-		if err := e.ConflictAction("Docs", bad, "keep"); err == nil {
+		if _, err := e.ConflictAction("Docs", bad, "keep"); err == nil {
 			t.Errorf("accepted %q", bad)
 		}
 	}
-	if err := e.ConflictAction("Docs", "n/todo.txt.conflict1", "keep"); err != nil {
+	if _, err := e.ConflictAction("Docs", "n/todo.txt.conflict1", "keep"); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(filepath.Join(local, "n", "todo.txt")); string(b) != "loser" {
@@ -98,7 +98,7 @@ func TestConflictKeepAndDiscard(t *testing.T) {
 	}
 
 	_ = os.MkdirAll(filepath.Join(home(), ".Trash"), 0o700) // macOS test runs; Linux uses XDG
-	if err := e.ConflictAction("Docs", "other.txt.conflict1", "discard"); err != nil {
+	if _, err := e.ConflictAction("Docs", "other.txt.conflict1", "discard"); err != nil {
 		t.Fatal(err)
 	}
 	if exists(filepath.Join(local, "other.txt.conflict1")) {

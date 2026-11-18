@@ -62,7 +62,7 @@ enum SpacesAPI {
     }
 
     /// A folder's oc:permissions (PROPFIND, depth 0), like "RDNVCK"; nil if the server didn't say.
-    static func permissions(_ url: URL, token: String) async throws -> String? {
+    static func permissions(_ url: URL, token: String, missing: String = "That folder doesn't exist in the space.") async throws -> String? {
         var req = URLRequest(url: url)
         req.httpMethod = "PROPFIND"
         req.timeoutInterval = 20
@@ -72,7 +72,7 @@ enum SpacesAPI {
         req.httpBody = Data(#"<?xml version="1.0"?><d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:prop><oc:permissions/></d:prop></d:propfind>"#.utf8)
         let (data, resp) = try await URLSession.shared.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-        if code == 404 { throw AuthError.message("That folder doesn't exist in the space.") }
+        if code == 404 { throw AuthError.message(missing) }
         guard code == 207 else { throw AuthError.message("The server answered \(code).") }
         let text = String(decoding: data, as: UTF8.self)
         guard let r = text.range(of: #"<[A-Za-z0-9]*:?permissions>([^<]*)</"#, options: .regularExpression) else { return nil }

@@ -85,7 +85,7 @@ func TestLocalEmptyBigChangeNeverForces(t *testing.T) {
 	if s := state(e, f); s.State != StFailed || s.Detail != missingLocalText("Docs") {
 		t.Fatalf("local empty: %+v", s)
 	}
-	if err := e.AllowBigDeletion("Docs"); err == nil {
+	if _, err := e.AllowBigDeletion("Docs", "on this computer"); err == nil {
 		t.Fatal("large deletion offered for an empty local copy")
 	}
 
@@ -100,7 +100,7 @@ func TestLocalEmptyBigChangeNeverForces(t *testing.T) {
 	}
 	_ = os.Remove(filepath.Join(e.cfg.Local(f), "keep.txt")) // the disk went away meanwhile
 	fr.reset()
-	if err := e.AllowBigDeletion("Docs"); err != nil {
+	if _, err := e.AllowBigDeletion("Docs", "on this computer"); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, func() bool { return !e.Status().Syncing })
@@ -376,7 +376,7 @@ func TestUnkeepMissingLocalCopy(t *testing.T) {
 	e, fr, f := syncRig(t, false)
 	_ = os.RemoveAll(e.cfg.Local(f))
 	done := make(chan error, 1)
-	if err := e.Unkeep("Docs", func(err error) { done <- err }); err != nil {
+	if _, err := e.Unkeep("Docs", func(err error) { done <- err }); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-done; err != nil {

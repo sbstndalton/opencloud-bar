@@ -83,7 +83,7 @@ Changing exclude rules (for one folder or for all) asks first. Each affected fol
 ### Command line (Windows and Linux)
 
 `opencloud-bar run` starts the app (`run --no-tray` on a server). Then control it with:
-- `status`, `sync [PATH]` (one kept folder), `pause [--for 1h]` (a length like `30m`, `1h` or `8h`, from a minute to 30 days; without it, until `resume`), `resume`;
+- `status`, `sync [PATH]` (one kept folder), `pause [--for 1h]` (a length like `30m`, `1h` or `8h`, from a minute to 30 days, also for the settings page's timed pause; without it, until `resume`), `resume`;
 - `keep PATH [--local DIR]`, `unkeep PATH`, `repair PATH`, `allow-delete PATH`;
 - `connect`, `eject`, `settings`, `check-updates`, `version`, `reload`, `quit`.
 
@@ -99,7 +99,7 @@ On Windows there are two programs in one folder:
 
 Besides your personal files, OpenCloud has **project spaces** and folders **shared with you**. You can keep folders from them too:
 
-- **Mac:** Settings ▸ Kept Folders ▸ **Keep from a Space…**. Choose **Personal** (your own files) or a space, then the folder (type its path or pick it from the list). The same picker opens from the menu's **Keep a Folder…** when the drive is not connected, and after the first sign-in, so a folder can be kept without the drive. Folders are listed with rclone, from the server.
+- **Mac:** Settings ▸ Kept Folders ▸ **Keep from a Space…**. Choose **Personal** (your own files) or a space, then the folder (type its path or pick it from the list). The same picker opens from the menu's **Keep a Folder…** when the drive is not connected, and after the first sign-in, so a folder can be kept without the drive. Folders are listed with rclone, from the server. With the browser sign-in, keeping a personal folder asks the server first, like a space's folder: a folder that isn't there is refused ("That folder doesn't exist in OpenCloud") and a read-only one can't be kept.
 - **Windows, Linux:** in the settings window, Folders ▸ **Keep a folder by its path, or from another space**: **Load Spaces**, choose one, then type or list the folder.
 - The app asks the server which spaces you have (`/graph/v1.0/me/drives`: project spaces and accepted shares, not disabled ones). Whether the folder is read-only for you is checked when you keep it: a read-only folder is refused, since a kept folder syncs both ways. Open it in the browser instead.
 - A space's folders go to `<local folder>/<space name>/<folder>`, apart from your personal folders. The folder list shows which space each one is in. Characters Windows can't use in a folder name become `-`, and names like `CON` or `NUL` get a `_`, on every system, so the settings file works on any computer.
@@ -214,7 +214,7 @@ Kept folders sync side by side, two at a time by default (**Folders synced at on
 - A folder never syncs twice at once, and kept folders never overlap on disk.
 - Folders with a change (live sync), a newly kept folder and a folder's own **Sync Now** go first, so a small folder doesn't wait behind a long sync of a big one.
 - A folder whose sync takes more than half the interval syncs less often on the interval: at most every twice its last sync time, up to 30 minutes and never more than three intervals apart. Its status says "syncs less often: large folder". Changes (live sync) and **Sync Now** still sync it right away.
-- Repair, allowing a large deletion, Stop Keeping and conflict actions wait until every running sync has finished, and nothing new starts meanwhile. Their buttons stay available while a sync runs: choosing one says it waits for the running sync, and it runs when that ends (a conflict copy that was synced away meanwhile is reported as gone). **Sync Now** for a single folder (Windows and Linux: in the folder's details; Mac: in its Actions menu) is available unless that folder is syncing or waiting.
+- Repair, allowing a large deletion, Stop Keeping and conflict actions wait until every running sync has finished, and nothing new starts meanwhile. Their buttons stay available while a sync runs: choosing one says "Waits for the running sync" (Windows and Linux) or "Starts when the running sync finishes" (Mac), and it runs when that ends. Only one action waits at a time. It then looks the folder up again: Allow Large Deletion runs only if the folder is still blocked for the same side you approved (otherwise: "The folder changed while waiting; check it again before allowing."), Repair only if the folder still needs one, and a conflict action uses the folder's current location and says when the folder is no longer kept or the conflict copy was synced away. **Sync Now** for a single folder (Windows and Linux: in the folder's details; Mac: in its Actions menu) goes first, also during the interval's run. It is disabled while syncing is paused, while that folder syncs or waits, and until you are signed in or set up; Windows and Linux also refuse it (`sync PATH` exits non-zero, saying why) while Repair, Allow Large Deletion, Stop Keeping or a conflict action runs or waits. The all-folders **Sync Now** is disabled while paused or signed out (Windows and Linux: also while any sync runs).
 - The server memory check (when it is on) runs before each batch of folders starts.
 - The menu shows "Syncing 2 folders…" while more than one syncs.
 

@@ -159,7 +159,11 @@ function toast(msg, bad) {
   clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.style.display = "none"; }, bad ? 9000 : 2500);
 }
 async function act(fn, okMsg) {
-  try { await fn(); if (okMsg) toast(okMsg); } catch (e) { toast(e.message, true); }
+  try {
+    const r = await fn();
+    const m = typeof okMsg === "function" ? okMsg(r) : okMsg;
+    if (m) toast(m);
+  } catch (e) { toast(e.message, true); }
   await refreshState();
 }
 
@@ -277,8 +281,8 @@ function drawNotices() {
 function setPaused(p) {
   return act(() => post("pause", { paused: p }), p ? "Syncing paused" : "Syncing resumed");
 }
-// When a sync runs, an action that needs the folders to itself waits for it.
-const waits = (msg) => (S && S.status.syncing ? "Waits for the running sync" : msg);
+// An action that needs the folders to itself waits for a running sync; the server says whether it did.
+const waits = (msg) => (r) => (r && r.queued ? "Waits for the running sync" : msg);
 // "14:30" for today, "Wed 08:00" for another day: when a timed pause ends.
 function pauseClock(iso) {
   const t = new Date(iso), now = new Date();
@@ -346,7 +350,7 @@ function folderDetail(f) {
     if (confirm("Repair " + f.name + "?\n\nThis merges this computer's copy with OpenCloud. For each file the newer copy wins; the older copies are kept in the backups (.opencloud-bar-backups in OpenCloud, and on this computer). Files deleted since the last good sync will come back.")) act(() => post("repair", { path: f.path }), waits("Repair started"));
   } }, "Repair (Merge Both Sides)…"));
   if (f.state === "large-deletion") acts.push(h("button", { class: "btn", onclick: () => {
-    if (confirm("Allow a large deletion in " + f.name + "?\n\n" + deletionPrompt(f.detail))) act(() => post("allow-delete", { path: f.path }), waits("Started"));
+    if (confirm("Allow a large deletion in " + f.name + "?\n\n" + deletionPrompt(f.detail))) act(() => post("allow-delete", { path: f.path, side: f.detail || "" }), waits("Started"));
   } }, "Allow Large Deletion…"));
   acts.push(h("button", { class: "btn danger", onclick: () => stopKeeping(f) }, "Stop Keeping Here…"));
   return h("div", { class: "card" },
