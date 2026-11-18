@@ -5,6 +5,26 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor lazy var model = AppModel()
 
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Finder's right-click ▸ Services ▸ "Keep on This Mac with OpenCloud Bar" (Info.plist, NSServices).
+        NSApp.servicesProvider = self
+        NSUpdateDynamicServices()
+    }
+
+    /// The service's handler (NSMessage keepFolderService). Finder passes the selected items as file URLs.
+    @objc(keepFolderService:userData:error:)
+    func keepFolderService(_ pboard: NSPasteboard, userData: String?, error: AutoreleasingUnsafeMutablePointer<NSString>) {
+        let urls = (pboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
+        MainActor.assumeIsolated {
+            guard let url = urls.first else { return }
+            if urls.count > 1 {
+                model.alert("Choose one folder", "Keep on This Mac works on one folder at a time. Select a single folder and try again.")
+                return
+            }
+            model.keepFolder(at: url)
+        }
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         MainActor.assumeIsolated {
             if model.quitting { return .terminateLater }
@@ -22,6 +42,8 @@ enum Launcher {
         #if DEBUG
         StatsFilter.selfCheck()   // DEBUG builds only: traps if the Swift parser drifts from the Go one
         SharedLinksAPI.selfCheck()
+        KeepSize.selfCheck()
+        ServerNotes.selfCheck()
         if CommandLine.arguments.contains("--self-check") { print("self-check ok"); exit(0) }
         #endif
         guard SingleInstance.claim() else {

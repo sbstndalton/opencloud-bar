@@ -336,6 +336,16 @@ function drawFolders() {
   if (typedVal) body.querySelector("#keep-path").value = typedVal;
   if (wasOpen) body.querySelector("details.keep").open = true;
 }
+// Keep by path. A folder that is big, or bigger than the free space here, answers needsConfirm
+// (with the text to ask) and isn't kept until the same request is sent again with confirm.
+async function keepPost(path, space) {
+  let r = await post("keep", { path, space });
+  if (r.needsConfirm) {
+    if (!confirm(r.message || "This folder is big. Keep it anyway?")) return { cancelled: true };
+    r = await post("keep", { path, space, confirm: true });
+  }
+  return r;
+}
 function keepFolder() {
   act(() => post("keep", {}), "Choose the folder in the dialog on your desktop");
 }
@@ -456,7 +466,7 @@ function keepBox(busy) {
       keepSpaces && !keepSpaces.length ? h("span", { class: "hint", text: "No project spaces or shares are available to you." }) : null),
     h("div", { class: "row" }, h("input", { type: "text", id: "keep-path", placeholder: "Documents/Projects", "aria-label": "Folder path" }),
       h("button", { class: "btn", onclick: browse }, "List Folders"),
-      h("button", { class: "btn", onclick: () => { const p = pathOf(); if (p) act(() => post("keep", { path: p, space: keepSpace }), busy ? "Folder kept; its first sync starts when the running sync finishes" : "Folder kept; the first sync starts shortly"); } }, "Keep")));
+      h("button", { class: "btn", onclick: () => { const p = pathOf(); if (p) act(() => keepPost(p, keepSpace), (r) => r.cancelled ? "" : busy ? "Folder kept; its first sync starts when the running sync finishes" : "Folder kept; the first sync starts shortly"); } }, "Keep")));
   if (keepDirs) box.append(h("div", { class: "card" }, keepDirs.length ? keepDirs.map(d => h("button", { class: "btn", onclick: () => {
     const p = document.getElementById("keep-path"); p.value = (p.value.trim() ? p.value.trim().replace(/\/+$/, "") + "/" : "") + d; browse(); } }, d + "/")) : "No folders here."));
   return box;
@@ -1066,6 +1076,7 @@ function general(main, r) {
       c.openAtLoginAvailable ? loginField() : null,
       checkField("Check for updates automatically", "checkForUpdates", "Once a day, from GitHub. Nothing about you is sent."),
       checkField("Show notifications", "notifications", "When a folder needs attention, is merged automatically, or an update is available. Once per change, not repeated."),
+      checkField("Show OpenCloud notifications", "serverNotifications", "What OpenCloud's bell shows (a share, a mention, a link about to expire), checked every 3 minutes with the browser sign-in and shown once each. Nothing is marked as read in OpenCloud. Needs “Show notifications”."),
       upLine,
       h("div", { class: "row" },
         h("button", { class: "btn", onclick: async (ev) => {

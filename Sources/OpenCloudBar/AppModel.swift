@@ -76,6 +76,16 @@ final class AppModel: ObservableObject {
     var quotaCheckedAt = Date.distantPast
     var quotaGeneration = 0          // bumped when the quota state is reset
     var quotaIdentity = ""           // server + account the quota on hand is from
+    // OpenCloud notifications (ServerNotes.swift).
+    var snAt = Date.distantPast      // no poll before this
+    var snBusy = false
+    var snFails = 0                  // errors in a row
+    var snOff = false                // a 404: no polling this session
+    var snGeneration = 0             // bumped when the seen ids are reset
+    var snIdentity = ""              // server + account the seen ids are from
+    var snSeen: [String] = []
+    var snSeeded = false
+    var snLoaded = false             // snSeen was read from the file
     var quotaBusy = false
     var searchWindow: SearchWindowController?
     private var notePlanner = NotePlanner()
@@ -165,6 +175,7 @@ final class AppModel: ObservableObject {
         configError = err
         signedOut = c.isOIDC && c.isConfigured && !Auth.haveCredentials(c)
         quotaIdentity = Self.quotaIdentity(c)
+        snIdentity = quotaIdentity
         applyEnvironment()
         refreshStatusEntries()
         recentChanges = Changes.load(changesURL)
@@ -327,6 +338,7 @@ final class AppModel: ObservableObject {
             if signedOut { return }
             checkAuth()
             checkQuotaIfDue()
+            checkServerNotesIfDue()
         }
         driveMounted = Shell.isMounted(config.mountURL)
         Task { await refreshDriveQueue() }
@@ -1541,23 +1553,60 @@ final class AppModel: ObservableObject {
         panel.message = "Choose a folder in OpenCloud to keep on this Mac. It will sync both ways."
         NSApp.activate(ignoringOtherApps: true)
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        keepFolder(at: url)
+    }
 
-        let root = config.mountURL.standardizedFileURL.path + "/"
-        let picked = url.standardizedFileURL.path
-        guard picked.hasPrefix(root) else {
-            alert("That folder isn't in OpenCloud", "Choose a folder inside the OpenCloud drive.")
+    /// Keeps the folder at `url`, which must be inside the mounted OpenCloud drive (the picker's
+    /// choice, or Finder's "Keep on This Mac with OpenCloud Bar" service). The path is mapped to
+    /// the folder's path in OpenCloud; anything outside the drive is refused with an alert. A
+    /// file isn't kept: its folder is offered instead (a sync works on folders only).
+    func keepFolder(at url: URL) {
+        if let m = settingsBrokenMessage { alert("Can't change the settings", m); return }
+        guard !needsSignIn else { alert("Sign in first", "Choose Set Up / Sign In… in the menu."); return }
+        guard config.isConfigured else { alert("Set up first", "Choose Set Up / Sign In… in the menu."); return }
+        guard driveMounted else {
+            alert("The OpenCloud drive isn't connected", "Choose Connect Drive in the OpenCloud Bar menu, then try again. Only folders inside the drive can be kept this way.")
             return
         }
+        let root = config.mountURL.path
+        let outside = ("That folder isn't in OpenCloud", "Only a folder inside the OpenCloud drive (\(root)) can be kept, and not the drive itself. “\(url.path)” isn't one.")
+        guard KeepSize.driveRel(root: root, path: url.path) != nil else { alert(outside.0, outside.1); return }
+        var target = url
+        if (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == false {
+            let parent = url.deletingLastPathComponent()
+            guard KeepSize.driveRel(root: root, path: parent.path) != nil else {
+                alert("That's a file", "Only folders can be kept, and its folder is the OpenCloud drive itself. Choose a folder inside the drive.")
+                return
+            }
+            guard confirm("That's a file", "Only folders can be kept. Keep its folder, “\(parent.lastPathComponent)”, instead?", button: "Keep Its Folder") else { return }
+            target = parent
+        }
         // One spelling per folder: no doubled or trailing slashes.
-        let rel = picked.dropFirst(root.count).split(separator: "/").joined(separator: "/")
+        guard let rel = KeepSize.driveRel(root: root, path: target.path) else { alert(outside.0, outside.1); return }
         if let p = KeptFolder.problem(newPath: rel) { alert("Can't keep that folder", p.prefix(1).uppercased() + p.dropFirst() + "."); return }
         if rel.utf8.count > 90 {
             alert("That path is too long", "rclone's sync history can't handle folder paths longer than about 90 characters. Choose a folder higher up, or rename a folder.")
             return
         }
-        if let e = addKept(KeptFolder(path: rel, stateName: KeptFolder.makeStateName(for: rel))) {
-            alert("Can't keep that folder", e)
+        let folder = KeptFolder(path: rel, stateName: KeptFolder.makeStateName(for: rel))
+        var sizeURL: URL?
+        if config.isOIDC { sizeURL = SpacesAPI.davURL(root: (config.serverURL ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "/")) + config.davPath, path: rel) }
+        Task {
+            guard await sizeConfirmed(folder, davURL: sizeURL) else { return }
+            if let e = addKept(folder) { alert("Can't keep that folder", e) }
         }
+    }
+
+    /// The size check before keeping (PROPFIND oc:size, KeepSize): asks when the folder is bigger
+    /// than the free space at the local folder or than 5 GB. false: the user cancelled. A size
+    /// that can't be read (or no browser sign-in) never blocks.
+    private func sizeConfirmed(_ folder: KeptFolder, davURL: URL?) async -> Bool {
+        guard config.isOIDC, let davURL,
+              let token = try? await Auth.accessToken(serverURL: config.serverURL ?? ""),
+              let size = await KeepSize.fetch(davURL, token: token) else { return true }
+        let free = KeepSize.free(at: config.localRootURL)
+        guard KeepSize.needsConfirm(size: size, free: free) else { return true }
+        return confirmRisky("Keep this folder?", KeepSize.message(name: folder.space.map { "\(folder.path) in \($0.name)" } ?? folder.path, size: size, free: free), button: "Keep Anyway")
     }
 
     /// Adds a kept folder (checked against the others in its space and on this Mac), saves the
@@ -1608,6 +1657,7 @@ final class AppModel: ObservableObject {
         if rel.utf8.count > 90 { return "That path is too long (rclone's limit is about 90 characters)." }
         let server = config.serverURL ?? ""
         guard let space else {
+            var sizeURL: URL?
             // The personal space gets the same check as a space (browser sign-in only: the token is
             // the sign-in's). A missing folder is refused here instead of failing at the first sync.
             if config.isOIDC {
@@ -1617,6 +1667,7 @@ final class AppModel: ObservableObject {
                     // The same base rclone uses: the full server URL (keeping a path prefix) plus davPath.
                     let base = server.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
                     guard let url = SpacesAPI.davURL(root: base + config.davPath, path: rel) else { return "That path isn't valid." }
+                    sizeURL = url
                     if SpacesAPI.readOnly(try await SpacesAPI.permissions(url, token: token, missing: Self.missingPersonalText)) {
                         return "“\(rel)” is read-only for you, so it can't be kept here (a kept folder syncs both ways). Open it in the browser instead."
                     }
@@ -1625,18 +1676,24 @@ final class AppModel: ObservableObject {
                     return "Couldn't check “\(rel)”: \(error.localizedDescription)"
                 }
             }
-            return addKept(KeptFolder(path: rel, stateName: KeptFolder.makeStateName(for: rel)))
+            let folder = KeptFolder(path: rel, stateName: KeptFolder.makeStateName(for: rel))
+            guard await sizeConfirmed(folder, davURL: sizeURL) else { return nil }   // cancelled
+            return addKept(folder)
         }
+        var sizeURL: URL?
         do {
             let token = try await Auth.accessToken(serverURL: server)
             guard let url = SpacesAPI.davURL(base: server, space, path: rel) else { return "That path isn't valid." }
+            sizeURL = url
             if SpacesAPI.readOnly(try await SpacesAPI.permissions(url, token: token)) {
                 return "“\(rel)” in \(space.name) is read-only for you, so it can't be kept here (a kept folder syncs both ways). Open it in the browser instead."
             }
         } catch {
             return "Couldn't check “\(rel)” in \(space.name): \(error.localizedDescription)"
         }
-        return addKept(KeptFolder(path: rel, stateName: KeptFolder.makeStateName(for: rel, spaceID: space.id), space: space.ref))
+        let folder = KeptFolder(path: rel, stateName: KeptFolder.makeStateName(for: rel, spaceID: space.id), space: space.ref)
+        guard await sizeConfirmed(folder, davURL: sizeURL) else { return nil }   // cancelled
+        return addKept(folder)
     }
 
     /// The folders directly in `path` of a space (nil: the personal space), listed with rclone.

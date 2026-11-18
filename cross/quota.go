@@ -174,6 +174,7 @@ func (e *Engine) resetQuotaLocked(cfgs ...Config) {
 		}
 		_ = os.Remove(quotaWarnedFile(c))
 	}
+	e.resetSrvNotesLocked(cfgs...) // the notifications seen belong to the same sign-in
 }
 
 // quotaFailed schedules the retry after a failed check (unless the state was reset meanwhile).

@@ -61,6 +61,13 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 ; uninstalling removes the value even when the task wasn't ticked, e.g. the app's own setting
 ; turned it on later. It creates no value and leaves an existing one alone.
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "OpenCloud Bar"; Flags: uninsdeletevalue
+; Explorer's right-click menu on a folder: "Keep on this PC with OpenCloud Bar" runs
+; `opencloud-bar keep-drive "<folder>"`, which keeps it when it is inside the OpenCloud drive and
+; says so when it isn't. Per user (HKCU\Software\Classes); uninsdeletekey removes the whole verb
+; key (its command included) when uninstalling.
+Root: HKCU; Subkey: "Software\Classes\Directory\shell\OpenCloudBarKeep"; ValueType: string; ValueName: ""; ValueData: "Keep on this PC with OpenCloud Bar"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\Directory\shell\OpenCloudBarKeep"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\OpenCloud Bar.exe"""
+Root: HKCU; Subkey: "Software\Classes\Directory\shell\OpenCloudBarKeep\command"; ValueType: string; ValueName: ""; ValueData: """{app}\opencloud-bar.exe"" keep-drive ""%V"""
 Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}"; Check: NeedsAddPath(ExpandConstant('{app}'))
 
 [Run]

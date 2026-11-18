@@ -161,12 +161,20 @@ func (e *Engine) KeepInSpace(spaceID, path, localPath string) error {
 	if spaceID == "" {
 		return e.Keep(path, localPath)
 	}
+	_, err := e.keepInSpaceCk(spaceID, path, localPath, false)
+	return err
+}
+
+// keepInSpaceCk is KeepInSpace; with check set, a folder that needs a confirmation (the size
+// check, keepcheck.go) isn't kept and the answer says so.
+func (e *Engine) keepInSpaceCk(spaceID, path, localPath string, check bool) (SizeCheck, error) {
+	none := SizeCheck{Size: -1, Free: -1}
 	cfg := e.config()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	spaces, err := listSpaces(ctx, cfg)
 	if err != nil {
-		return err
+		return none, err
 	}
 	var sp *Space
 	for i := range spaces {
@@ -175,25 +183,30 @@ func (e *Engine) KeepInSpace(spaceID, path, localPath string) error {
 		}
 	}
 	if sp == nil {
-		return errors.New("that space isn't available (any more); reload the list")
+		return none, errors.New("that space isn't available (any more); reload the list")
 	}
 	path = normalizeKeptPath(path)
 	if p := newPathProblem(path); p != "" {
-		return errors.New(p)
+		return none, errors.New(p)
 	}
 	base, _ := normalizeServerURL(cfg.ServerURL)
 	tok, err := accessToken(cfg.ServerURL)
 	if err != nil {
-		return fmt.Errorf("signed out: %w", err)
+		return none, fmt.Errorf("signed out: %w", err)
 	}
 	perms, err := davPermissions(ctx, davURLFor(base, *sp, path), tok)
 	if err != nil {
-		return fmt.Errorf("couldn't check “%s” in %s: %w", path, sp.Name, err)
+		return none, fmt.Errorf("couldn't check “%s” in %s: %w", path, sp.Name, err)
 	}
 	if readOnly(perms) {
-		return fmt.Errorf("“%s” in %s is read-only for you, so it can't be kept here (a kept folder syncs both ways). Open it in the browser instead", path, sp.Name)
+		return none, fmt.Errorf("“%s” in %s is read-only for you, so it can't be kept here (a kept folder syncs both ways). Open it in the browser instead", path, sp.Name)
 	}
-	return e.keepIn(sp.Ref(), path, localPath)
+	if check {
+		if sc := checkKeepSize(cfg, davURLFor(base, *sp, path), path+" in "+sp.Name, localPath); sc.NeedsConfirm {
+			return sc, nil
+		}
+	}
+	return none, e.keepIn(sp.Ref(), path, localPath)
 }
 
 // BrowseSpace lists the folders directly in path of a space ("" for the personal one), with

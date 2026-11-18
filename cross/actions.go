@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -93,16 +92,12 @@ func pickAndKeep(e *Engine) {
 	if !ok {
 		return
 	}
-	root := filepath.Clean(target)
-	if len(root) == 2 && root[1] == ':' {
-		root += `\`
-	}
-	rel, err := filepath.Rel(root, filepath.Clean(picked))
-	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+	rel, ok := driveRel(target, picked)
+	if !ok {
 		dialogAlert("That folder isn't in OpenCloud", "Choose a folder inside the OpenCloud drive.")
 		return
 	}
-	alertErr(e.Keep(filepath.ToSlash(rel), ""))
+	keepWithDialogs(e, rel)
 }
 
 func alertErr(err error) {

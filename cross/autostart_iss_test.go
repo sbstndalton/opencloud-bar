@@ -33,6 +33,18 @@ func issSplit(line string) []string {
 // issRunEntries returns the installer's [Registry] entries for HKCU's Run key.
 func issRunEntries(t *testing.T) []issEntry {
 	t.Helper()
+	var out []issEntry
+	for _, e := range issRegistryEntries(t) {
+		if e["Root"] == "HKCU" && strings.EqualFold(e["Subkey"], autostartRunKey) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// issRegistryEntries returns every entry of the installer's [Registry] section.
+func issRegistryEntries(t *testing.T) []issEntry {
+	t.Helper()
 	b, err := os.ReadFile(filepath.Join("..", "packaging", "windows", "opencloud-bar.iss"))
 	if err != nil {
 		t.Fatal(err)
@@ -60,9 +72,7 @@ func issRunEntries(t *testing.T) []issEntry {
 			}
 			e[strings.TrimSpace(k)] = v
 		}
-		if e["Root"] == "HKCU" && strings.EqualFold(e["Subkey"], autostartRunKey) {
-			out = append(out, e)
-		}
+		out = append(out, e)
 	}
 	return out
 }

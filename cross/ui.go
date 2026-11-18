@@ -678,6 +678,7 @@ func (e *Engine) uiState() map[string]any {
 			"paused":                cfg.Paused,
 			"checkForUpdates":       cfg.UpdateChecks(),
 			"notifications":         cfg.NotificationsOn(),
+			"serverNotifications":   cfg.ServerNotesOn(),
 			"bwLimitUp":             cfg.BwLimitUp,
 			"bwLimitDown":           cfg.BwLimitDown,
 			"liveSync":              cfg.LiveOn(),
@@ -720,6 +721,8 @@ func (e *Engine) serveKeep(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		Path  string `json:"path"`  // empty: choose with the folder dialog
 		Space string `json:"space"` // a space's id; empty for the personal space
+		// Confirm: keep it although it is big or may not fit (after {"needsConfirm": true}).
+		Confirm bool `json:"confirm"`
 	}
 	if !readJSON(w, r, &b) {
 		return
@@ -729,11 +732,11 @@ func (e *Engine) serveKeep(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, http.StatusBadRequest, errors.New("choose a folder in the space (the whole space can't be kept)"))
 			return
 		}
-		jsonOK(w, e.KeepInSpace(b.Space, b.Path, ""))
+		keepAnswer(w, b.Space, b.Path, b.Confirm, e)
 		return
 	}
 	if b.Path != "" {
-		jsonOK(w, e.Keep(b.Path, ""))
+		keepAnswer(w, "", b.Path, b.Confirm, e)
 		return
 	}
 	st := e.Status()
@@ -746,6 +749,18 @@ func (e *Engine) serveKeep(w http.ResponseWriter, r *http.Request) {
 		go pickAndKeep(e) // a native dialog on the desktop; the page sees the result in the folder list
 		jsonOK(w, nil)
 	}
+}
+
+// keepAnswer keeps a folder after the size check. A folder that is big or may not fit isn't kept
+// until the request says confirm: the answer is {"needsConfirm": true, "size", "free",
+// "message"} (sizes in bytes, -1 unknown). Otherwise {"needsConfirm": false}.
+func keepAnswer(w http.ResponseWriter, space, path string, confirm bool, e *Engine) {
+	sc, err := e.KeepChecked(space, path, "", confirm)
+	if err != nil {
+		jsonErr(w, http.StatusConflict, err)
+		return
+	}
+	writeJSON(w, 200, sc)
 }
 
 // serveOpen opens something on this computer. The page never sends a path or address: only

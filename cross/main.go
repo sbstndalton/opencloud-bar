@@ -11,7 +11,8 @@
 //	opencloud-bar pause | resume      stop or restart syncing kept folders (the drive keeps working)
 //	opencloud-bar check-updates       look for a newer release
 //	opencloud-bar version             print the version
-//	opencloud-bar keep PATH [--local DIR]
+//	opencloud-bar keep PATH [--local DIR] [--yes]
+//	opencloud-bar keep-drive PATH [--yes]   PATH is inside the OpenCloud drive (the Explorer menu item runs this)
 //	opencloud-bar unkeep PATH         final sync, then move the local copy out of the way
 //	opencloud-bar repair PATH         merge both sides after "needs repair"
 //	opencloud-bar allow-delete PATH   apply a blocked large deletion
@@ -57,7 +58,7 @@ func parsePauseArgs(args []string) (time.Duration, error) {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage: opencloud-bar setup [URL] | logout [--force] | token | run [--no-tray] | status | sync [PATH] | pause [--for 1h] | resume |
-       keep PATH [--local DIR] | unkeep PATH | repair PATH | allow-delete PATH | connect | eject | settings |
+       keep PATH [--local DIR] [--yes] | keep-drive PATH [--yes] | unkeep PATH | repair PATH | allow-delete PATH | connect | eject | settings |
        check-updates | version | reload | quit [--force]`)
 	os.Exit(2)
 }
@@ -164,12 +165,26 @@ func main() {
 	case "keep":
 		fs := flag.NewFlagSet("keep", flag.ExitOnError)
 		local := fs.String("local", "", "absolute local folder (default: localRoot/PATH)")
+		yes := fs.Bool("yes", false, "keep it even if it is big or may not fit on this computer")
 		path := firstArg(fs, os.Args[2:])
-		q := url.Values{"path": {path}, "local": {*local}}
-		if err := call("POST", "/keep", q, nil); err != nil {
+		sc, err := daemonKeep(path, *local, *yes)
+		if err != nil {
 			fail(err)
 		}
+		if sc.NeedsConfirm {
+			fmt.Fprintln(os.Stderr, "opencloud-bar: "+sc.Message)
+			fmt.Fprintln(os.Stderr, "Nothing was kept. Run the command again with --yes to keep it anyway.")
+			os.Exit(1)
+		}
 		fmt.Println("kept; the first sync starts shortly")
+	case "keep-drive":
+		// The file manager's "Keep on this PC with OpenCloud Bar" (Windows installer), or a
+		// script: PATH must be inside the OpenCloud drive.
+		cfg, _ := loadConfig()
+		env := keepDriveEnv{mount: expand(cfg.MountPoint), out: os.Stdout, errw: os.Stderr,
+			dialogs: hasDialogs() && !stdinIsTerminal(), alert: dialogAlert, confirm: dialogConfirm,
+			keep: func(rel string, confirm bool) (SizeCheck, error) { return daemonKeep(rel, "", confirm) }}
+		os.Exit(env.run(os.Args[2:]))
 	case "unkeep":
 		path := needPath()
 		var n struct{ Unsynced int }
@@ -234,6 +249,18 @@ func askYes() bool {
 	var a string
 	_, _ = fmt.Scanln(&a)
 	return strings.EqualFold(a, "y") || strings.EqualFold(a, "yes")
+}
+
+// daemonKeep asks the running app to keep path (relative to the drive). Without confirm a big
+// folder isn't kept: the answer has NeedsConfirm set.
+func daemonKeep(path, local string, confirm bool) (SizeCheck, error) {
+	q := url.Values{"path": {path}, "local": {local}}
+	if confirm {
+		q.Set("confirm", "1")
+	}
+	var sc SizeCheck
+	err := call("POST", "/keep", q, &sc)
+	return sc, err
 }
 
 func fail(err error) { fmt.Fprintln(os.Stderr, "opencloud-bar:", err); os.Exit(1) }
@@ -373,7 +400,15 @@ func apiHandler(e *Engine, stop func(), tok string, ui *webUI) http.Handler {
 	mux.HandleFunc("POST /eject", func(w http.ResponseWriter, r *http.Request) { reply(w, e.Eject()) })
 	mux.HandleFunc("POST /reload", func(w http.ResponseWriter, r *http.Request) { reply(w, e.Reload()) })
 	mux.HandleFunc("POST /keep", func(w http.ResponseWriter, r *http.Request) {
-		reply(w, e.Keep(r.URL.Query().Get("path"), r.URL.Query().Get("local")))
+		// Without confirm=1 a folder that is big (or bigger than the free space) isn't kept: the
+		// answer is {"needsConfirm": true, "size": …, "free": …, "message": …} (keepcheck.go).
+		q := r.URL.Query()
+		sc, err := e.KeepChecked("", q.Get("path"), q.Get("local"), q.Get("confirm") == "1")
+		if err != nil {
+			http.Error(w, err.Error(), 409)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(sc)
 	})
 	mux.HandleFunc("POST /unkeep", func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Query().Get("path")

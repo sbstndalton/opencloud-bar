@@ -619,6 +619,12 @@ struct GeneralPage: View {
                     .accessibilityLabel("Show notifications")
                 Text("When a folder needs attention or was merged automatically, when you are signed out, when your storage is almost full, and when an update is available. Once per change, never repeated. Clicking one opens Settings.")
                     .font(.caption).foregroundStyle(.secondary)
+                Toggle("Show OpenCloud notifications", isOn: Binding(
+                    get: { model.config.serverNotifications },
+                    set: { on in Task { updateError = await model.updateConfig { $0.serverNotifications = on } } }))
+                    .accessibilityLabel("Show OpenCloud notifications")
+                Text("What OpenCloud's bell shows (a share, a mention, a link about to expire), checked every 3 minutes with the browser sign-in and shown once each. Nothing is marked as read in OpenCloud. Needs “Show notifications”.")
+                    .font(.caption).foregroundStyle(.secondary)
                 if model.config.notifications, notificationsStatus == .denied {
                     HStack {
                         Label("macOS is blocking notifications from OpenCloud Bar. Allow them in System Settings ▸ Notifications.",
