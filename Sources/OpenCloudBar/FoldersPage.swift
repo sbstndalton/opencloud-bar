@@ -277,7 +277,7 @@ struct FoldersPage: View {
     @ViewBuilder
     private func actions(_ f: KeptFolder) -> some View {
         Button("Open in Finder") { model.openLocal(f) }.accessibilityLabel("Open in Finder")
-        Button("Open in Browser") { if let u = browserURL { NSWorkspace.shared.open(u) } }.accessibilityLabel("Open in Browser")
+        Button("Open in Browser") { model.openItemInBrowser(f, rel: "") }.accessibilityLabel("Open in Browser")
             .disabled(browserURL == nil)
         Button("Sync Now") { model.syncNow(f) }.accessibilityLabel("Sync Now")
             .disabled(model.folderBusy(f) || model.needsSignIn || model.config.paused)

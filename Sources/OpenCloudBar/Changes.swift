@@ -190,7 +190,7 @@ struct ActivityPage: View {
                     Spacer()
                     if model.changeExists(c) {
                         Button("Show in Finder") { model.reveal(c) }.accessibilityLabel("Show \(c.path) in Finder")
-                        Button("Open OpenCloud") { model.openWeb() }.accessibilityLabel("Open OpenCloud in the browser")
+                        Button("Open OpenCloud") { model.openChangeInBrowser(c) }.accessibilityLabel("Open \(c.path) in OpenCloud in the browser")
                     }
                 }
             }

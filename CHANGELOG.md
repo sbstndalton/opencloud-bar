@@ -4,6 +4,34 @@ All notable changes to OpenCloud Bar. The format follows [Keep a Changelog](http
 
 The release workflow copies the section for a tag into that tag's GitHub release, so every version heading must stay in the form `## [X.Y.Z] - date`.
 
+## [2.6.0] - 2026-11-18
+
+### Fixed
+- **Servers that enforce a password on public links.** A `createLink` refused with 400 "password protection is enforced" is now recognised (`errPasswordRequired` in Go) and shown as "This server requires a password for public links." The Mac reopens the options dialog with the password required and the other choices kept; the Windows and Linux page marks the password field required, focuses it, explains it and keeps the expiry (`POST /ui/api/share` answers `{"error": …, "code": "password_required"}`). Capabilities aren't fetched beforehand.
+- **Windows and Linux: a date is judged in your time zone.** "That date has passed" and the 10-year limit compared with today in UTC; they now use local time.
+- **A date means the end of that day in your time zone** (23:59:59 local, sent as UTC), not midnight UTC. Source read: `parseAndFillUpTime` (opencloud-eu/opencloud, `services/graph/pkg/service/v0/api_driveitem_permissions_links.go`) rounds the time it is sent up to 23:59:59 of that time's own day, which for our UTC time is the UTC day. So the link can stay active some hours after the day ends locally; the Mac dialog and the README say so instead of promising your time zone.
+- **Change Expiry is read back.** After the PATCH the link is fetched again; if its expiry isn't absent (when removed) or on the day that was sent, the app says "OpenCloud didn't change the expiry" instead of reporting success.
+- **An expiry that can't be read.** Such a link is no longer offered for reuse, and Shared Links shows "Expiry unknown" instead of "Never expires".
+- Copy Existing Link says "It has a password — you'll need the one you set when you made it." for a link with a password; Windows and Linux also say an expiry or password already chosen wasn't applied to the existing link. The Windows and Linux hint now says links can be removed in Shared Links, like the Mac.
+
+### Tests
+- Go: a fake that answers 307 only on PATCH and DELETE (the list and GETs work): neither follows it, each is sent once, nothing reaches the other host; the enforced-password 400; date checks with an injected clock and zone; the expiry read-back mismatch; an unreadable expiry skipped for reuse. The fake's PATCH now stores the expiry, rounded like the server.
+- The Mac's DEBUG self-check (`--self-check`) covers parsing and helpers (not network calls or dialogs): it now also checks the end-of-day computation in New York and Auckland, local-day validation, the expiry read-back match, unreadable expiries and the enforced-password recognition.
+
+### Added
+- **Reuse an existing link.** Copy Public Link (all platforms) first lists the item's permissions (`GET /graph/v1beta1/drives/{drive}/items/{id}/permissions`). If it already has a `view` link that hasn't expired, you can **Copy Existing Link** (the default) or **Make New Link**, so public links stop piling up. A link without a password comes first, then the newest. If the permissions can't be read, the link is made as before. Windows and Linux: `POST /ui/api/share` answers `{"existing": true, "url": …}` and makes nothing unless the request has `"newLink": true`.
+- **Shared Links.** Mac: Settings ▸ **Shared Links**. Windows and Linux: a **Shared Links** section (`GET /ui/api/links`, `POST /ui/api/links/copy`, `/links/expiry` and `/links/remove`). It lists the links you made (`GET /graph/v1beta1/me/drive/sharedByMe`; links only, not shares with people or groups) with the item, type, expiry and created date, and:
+  - **Copy**;
+  - **Change Expiry**: none, 7 days, 30 days or a date (`PATCH …/permissions/{id}`, `expirationDateTime`, `null` for none);
+  - **Remove Link…** (`DELETE …/permissions/{id}`), after a confirm dialog with the item's name and the link's address.
+  Before a PATCH or DELETE the app looks the link up again: the ids sent come from the server's own list, not from the page; the permission is fetched by id and must have a `link` part, or nothing is changed (a user or group share is never touched); the address that was confirmed must still be the link's. Ids must be one plain path segment. The no-redirect clients and https only are kept; the token goes only to the configured server.
+- Tests (Go, a fake graph server): the list keeps links and drops user and group shares; an existing view link is found and reused; the PATCH body; no DELETE when the fresh permission has no link part; the permission is fetched again before the DELETE; no request to another host; redirects aren't followed; ids are validated.
+
+### Changed
+- **Open OpenCloud** (Activity rows) and a folder's **Open in Browser** now open the item itself, `<server>/f/<file id>`, using the item's `oc:fileid` from a `PROPFIND`, not the web interface's front page. Without the browser sign-in they open the front page as before. This ends the known limit "Open OpenCloud opens OpenCloud's web interface, not the file itself."
+- Mac: the share-link requests (the `PROPFIND` and `createLink`) now use the client that doesn't follow redirects, like the other requests.
+- Copy Public Link's text says where to remove a link (Shared Links) instead of the browser's sharing panel.
+
 ## [2.5.0] - 2026-11-18
 
 ### Added

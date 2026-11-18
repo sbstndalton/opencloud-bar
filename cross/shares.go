@@ -27,6 +27,23 @@ import (
 // The drive id is the file id up to its "!". The password is typed for this one link and
 // never stored or logged. The macOS app does the same (Shares.swift).
 
+// errPasswordRequired: the server enforces a password on public links (a createLink without one
+// answers 400 "password protection is enforced"). The pages then ask for one and try again.
+var errPasswordRequired = errors.New("This server requires a password for public links.")
+
+// passwordEnforced reports whether a createLink answer is that 400.
+func passwordEnforced(status int, data []byte) bool {
+	if status != http.StatusBadRequest {
+		return false
+	}
+	var ge struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	return json.Unmarshal(data, &ge) == nil && strings.Contains(strings.ToLower(ge.Error.Message), "password protection is enforced")
+}
+
 // ShareOptions: Days 0 means no expiry; Password "" means none.
 type ShareOptions struct {
 	Days     int
@@ -75,6 +92,15 @@ func davFileID(ctx context.Context, davURL, tok string) (string, error) {
 	return "", errors.New("the server didn't say which file that is")
 }
 
+// shareDrive checks a file id ("<storage>$<space>!<node>") and returns its drive id.
+func shareDrive(id string) (string, error) {
+	i := strings.LastIndex(id, "!")
+	if i <= 0 || strings.ContainsAny(id, "/?#") {
+		return "", errors.New("the server's file id isn't one this version understands")
+	}
+	return id[:i], nil
+}
+
 // createShareLink makes a view link for the resource at davURL; graphBase is the server
 // address (https://host[/prefix]).
 func createShareLink(ctx context.Context, davURL, graphBase, tok string, o ShareOptions, now time.Time) (string, error) {
@@ -82,11 +108,15 @@ func createShareLink(ctx context.Context, davURL, graphBase, tok string, o Share
 	if err != nil {
 		return "", err
 	}
-	i := strings.LastIndex(id, "!")
-	if i <= 0 || strings.ContainsAny(id, "/?#") {
-		return "", errors.New("the server's file id isn't one this version understands")
+	return createShareLinkFor(ctx, id, graphBase, tok, o, now)
+}
+
+// createShareLinkFor makes the view link for a file id the server gave.
+func createShareLinkFor(ctx context.Context, id, graphBase, tok string, o ShareOptions, now time.Time) (string, error) {
+	drive, err := shareDrive(id)
+	if err != nil {
+		return "", err
 	}
-	drive := id[:i]
 	body := map[string]any{"type": "view"}
 	if o.Days > 0 {
 		body["expirationDateTime"] = now.UTC().Add(time.Duration(o.Days) * 24 * time.Hour).Format("2006-01-02T15:04:05Z")
@@ -110,6 +140,9 @@ func createShareLink(ctx context.Context, davURL, graphBase, tok string, o Share
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != 200 && resp.StatusCode != 201 {
+		if passwordEnforced(resp.StatusCode, data) {
+			return "", errPasswordRequired
+		}
 		var ge struct {
 			Error struct {
 				Message string `json:"message"`
@@ -172,53 +205,104 @@ func itemDavURL(cfg Config, f KeptFolder, rel string) (string, error) {
 	return u, nil
 }
 
-// ShareLink makes a public, read-only link to rel ("" for the folder itself) in a kept folder.
-// Only for a folder that has synced, with the browser sign-in.
+// ShareResult is what Copy Public Link found or made: Existing is true when the item already
+// has a view link and none was made (the page offers Copy Existing Link or Make New Link).
+type ShareResult struct {
+	URL      string `json:"url"`
+	Existing bool   `json:"existing,omitempty"`
+	Expires  string `json:"expires,omitempty"`
+	Created  string `json:"created,omitempty"`
+	Password bool   `json:"password,omitempty"`
+}
+
+// ShareLink makes a public, read-only link to rel ("" for the folder itself) in a kept folder,
+// always a new one. Only for a folder that has synced, with the browser sign-in.
 func (e *Engine) ShareLink(key, rel string, o ShareOptions) (string, error) {
+	r, err := e.ShareLinkReuse(key, rel, o, true)
+	return r.URL, err
+}
+
+// ShareLinkReuse is ShareLink, but unless newLink is set it first lists the item's permissions
+// (GET …/items/<id>/permissions) and, if a view link is already there, returns that one
+// (Existing) instead of making another, so public links don't pile up. If the list can't be read
+// the link is made as before.
+func (e *Engine) ShareLinkReuse(key, rel string, o ShareOptions, newLink bool) (ShareResult, error) {
 	f, ok := e.find(key)
 	if !ok {
-		return "", fmt.Errorf("%q isn't a kept folder", key)
+		return ShareResult{}, fmt.Errorf("%q isn't a kept folder", key)
 	}
 	cfg := e.config()
 	if !cfg.OIDC() {
-		return "", errors.New("share links need the browser sign-in")
+		return ShareResult{}, errors.New("share links need the browser sign-in")
 	}
 	if !exists(cfg.statePath(f, ".initialised")) {
-		return "", fmt.Errorf("“%s” hasn't synced yet; share it after its first sync", f.DisplayName())
+		return ShareResult{}, fmt.Errorf("“%s” hasn't synced yet; share it after its first sync", f.DisplayName())
 	}
 	switch o.Days {
 	case 0, 1, 7, 30:
 	default:
-		return "", errors.New("the link can expire after 1, 7 or 30 days, or never")
+		return ShareResult{}, errors.New("the link can expire after 1, 7 or 30 days, or never")
 	}
 	if len(o.Password) > 200 || hasControl(o.Password) {
-		return "", errors.New("that password can't be used")
+		return ShareResult{}, errors.New("that password can't be used")
 	}
 	rel = strings.Trim(strings.ReplaceAll(rel, "\\", "/"), "/")
 	if skipChange(rel) && rel != "" {
-		return "", errors.New("that file can't be shared from here")
+		return ShareResult{}, errors.New("that file can't be shared from here")
 	}
 	davURL, err := itemDavURL(cfg, f, rel)
 	if err != nil {
-		return "", err
+		return ShareResult{}, err
 	}
 	base, _ := normalizeServerURL(cfg.ServerURL)
 	tok, err := accessToken(cfg.ServerURL)
 	if err != nil {
-		return "", fmt.Errorf("signed out: %w", err)
+		return ShareResult{}, fmt.Errorf("signed out: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	link, err := createShareLink(ctx, davURL, base, tok, o, time.Now())
-	if err != nil {
-		return "", err
-	}
 	name := f.DisplayName()
 	if rel != "" {
 		name += "/" + rel
 	}
-	e.logLine("share link made for %s", name) // never the link's password
-	return link, nil
+	res, err := shareOrReuse(ctx, davURL, graphAPI{base: base, tok: tok}, o, newLink, time.Now(), func(err error) {
+		e.logLine("couldn't check %s for an existing link: %v", name, err)
+	})
+	if err != nil {
+		return ShareResult{}, err
+	}
+	if res.Existing {
+		e.logLine("share link for %s: an existing view link found", name)
+	} else {
+		e.logLine("share link made for %s", name) // never the link's password
+	}
+	return res, nil
+}
+
+// shareOrReuse asks the server for the item's id, then (unless newLink) for its permissions: a
+// view link that is already there is returned as it is. Otherwise a new view link is made. A
+// failed look at the permissions (told to onCheckErr) doesn't stop the link being made.
+func shareOrReuse(ctx context.Context, davURL string, g graphAPI, o ShareOptions, newLink bool, now time.Time, onCheckErr func(error)) (ShareResult, error) {
+	id, err := davFileID(ctx, davURL, g.tok)
+	if err != nil {
+		return ShareResult{}, err
+	}
+	if !newLink {
+		ex, err := g.existingViewLink(ctx, id, now)
+		switch {
+		case err != nil:
+			if onCheckErr != nil {
+				onCheckErr(err)
+			}
+		case ex != nil:
+			return ShareResult{URL: ex.URL, Existing: true, Expires: ex.Expires, Created: ex.Created, Password: ex.Password}, nil
+		}
+	}
+	link, err := createShareLinkFor(ctx, id, g.base, g.tok, o, now)
+	if err != nil {
+		return ShareResult{}, err
+	}
+	return ShareResult{URL: link}, nil
 }
 
 // Item is one entry of a kept folder's listing for the share picker.

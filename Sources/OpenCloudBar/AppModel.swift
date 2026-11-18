@@ -40,6 +40,8 @@ final class AppModel: ObservableObject {
         didSet { if lastMessage != oldValue { lastMessageAt = Date() } }
     }
     private var lastMessageAt = Date()
+    /// A short status line from another file (Shared Links).
+    func flash(_ m: String) { lastMessage = m }
     private var resumingPause = false
     /// A timed pause that couldn't be ended (the settings couldn't be saved) is tried again
     /// after this, and the user is told once.
@@ -1132,16 +1134,46 @@ final class AppModel: ObservableObject {
         }
         if Changes.skip(rel) && !rel.isEmpty { alert("That can't be shared from here", "Choose another file."); return }
         let name = rel.isEmpty ? f.displayName : (rel as NSString).lastPathComponent
-        guard let o = SharesAPI.askOptions(for: name) else { return }
         Task {
             do {
                 let server = config.serverURL ?? ""
                 guard let dav = SharesAPI.davURL(config, f, rel: rel) else { throw AuthError.message("That path isn't valid.") }
                 let token = try await Auth.accessToken(serverURL: server)
-                let link = try await SharesAPI.createLink(dav, serverURL: server, token: token, o)
+                let id = try await SharesAPI.fileID(dav, token: token)
+                let where_ = "\(f.displayName)\(rel.isEmpty ? "" : "/" + rel)"
+                // A view link the item already has is offered again, so public links don't pile up.
+                // If the permissions can't be read, the link is made as before.
+                var existing: SharedLinksAPI.Existing?
+                do { existing = try await SharedLinksAPI.existingViewLink(server: server, token: token, item: id) }
+                catch { Log.line("couldn't check \(where_) for an existing link: \(error.localizedDescription)") }
+                var link: String?
+                if let ex = existing {
+                    switch SharesAPI.askExisting(for: name, ex) {
+                    case .copyExisting: link = ex.url
+                    case .makeNew: break
+                    case .cancel: return
+                    }
+                }
+                if link == nil {
+                    // If the server insists on a password, the dialog opens again with the choices
+                    // kept and the password marked required.
+                    var preset: SharesAPI.Options?
+                    var needPassword = false
+                    while link == nil {
+                        guard let o = SharesAPI.askOptions(for: name, preset: preset, passwordRequired: needPassword) else { return }
+                        do {
+                            link = try await SharesAPI.createLink(id: id, serverURL: server, token: token, o)
+                        } catch is SharesAPI.PasswordRequired where !(needPassword && !o.password.isEmpty) {
+                            preset = o
+                            needPassword = true
+                        }
+                    }
+                    Log.line("share link made for \(where_)")   // never the password
+                } else {
+                    Log.line("share link for \(where_): an existing view link copied")
+                }
                 NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(link, forType: .string)
-                Log.line("share link made for \(f.displayName)\(rel.isEmpty ? "" : "/" + rel)")   // never the password
+                NSPasteboard.general.setString(link ?? "", forType: .string)
                 lastMessage = "Link to “\(name)” copied"
                 notifier.show(Note(title: "Link copied", body: "A public, read-only link to “\(name)” is on the clipboard.", page: .folders))
             } catch {

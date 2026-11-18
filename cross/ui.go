@@ -192,7 +192,7 @@ func (u *webUI) loginURL(section string) string {
 
 func validSection(s string) bool {
 	switch s {
-	case "folders", "search", "conflicts", "trash", "activity", "account", "sync", "drive", "general", "logs", "about":
+	case "folders", "search", "links", "conflicts", "trash", "activity", "account", "sync", "drive", "general", "logs", "about":
 		return true
 	}
 	return false
@@ -357,16 +357,60 @@ func (u *webUI) handler(e *Engine) http.Handler {
 		var b struct {
 			Folder, Path, Password string
 			Days                   int
+			NewLink                bool `json:"newLink"` // make one even if the item has a view link
 		}
 		if !readJSON(w, r, &b) {
 			return
 		}
-		link, err := e.ShareLink(b.Folder, b.Path, ShareOptions{Days: b.Days, Password: b.Password})
+		res, err := e.ShareLinkReuse(b.Folder, b.Path, ShareOptions{Days: b.Days, Password: b.Password}, b.NewLink)
+		if errors.Is(err, errPasswordRequired) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error(), "code": "password_required"})
+			return
+		}
 		if err != nil {
 			jsonErr(w, http.StatusBadRequest, err)
 			return
 		}
-		writeJSON(w, 200, map[string]any{"url": link})
+		writeJSON(w, 200, res)
+	})
+	// Shared Links: the page sends the ids it was shown; the server looks them up again.
+	mux.HandleFunc("GET /ui/api/links", func(w http.ResponseWriter, r *http.Request) {
+		l, err := e.SharedLinks()
+		if err != nil {
+			jsonErr(w, http.StatusConflict, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"links": l})
+	})
+	mux.HandleFunc("POST /ui/api/links/copy", func(w http.ResponseWriter, r *http.Request) {
+		var b struct{ Item, Perm string }
+		if !readJSON(w, r, &b) {
+			return
+		}
+		u, err := e.SharedLinkURL(b.Item, b.Perm)
+		if err != nil {
+			jsonErr(w, http.StatusConflict, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"url": u})
+	})
+	mux.HandleFunc("POST /ui/api/links/expiry", func(w http.ResponseWriter, r *http.Request) {
+		var b struct {
+			Item, Perm string
+			Days       int
+			Date       string
+		}
+		if !readJSON(w, r, &b) {
+			return
+		}
+		jsonOK(w, e.SharedLinkExpiry(b.Item, b.Perm, b.Days, b.Date))
+	})
+	mux.HandleFunc("POST /ui/api/links/remove", func(w http.ResponseWriter, r *http.Request) {
+		var b struct{ Item, Perm, URL string }
+		if !readJSON(w, r, &b) {
+			return
+		}
+		jsonOK(w, e.SharedLinkRemove(b.Item, b.Perm, b.URL))
 	})
 	mux.HandleFunc("GET /ui/api/versions", func(w http.ResponseWriter, r *http.Request) {
 		vs, err := e.FileVersions(r.URL.Query().Get("folder"), r.URL.Query().Get("path"))
@@ -745,6 +789,16 @@ func (e *Engine) serveOpen(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := openURL(base); err != nil {
+			jsonErr(w, http.StatusConflict, err)
+			return
+		}
+	case "item-web": // a file or folder in a kept folder, itself, in OpenCloud in the browser
+		u, err := e.ItemWebURL(b.Folder, b.Path)
+		if err != nil {
+			jsonErr(w, http.StatusConflict, err)
+			return
+		}
+		if err := openURL(u); err != nil {
 			jsonErr(w, http.StatusConflict, err)
 			return
 		}
