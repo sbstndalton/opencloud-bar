@@ -169,6 +169,9 @@ func (e *Engine) resetQuotaLocked(cfgs ...Config) {
 	e.quotaShown, e.quotaAt = nil, time.Time{}
 	e.quotaGen++
 	for _, c := range cfgs {
+		if c.StateDir == "" {
+			continue // never loaded: quotaWarnedFile would be a relative "quota-warned"
+		}
 		_ = os.Remove(quotaWarnedFile(c))
 	}
 }
@@ -182,20 +185,31 @@ func (e *Engine) quotaFailed(gen uint64) {
 	}
 }
 
+// Test hooks (nil otherwise): after checkQuota captured its config, and after applyQuotaFor
+// read the warned file.
+var afterQuotaConfig, afterQuotaRead func()
+
 // checkQuota reads the quota and warns when it crossed a level.
 func (e *Engine) checkQuota(gen uint64) {
 	cfg := e.config()
-	// Another account or server than the quota on hand is from: forget that one first.
-	if id := quotaIdentity(cfg); id != "" {
-		e.mu.Lock()
-		if e.quotaID != id {
-			e.quotaID = id
-			e.resetQuotaLocked(cfg)
-			e.quotaAt = time.Now() // this check is the one that was due
-			gen = e.quotaGen
-		}
-		e.mu.Unlock()
+	if afterQuotaConfig != nil {
+		afterQuotaConfig()
 	}
+	// Another account or server than the quota on hand is from: forget that one first. A
+	// reset since this check began (gen moved) means cfg may be the old server's: give up,
+	// the next check starts afresh.
+	e.mu.Lock()
+	if gen != e.quotaGen {
+		e.mu.Unlock()
+		return
+	}
+	if id := quotaIdentity(cfg); id != "" && e.quotaID != id {
+		e.quotaID = id
+		e.resetQuotaLocked(cfg)
+		e.quotaAt = time.Now() // this check is the one that was due
+		gen = e.quotaGen
+	}
+	e.mu.Unlock()
 	base, err := normalizeServerURL(cfg.ServerURL)
 	if err != nil {
 		e.quotaFailed(gen)
@@ -239,13 +253,24 @@ func (e *Engine) applyQuotaFor(gen uint64, cfg Config, q *quotaInfo, now time.Ti
 	file := quotaWarnedFile(cfg)
 	last := readQuotaWarned(file)
 	warn, remember := nextQuotaWarning(last, q)
+	if afterQuotaRead != nil {
+		afterQuotaRead()
+	}
+	// Write under the lock, and only if no reset came in since the generation check above.
+	e.mu.Lock()
+	if gen != e.quotaGen {
+		e.mu.Unlock()
+		return
+	}
 	if remember != last {
 		if err := writeQuotaWarned(file, remember); err != nil && warn > 0 {
+			e.mu.Unlock()
 			appLog("storage warning not given (it couldn't be remembered): %v", err)
 			e.notify()
 			return // don't risk repeating it every half hour
 		}
 	}
+	e.mu.Unlock()
 	if warn > 0 {
 		n := quotaNote(warn, *q)
 		e.logLine("storage warning: %s", quotaText(*q))

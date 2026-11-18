@@ -740,3 +740,64 @@ func TestFailedQuotaCheckIsRetriedSoon(t *testing.T) {
 	}
 	waitFor(t, func() bool { e.mu.Lock(); defer e.mu.Unlock(); return !e.quotaBusy })
 }
+
+func TestApplyQuotaDropsWriteAfterReset(t *testing.T) {
+	e, _, n := quotaRig(t)
+	file := quotaWarnedFile(e.config())
+	gen := e.quotaGenNow()
+	afterQuotaRead = func() {
+		e.mu.Lock()
+		e.resetQuotaLocked(e.cfg)
+		e.mu.Unlock()
+	}
+	defer func() { afterQuotaRead = nil }()
+	e.applyQuotaFor(gen, e.config(), &quotaInfo{Used: 95, Total: 100}, time.Now())
+	if exists(file) {
+		t.Error("a stale check wrote the warned level after a reset")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if n.Load() != 0 {
+		t.Errorf("a stale check warned (%d)", n.Load())
+	}
+}
+
+func TestCheckQuotaDropsFetchAfterReload(t *testing.T) {
+	e, oc, _ := quotaRig(t)
+	gen := e.quotaGenNow()
+	oc.mu.Lock()
+	before := len(oc.requests)
+	oc.mu.Unlock()
+	afterQuotaConfig = func() {
+		e.mu.Lock()
+		e.resetQuotaLocked(e.cfg)
+		e.mu.Unlock()
+	}
+	defer func() { afterQuotaConfig = nil }()
+	e.checkQuota(gen)
+	oc.mu.Lock()
+	after := len(oc.requests)
+	oc.mu.Unlock()
+	if after != before {
+		t.Errorf("fetched %d times under a stale generation", after-before)
+	}
+	if e.quotaGenNow() == gen {
+		t.Error("the hook did not reset")
+	}
+}
+
+func TestResetQuotaSkipsRemoveWithoutStateDir(t *testing.T) {
+	dir := t.TempDir()
+	old, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(old)
+	if err := os.WriteFile("quota-warned", []byte("90"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e := &Engine{}
+	e.resetQuotaLocked(Config{})
+	if !exists("quota-warned") {
+		t.Error("removed a relative quota-warned file for an empty StateDir")
+	}
+}
